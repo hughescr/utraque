@@ -1,0 +1,32 @@
+utraque
+Copyright 2026 Craig R. Hughes
+
+This product is licensed under the Apache License, Version 2.0 (the
+"License"); you may not use this file except in compliance with the
+License. You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+See the LICENSE.md file for the full text of the License.
+
+------------------------------------------------------------------------------
+
+Attributions
+
+This project's design was informed by, and in places ports ideas or
+approach from, the following prior work. None of their source code is
+vendored or copied into this repository; credit is given here because
+this project would not exist in its current form without the trail
+they blazed.
+
+  * RayBytes/ChatMock
+    https://github.com/RayBytes/ChatMock
+    License: MIT
+
+  * simonw/llm-openai-via-codex
+    https://github.com/simonw/llm-openai-via-codex
+    License: Apache License, Version 2.0
+
+  * openai/codex (codex-rs)
+    https://github.com/openai/codex
+    License: Apache License, Version 2.0
