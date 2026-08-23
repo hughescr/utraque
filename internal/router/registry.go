@@ -1,0 +1,287 @@
+// Package router resolves a client-supplied model string to a routing
+// Decision (Anthropic passthrough vs. Codex alias), and holds the
+// multi-tier alias registry that maps short Codex names to upstream slugs.
+package router
+
+import (
+	"regexp"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+)
+
+// CatalogEntry is the minimal shape router needs from a live model-catalog
+// entry. Phase 3's internal/codex/catalog will supply these; router itself
+// never fetches anything — LoadCatalog is the seam.
+type CatalogEntry struct {
+	Slug string
+}
+
+// slugOverride pins the parse result for a slug the grammar can't be
+// trusted to parse, per the plan's routing.alias_overrides config (Phase
+// 3/4). Set via Registry.SetOverride.
+type slugOverride struct {
+	Codename string
+	Version  string
+	Modifier string
+}
+
+// parsedSlug is the decomposition of one upstream model slug into the
+// pieces the alias tiers are built from.
+type parsedSlug struct {
+	Slug     string
+	Version  string
+	Codename string
+	Modifier string
+}
+
+// modifiers are trailing slug tokens that are size/variant modifiers, not
+// codenames (e.g. "mini"), so they never win a bare codename alias.
+var modifiers = map[string]bool{
+	"mini": true,
+}
+
+// slugPattern matches "gpt-<version>[-<tail>]" where <tail> is a single
+// trailing token (a codename or a modifier). Slugs with more than one
+// trailing token (e.g. "gpt-5.3-codex-spark") don't match this pattern and
+// must be resolved via an override instead.
+var slugPattern = regexp.MustCompile(`^gpt-(\d+(?:\.\d+)*)(?:-([a-z0-9]+))?$`)
+
+// parseSlug splits a raw slug into version/codename/modifier. Overrides are
+// consulted first since they exist specifically for slugs the regular
+// grammar parses wrong (or not at all).
+func parseSlug(slug string, overrides map[string]slugOverride) (parsedSlug, bool) {
+	lower := strings.ToLower(slug)
+	if ov, ok := overrides[lower]; ok {
+		return parsedSlug{Slug: lower, Version: ov.Version, Codename: ov.Codename, Modifier: ov.Modifier}, true
+	}
+	m := slugPattern.FindStringSubmatch(lower)
+	if m == nil {
+		return parsedSlug{}, false
+	}
+	version, tail := m[1], m[2]
+	p := parsedSlug{Slug: lower, Version: version}
+	if tail == "" {
+		return p, true
+	}
+	if modifiers[tail] {
+		p.Modifier = tail
+	} else {
+		p.Codename = tail
+	}
+	return p, true
+}
+
+// bareAlias is the alias key a parsed slug wants for the "bare" (rolling,
+// newest-wins) tier: the codename if it has one, else "<version>[-<modifier>]".
+func (p parsedSlug) bareAlias() string {
+	if p.Codename != "" {
+		return p.Codename
+	}
+	if p.Modifier != "" {
+		return p.Version + "-" + p.Modifier
+	}
+	return p.Version
+}
+
+// pinnedAlias is the alias key for the "pinned" tier: "<codename>-<version>".
+// Codename-less (version-only) slugs have no separate pinned form — their
+// bare alias already names the exact version.
+func (p parsedSlug) pinnedAlias() string {
+	if p.Codename == "" {
+		return ""
+	}
+	return p.Codename + "-" + p.Version
+}
+
+// Registry is the multi-tier alias table: raw slugs always resolve to
+// themselves; pinned aliases name one exact version; bare aliases float to
+// the newest version carrying that codename (or are the version itself, for
+// codename-less slugs). All three tiers point at the same upstream slugs.
+//
+// Seeded statically for Phase 1/2 via NewStaticRegistry; Phase 3
+// repopulates it from the live Codex catalog via LoadCatalog, using the
+// same tier-derivation logic so behaviour doesn't change when the source
+// does.
+type Registry struct {
+	mu        sync.RWMutex
+	raw       map[string]string
+	pinned    map[string]string
+	bare      map[string]string
+	bareVer   map[string]string // alias -> version currently held (for collisions)
+	overrides map[string]slugOverride
+}
+
+// NewRegistry returns an empty registry (no seed data, no overrides).
+// Exposed for tests and for callers that want to seed only from a catalog.
+func NewRegistry() *Registry {
+	return &Registry{
+		raw:       map[string]string{},
+		pinned:    map[string]string{},
+		bare:      map[string]string{},
+		bareVer:   map[string]string{},
+		overrides: map[string]slugOverride{},
+	}
+}
+
+// staticSlugs is the Phase 1/2 fallback catalog: the live slugs the plan
+// recorded from models_cache.json. Phase 3 replaces this *source*, not the
+// tiering logic, by calling LoadCatalog with live entries instead.
+var staticSlugs = []string{
+	"gpt-5.6-sol",
+	"gpt-5.6-terra",
+	"gpt-5.6-luna",
+	"gpt-5.5",
+	"gpt-5.4",
+	"gpt-5.4-mini",
+	"gpt-5.3-codex-spark",
+}
+
+// staticOverrides seeds the one irregular slug the grammar can't parse:
+// "gpt-5.3-codex-spark" has two trailing tokens ("codex", "spark"); the
+// codename is "spark", not "codex".
+var staticOverrides = map[string]slugOverride{
+	"gpt-5.3-codex-spark": {Codename: "spark", Version: "5.3"},
+}
+
+// NewStaticRegistry returns a Registry seeded from the Phase 1/2 static slug
+// table above. DefaultRegistry (in resolve.go) is one of these; Phase 3
+// swaps the source by calling LoadCatalog on it with live catalog entries.
+func NewStaticRegistry() *Registry {
+	r := NewRegistry()
+	for slug, ov := range staticOverrides {
+		r.overrides[slug] = ov
+	}
+	entries := make([]CatalogEntry, len(staticSlugs))
+	for i, s := range staticSlugs {
+		entries[i] = CatalogEntry{Slug: s}
+	}
+	r.LoadCatalog(entries)
+	return r
+}
+
+// SetOverride registers (or replaces) a config-driven alias override for a
+// slug the grammar parses wrong or not at all. This is the
+// routing.alias_overrides hook Phase 3/4's config loader will call. Call it
+// before LoadCatalog (or call LoadCatalog again afterward) so the override
+// takes effect — LoadCatalog re-derives every alias from scratch each call.
+func (r *Registry) SetOverride(slug string, codename, version, modifier string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.overrides[strings.ToLower(slug)] = slugOverride{Codename: codename, Version: version, Modifier: modifier}
+}
+
+// LoadCatalog replaces the registry's raw/pinned/bare tiers by re-deriving
+// aliases from the given slugs, applying whatever overrides are already
+// registered. This is the Phase 3 entry point: fetch the live Codex
+// catalog, map each model to a CatalogEntry, call LoadCatalog. A slug that
+// disappears from the catalog stops being routable (tiers are rebuilt from
+// scratch, not merged), which is the intended behaviour — router should
+// only route to models Codex currently serves.
+func (r *Registry) LoadCatalog(entries []CatalogEntry) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	raw := map[string]string{}
+	pinned := map[string]string{}
+	bare := map[string]string{}
+	bareVer := map[string]string{}
+
+	// Stable order so equal-version collisions resolve deterministically,
+	// independent of catalog iteration order.
+	sorted := make([]CatalogEntry, len(entries))
+	copy(sorted, entries)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Slug < sorted[j].Slug })
+
+	for _, e := range sorted {
+		slug := strings.ToLower(e.Slug)
+		raw[slug] = slug
+
+		p, ok := parseSlug(slug, r.overrides)
+		if !ok {
+			// Grammar can't place it and no override exists: still
+			// routable by raw slug, just no derived aliases. A future
+			// config override can add the missing shape.
+			continue
+		}
+
+		if pa := p.pinnedAlias(); pa != "" {
+			pinned[pa] = slug
+		}
+
+		ba := p.bareAlias()
+		// Collision rule: the newest version wins the bare (rolling) name;
+		// both versions keep their own pinned alias regardless.
+		if cur, exists := bareVer[ba]; !exists || versionLess(cur, p.Version) {
+			bare[ba] = slug
+			bareVer[ba] = p.Version
+		}
+	}
+
+	r.raw, r.pinned, r.bare, r.bareVer = raw, pinned, bare, bareVer
+}
+
+// versionLess compares dotted numeric versions ("5.6" vs "5.10") segment by
+// segment, numerically, so "5.10" ranks newer than "5.6". Malformed/
+// non-numeric segments fall back to a lexical compare — good enough for the
+// collision rule without a semver dependency (the module has none).
+func versionLess(a, b string) bool {
+	as, bs := strings.Split(a, "."), strings.Split(b, ".")
+	for i := 0; i < len(as) || i < len(bs); i++ {
+		var av, bv string
+		if i < len(as) {
+			av = as[i]
+		}
+		if i < len(bs) {
+			bv = bs[i]
+		}
+		an, aerr := strconv.Atoi(av)
+		bn, berr := strconv.Atoi(bv)
+		if aerr == nil && berr == nil {
+			if an != bn {
+				return an < bn
+			}
+			continue
+		}
+		if av != bv {
+			return av < bv
+		}
+	}
+	return false
+}
+
+// Resolve looks up name (expected already lowercased and effort-suffix-
+// stripped by the caller) against raw, then pinned, then bare tiers — raw
+// slugs are never shadowed by a derived alias, and a pinned exact version
+// always beats the rolling bare name.
+func (r *Registry) Resolve(name string) (upstream string, ok bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if u, ok := r.raw[name]; ok {
+		return u, true
+	}
+	if u, ok := r.pinned[name]; ok {
+		return u, true
+	}
+	if u, ok := r.bare[name]; ok {
+		return u, true
+	}
+	return "", false
+}
+
+// Families lists the known *bare* (rolling) route family names — e.g. "sol",
+// "spark", "5.4-mini" — sorted, for the unknown-model 404 message. Raw and
+// pinned keys are deliberately excluded to keep that message short; the
+// wildcard families (claude-*, anthropic-*, gpt-*) are prepended by the
+// caller in resolve.go, not here.
+func (r *Registry) Families() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]string, 0, len(r.bare))
+	for k := range r.bare {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
