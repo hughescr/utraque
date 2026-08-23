@@ -1,0 +1,20 @@
+{
+  "model": "gpt-5.6-sol",
+  "input": [
+    {
+      "type": "message",
+      "role": "user",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "What is in this image?"
+        }
+      ]
+    }
+  ],
+  "reasoning": {
+    "effort": "low"
+  },
+  "store": false,
+  "stream": true
+}

@@ -1,0 +1,52 @@
+{
+  "model": "gpt-5.6-sol",
+  "input": [
+    {
+      "type": "function_call",
+      "name": "screenshot",
+      "arguments": "{}",
+      "call_id": "toolu_A"
+    },
+    {
+      "type": "function_call",
+      "name": "screenshot",
+      "arguments": "{}",
+      "call_id": "toolu_B"
+    },
+    {
+      "type": "function_call_output",
+      "call_id": "toolu_A",
+      "output": "Shot A\n\n[1 image(s) provided in the following user message]"
+    },
+    {
+      "type": "message",
+      "role": "user",
+      "content": [
+        {
+          "type": "input_image",
+          "image_url": "data:image/png;base64,QQ=="
+        }
+      ]
+    },
+    {
+      "type": "function_call_output",
+      "call_id": "toolu_B",
+      "output": "Shot B\n\n[1 image(s) provided in the following user message]"
+    },
+    {
+      "type": "message",
+      "role": "user",
+      "content": [
+        {
+          "type": "input_image",
+          "image_url": "data:image/png;base64,Qg=="
+        }
+      ]
+    }
+  ],
+  "reasoning": {
+    "effort": "low"
+  },
+  "store": false,
+  "stream": true
+}

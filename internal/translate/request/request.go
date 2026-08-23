@@ -71,6 +71,13 @@ const (
 	DroppedThinking = "thinking"
 )
 
+// DroppedImageEmptyMediaType is the Metadata.DroppedImages reason recorded
+// when a base64 image block's media_type or data is empty. Emitting a data
+// URL in that case would produce a malformed "data:;base64,..." string that
+// vision backends reject, so the image is dropped instead of emitted and this
+// reason is recorded so the loss is visible to logging.
+const DroppedImageEmptyMediaType = "image: empty media_type or data"
+
 // Options tunes a translation. The zero value is valid: it uses
 // DefaultMutatingTools and takes effort/summary entirely from the routing
 // Decision and the catalog model.
@@ -133,6 +140,11 @@ type Metadata struct {
 	// function_call_output items (structural passthrough), but recorded here
 	// because they are a likely sign of a malformed history.
 	OrphanedToolResults []string
+	// DroppedImages records, one entry per image block that could not be
+	// safely rendered as a data URL (see DroppedImageEmptyMediaType), why it
+	// was dropped instead of emitted. The image itself is NOT emitted — this
+	// is the only trace that it existed in the request.
+	DroppedImages []string
 }
 
 // Translate converts an Anthropic Messages request into a Codex Responses
@@ -147,19 +159,21 @@ func Translate(req *aschema.MessagesRequest, dec router.Decision, model cschema.
 
 	var meta Metadata
 
+	instructions, systemDropped := joinSystem(req.System)
 	out := &cschema.ResponsesRequest{
 		Model:        dec.UpstreamModel,
-		Instructions: joinSystem(req.System),
+		Instructions: instructions,
 		Store:        false,
 		Stream:       true,
 	}
 
-	input, orphans, err := translateMessages(req.Messages)
+	input, orphans, droppedImages, err := translateMessages(req.Messages)
 	if err != nil {
 		return nil, Metadata{}, err
 	}
 	out.Input = input
 	meta.OrphanedToolResults = orphans
+	meta.DroppedImages = droppedImages
 
 	out.Tools = translateTools(req.Tools)
 	out.ToolChoice = translateToolChoice(req.ToolChoice)
@@ -178,24 +192,30 @@ func Translate(req *aschema.MessagesRequest, dec router.Decision, model cschema.
 	out.Reasoning, meta.Effort, meta.Summary = translateReasoning(dec, model, opts)
 
 	meta.Dropped = droppedParams(req)
+	meta.Dropped = append(meta.Dropped, systemDropped...)
 
 	return out, meta, nil
 }
 
 // joinSystem renders the system field into the Responses "instructions" string:
 // a scalar string passes through verbatim; an array joins its text blocks with
-// a blank line between them. Non-text system blocks (rare) are ignored.
-func joinSystem(system *aschema.Content) string {
+// a blank line between them. Non-text system blocks (rare) are dropped from
+// the joined string, but each drop is returned as a "system:<block_type>"
+// reason so the caller can fold it into Metadata.Dropped rather than lose it
+// silently.
+func joinSystem(system *aschema.Content) (instructions string, dropped []string) {
 	if system.IsEmpty() {
-		return ""
+		return "", nil
 	}
 	parts := make([]string, 0, len(system.Blocks))
 	for _, b := range system.Blocks {
 		if b.Type == aschema.BlockText {
 			parts = append(parts, b.Text)
+		} else {
+			dropped = append(dropped, "system:"+b.Type)
 		}
 	}
-	return strings.Join(parts, "\n\n")
+	return strings.Join(parts, "\n\n"), dropped
 }
 
 // translateMessages walks every message's content in order, flattening it into
@@ -204,7 +224,14 @@ func joinSystem(system *aschema.Content) string {
 // a function_call; a tool_result flushes and emits a function_call_output
 // (plus, when the result carries images, a following user message holding those
 // images). thinking/redacted_thinking history and cache_control are dropped.
-func translateMessages(messages []aschema.Message) (items []cschema.InputItem, orphans []string, err error) {
+//
+// LIMITATION: when a turn contains more than one image-bearing tool_result,
+// each result's function_call_output is immediately followed by its own
+// image-carrying user message, interleaving them (fco_A, imgA, fco_B, imgB)
+// rather than grouping all outputs before all images. This is pinned by the
+// two_image_tool_results golden fixture rather than changed, to avoid
+// reordering call_id/output linkage without a concrete need.
+func translateMessages(messages []aschema.Message) (items []cschema.InputItem, orphans []string, droppedImages []string, err error) {
 	seenCalls := map[string]bool{}
 
 	for mi := range messages {
@@ -233,9 +260,13 @@ func translateMessages(messages []aschema.Message) (items []cschema.InputItem, o
 				pending = append(pending, cschema.InputText(blk.Text))
 
 			case aschema.BlockImage:
-				url, ierr := imageURL(blk.Source)
+				url, drop, ierr := imageURL(blk.Source)
 				if ierr != nil {
-					return nil, nil, ierr
+					return nil, nil, nil, ierr
+				}
+				if drop {
+					droppedImages = append(droppedImages, DroppedImageEmptyMediaType)
+					continue
 				}
 				pending = append(pending, cschema.InputImage(url))
 
@@ -243,7 +274,7 @@ func translateMessages(messages []aschema.Message) (items []cschema.InputItem, o
 				flush()
 				args, aerr := toolArguments(blk.Input)
 				if aerr != nil {
-					return nil, nil, aerr
+					return nil, nil, nil, aerr
 				}
 				seenCalls[blk.ID] = true
 				items = append(items, cschema.FunctionCall(blk.ID, blk.Name, args))
@@ -253,10 +284,11 @@ func translateMessages(messages []aschema.Message) (items []cschema.InputItem, o
 				if !seenCalls[blk.ToolUseID] {
 					orphans = append(orphans, blk.ToolUseID)
 				}
-				text, images, terr := flattenToolResult(blk.Content)
+				text, images, imgDropped, terr := flattenToolResult(blk.Content)
 				if terr != nil {
-					return nil, nil, terr
+					return nil, nil, nil, terr
 				}
+				droppedImages = append(droppedImages, imgDropped...)
 				if blk.IsError {
 					// A Responses function_call_output has no is_error field, so
 					// the failure signal is preserved as an explicit text marker.
@@ -270,6 +302,8 @@ func translateMessages(messages []aschema.Message) (items []cschema.InputItem, o
 				if len(images) > 0 {
 					// Images can't ride inside a function_call_output, so they
 					// follow as a user message referenced by the placeholder.
+					// See the LIMITATION note on this function's doc comment for
+					// the interleaving this produces across multiple results.
 					items = append(items, cschema.MessageItem(aschema.RoleUser, images...))
 				}
 
@@ -287,24 +321,32 @@ func translateMessages(messages []aschema.Message) (items []cschema.InputItem, o
 		flush()
 	}
 
-	return items, orphans, nil
+	return items, orphans, droppedImages, nil
 }
 
 // imageURL renders an Anthropic image source as a Responses input_image URL: a
-// base64 source becomes a data URL; a url source passes through unchanged.
-func imageURL(src *aschema.Source) (string, error) {
+// base64 source becomes a data URL; a url source passes through unchanged. drop
+// reports that the source could not be safely rendered — currently, a base64
+// source with an empty media_type or empty data, which would otherwise
+// produce a malformed "data:;base64,..." URL that vision backends reject. The
+// caller must skip emitting the image in that case and record the loss
+// instead of treating it as a translation error.
+func imageURL(src *aschema.Source) (url string, drop bool, err error) {
 	if src == nil {
-		return "", fmt.Errorf("translate: image block has no source")
+		return "", false, fmt.Errorf("translate: image block has no source")
 	}
 	switch src.Type {
 	case "url":
-		return src.URL, nil
+		return src.URL, false, nil
 	case "base64", "":
 		// Anthropic's inline image source is base64; an empty type is treated
 		// as base64 for tolerance.
-		return "data:" + src.MediaType + ";base64," + src.Data, nil
+		if src.MediaType == "" || src.Data == "" {
+			return "", true, nil
+		}
+		return "data:" + src.MediaType + ";base64," + src.Data, false, nil
 	default:
-		return "", fmt.Errorf("translate: unsupported image source type %q", src.Type)
+		return "", false, fmt.Errorf("translate: unsupported image source type %q", src.Type)
 	}
 }
 
@@ -326,9 +368,11 @@ func toolArguments(input json.RawMessage) (string, error) {
 // flattenToolResult reduces a tool_result's content into a single text string
 // plus any image parts it carried. A scalar-string content is its text; an
 // array concatenates text blocks (blank-line separated) and collects images.
-func flattenToolResult(content *aschema.Content) (text string, images []cschema.ContentPart, err error) {
+// dropped records a reason (see DroppedImageEmptyMediaType) for each image
+// that was dropped rather than emitted.
+func flattenToolResult(content *aschema.Content) (text string, images []cschema.ContentPart, dropped []string, err error) {
 	if content.IsEmpty() {
-		return "", nil, nil
+		return "", nil, nil, nil
 	}
 	var texts []string
 	for _, b := range content.Blocks {
@@ -336,16 +380,20 @@ func flattenToolResult(content *aschema.Content) (text string, images []cschema.
 		case aschema.BlockText:
 			texts = append(texts, b.Text)
 		case aschema.BlockImage:
-			url, ierr := imageURL(b.Source)
+			url, drop, ierr := imageURL(b.Source)
 			if ierr != nil {
-				return "", nil, ierr
+				return "", nil, nil, ierr
+			}
+			if drop {
+				dropped = append(dropped, DroppedImageEmptyMediaType)
+				continue
 			}
 			images = append(images, cschema.InputImage(url))
 		default:
 			// Other block types in a tool_result are ignored.
 		}
 	}
-	return strings.Join(texts, "\n\n"), images, nil
+	return strings.Join(texts, "\n\n"), images, dropped, nil
 }
 
 // ToolErrorMarker prefixes the flattened text of a tool_result whose is_error

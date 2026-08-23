@@ -1,0 +1,20 @@
+{
+  "model": "sol",
+  "max_tokens": 1024,
+  "messages": [
+    { "role": "assistant", "content": [
+      { "type": "tool_use", "id": "toolu_A", "name": "screenshot", "input": {} },
+      { "type": "tool_use", "id": "toolu_B", "name": "screenshot", "input": {} }
+    ] },
+    { "role": "user", "content": [
+      { "type": "tool_result", "tool_use_id": "toolu_A", "content": [
+        { "type": "text", "text": "Shot A" },
+        { "type": "image", "source": { "type": "base64", "media_type": "image/png", "data": "QQ==" } }
+      ] },
+      { "type": "tool_result", "tool_use_id": "toolu_B", "content": [
+        { "type": "text", "text": "Shot B" },
+        { "type": "image", "source": { "type": "base64", "media_type": "image/png", "data": "Qg==" } }
+      ] }
+    ] }
+  ]
+}

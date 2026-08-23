@@ -1,0 +1,21 @@
+{
+  "model": "gpt-5.6-sol",
+  "instructions": "Be helpful.",
+  "input": [
+    {
+      "type": "message",
+      "role": "user",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "Hi"
+        }
+      ]
+    }
+  ],
+  "reasoning": {
+    "effort": "low"
+  },
+  "store": false,
+  "stream": true
+}

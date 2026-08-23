@@ -603,6 +603,62 @@ func TestThinkingRecordedDropped(t *testing.T) {
 	}
 }
 
+// TestDroppedImageEmptyMediaType confirms a base64 image block with an empty
+// media_type is dropped rather than emitted as a malformed
+// "data:;base64,..." URL, and that the drop is recorded in Metadata so it
+// stays visible to logging.
+func TestDroppedImageEmptyMediaType(t *testing.T) {
+	raw := readFixture(t, "image_base64_no_media_type")
+	var req aschema.MessagesRequest
+	if err := json.Unmarshal(raw, &req); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	out, meta, err := request.Translate(&req, defaultCase().dec, defaultCase().model, request.Options{})
+	if err != nil {
+		t.Fatalf("translate: %v", err)
+	}
+	if want := []string{request.DroppedImageEmptyMediaType}; !reflect.DeepEqual(meta.DroppedImages, want) {
+		t.Errorf("DroppedImages = %v, want %v", meta.DroppedImages, want)
+	}
+	b, err := json.Marshal(out)
+	if err != nil {
+		t.Fatalf("marshal output: %v", err)
+	}
+	if strings.Contains(string(b), "data:;base64,") {
+		t.Errorf("output contains a malformed data URL: %s", b)
+	}
+	if strings.Contains(string(b), "input_image") {
+		t.Errorf("output still emits the dropped image: %s", b)
+	}
+}
+
+// TestSystemNonTextBlockDropped confirms a non-text system block is dropped
+// from the joined instructions but recorded in Metadata.Dropped so the loss
+// is observable to a later logging layer.
+func TestSystemNonTextBlockDropped(t *testing.T) {
+	raw := readFixture(t, "system_non_text_block")
+	var req aschema.MessagesRequest
+	if err := json.Unmarshal(raw, &req); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	out, meta, err := request.Translate(&req, defaultCase().dec, defaultCase().model, request.Options{})
+	if err != nil {
+		t.Fatalf("translate: %v", err)
+	}
+	if out.Instructions != "Be helpful." {
+		t.Errorf("instructions = %q, want %q", out.Instructions, "Be helpful.")
+	}
+	found := false
+	for _, d := range meta.Dropped {
+		if d == "system:image" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("Dropped = %v, want it to include %q", meta.Dropped, "system:image")
+	}
+}
+
 func readFixture(t *testing.T, name string) []byte {
 	t.Helper()
 	raw, err := os.ReadFile(filepath.Join(requestsDir, name+".anthropic.json"))

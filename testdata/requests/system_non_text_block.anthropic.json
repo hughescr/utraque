@@ -1,0 +1,11 @@
+{
+  "model": "sol",
+  "max_tokens": 1024,
+  "system": [
+    { "type": "text", "text": "Be helpful." },
+    { "type": "image", "source": { "type": "base64", "media_type": "image/png", "data": "iVBORw0KGgo=" } }
+  ],
+  "messages": [
+    { "role": "user", "content": [ { "type": "text", "text": "Hi" } ] }
+  ]
+}
