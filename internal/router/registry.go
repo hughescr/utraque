@@ -14,8 +14,17 @@ import (
 // CatalogEntry is the minimal shape router needs from a live model-catalog
 // entry. Phase 3's internal/codex/catalog will supply these; router itself
 // never fetches anything — LoadCatalog is the seam.
+//
+// Priority is the catalog's own ordering hint for the model. It only ever
+// matters as the tiebreaker in the bare-alias collision rule: when two slugs
+// carry the same codename *and* the same version, the higher Priority wins
+// the rolling bare name. When versions differ, the newer version wins outright
+// and Priority is irrelevant. A zero Priority (the default) is fine — it just
+// means "no preference", and equal-version/equal-priority ties fall to the
+// deterministic slug order LoadCatalog already imposes.
 type CatalogEntry struct {
-	Slug string
+	Slug     string
+	Priority int
 }
 
 // slugOverride pins the parse result for a slug the grammar can't be
@@ -109,8 +118,14 @@ type Registry struct {
 	raw       map[string]string
 	pinned    map[string]string
 	bare      map[string]string
-	bareVer   map[string]string // alias -> version currently held (for collisions)
 	overrides map[string]slugOverride
+}
+
+// bareHold records which (version, priority) currently owns a bare alias, so
+// the collision rule can decide whether a later slug outranks the incumbent.
+type bareHold struct {
+	version  string
+	priority int
 }
 
 // NewRegistry returns an empty registry (no seed data, no overrides).
@@ -120,7 +135,6 @@ func NewRegistry() *Registry {
 		raw:       map[string]string{},
 		pinned:    map[string]string{},
 		bare:      map[string]string{},
-		bareVer:   map[string]string{},
 		overrides: map[string]slugOverride{},
 	}
 }
@@ -186,10 +200,10 @@ func (r *Registry) LoadCatalog(entries []CatalogEntry) {
 	raw := map[string]string{}
 	pinned := map[string]string{}
 	bare := map[string]string{}
-	bareVer := map[string]string{}
+	held := map[string]bareHold{} // alias -> (version, priority) currently held
 
-	// Stable order so equal-version collisions resolve deterministically,
-	// independent of catalog iteration order.
+	// Stable order so equal-version/equal-priority collisions resolve
+	// deterministically, independent of catalog iteration order.
 	sorted := make([]CatalogEntry, len(entries))
 	copy(sorted, entries)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Slug < sorted[j].Slug })
@@ -211,22 +225,41 @@ func (r *Registry) LoadCatalog(entries []CatalogEntry) {
 		}
 
 		ba := p.bareAlias()
-		// Collision rule: the newest version wins the bare (rolling) name;
-		// both versions keep their own pinned alias regardless.
-		if cur, exists := bareVer[ba]; !exists || versionLess(cur, p.Version) {
+		// Collision rule: the newest (version, priority) wins the bare
+		// (rolling) name; both versions keep their own pinned alias
+		// regardless. Version dominates; priority only breaks a same-version
+		// tie.
+		cand := bareHold{version: p.Version, priority: e.Priority}
+		if cur, exists := held[ba]; !exists || bareOutranks(cand, cur) {
 			bare[ba] = slug
-			bareVer[ba] = p.Version
+			held[ba] = cand
 		}
 	}
 
-	r.raw, r.pinned, r.bare, r.bareVer = raw, pinned, bare, bareVer
+	r.raw, r.pinned, r.bare = raw, pinned, bare
 }
 
-// versionLess compares dotted numeric versions ("5.6" vs "5.10") segment by
-// segment, numerically, so "5.10" ranks newer than "5.6". Malformed/
-// non-numeric segments fall back to a lexical compare — good enough for the
-// collision rule without a semver dependency (the module has none).
-func versionLess(a, b string) bool {
+// bareOutranks reports whether candidate should take the bare alias from the
+// incumbent: a newer version wins outright; an equal version defers to the
+// higher priority. Equal on both keeps the incumbent (LoadCatalog's stable
+// slug sort makes that deterministic).
+func bareOutranks(candidate, incumbent bareHold) bool {
+	switch versionCmp(candidate.version, incumbent.version) {
+	case 1:
+		return true
+	case -1:
+		return false
+	default:
+		return candidate.priority > incumbent.priority
+	}
+}
+
+// versionCmp compares dotted numeric versions ("5.6" vs "5.10") segment by
+// segment, numerically, so "5.10" ranks newer than "5.6". It returns -1, 0, or
+// 1. Malformed/non-numeric segments fall back to a lexical compare — good
+// enough for the collision rule without a semver dependency (the module has
+// none).
+func versionCmp(a, b string) int {
 	as, bs := strings.Split(a, "."), strings.Split(b, ".")
 	for i := 0; i < len(as) || i < len(bs); i++ {
 		var av, bv string
@@ -239,16 +272,22 @@ func versionLess(a, b string) bool {
 		an, aerr := strconv.Atoi(av)
 		bn, berr := strconv.Atoi(bv)
 		if aerr == nil && berr == nil {
-			if an != bn {
-				return an < bn
+			switch {
+			case an < bn:
+				return -1
+			case an > bn:
+				return 1
 			}
 			continue
 		}
-		if av != bv {
-			return av < bv
+		switch {
+		case av < bv:
+			return -1
+		case av > bv:
+			return 1
 		}
 	}
-	return false
+	return 0
 }
 
 // Resolve looks up name (expected already lowercased and effort-suffix-

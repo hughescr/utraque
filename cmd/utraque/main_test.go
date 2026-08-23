@@ -3,12 +3,15 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -557,5 +560,146 @@ func TestLocalTokenIsNotForwardedThroughTheFrontDoor(t *testing.T) {
 func TestIdleSelfExitIsOffByDefault(t *testing.T) {
 	if d := config.Default().Idle.Timeout; d != 0 {
 		t.Errorf("default idle timeout = %s, want 0 until socket activation lands", d)
+	}
+}
+
+// jwtWithExp builds an unsigned JWT whose payload carries the given exp claim.
+// Only the payload segment matters to utraque's expiry decode (no signature is
+// verified), so a placeholder header and signature are fine.
+func jwtWithExp(exp time.Time) string {
+	payload := fmt.Sprintf(`{"exp":%d}`, exp.Unix())
+	enc := base64.RawURLEncoding.EncodeToString
+	return enc([]byte(`{"alg":"none"}`)) + "." + enc([]byte(payload)) + ".sig"
+}
+
+// TestHealthzReportsCodexAuthAndCatalog drives /healthz through main's real
+// wiring with a fake Codex auth.json and a pre-populated (non-CLI) catalog
+// cache, and asserts the codex_auth and codex_catalog fields reflect the real
+// state without ever revealing a token or touching the network.
+func TestHealthzReportsCodexAuthAndCatalog(t *testing.T) {
+	dir := t.TempDir()
+
+	// A fake auth.json whose access token (a JWT) expires comfortably in the
+	// future, so the reported state is "ok" and expires_in_s is a positive whole
+	// number. The JWT string is the secret we assert never leaks into /healthz.
+	accessToken := jwtWithExp(time.Now().Add(2 * time.Hour))
+	authPath := filepath.Join(dir, "auth.json")
+	authBody := fmt.Sprintf(`{"tokens":{"account_id":"acct-123","access_token":%q,"refresh_token":"r"}}`,
+		accessToken)
+	if err := os.WriteFile(authPath, []byte(authBody), 0o600); err != nil {
+		t.Fatalf("write auth.json: %v", err)
+	}
+
+	// A catalog cache utraque owns (never the CLI's), holding two models and a
+	// recent fetch time so a snapshot reports a non-zero count and a small age.
+	cachePath := filepath.Join(dir, "utraque", "models_cache.json")
+	if err := os.MkdirAll(filepath.Dir(cachePath), 0o755); err != nil {
+		t.Fatalf("mkdir cache: %v", err)
+	}
+	cacheBody := fmt.Sprintf(`{"fetched_at":%q,"models":[`+
+		`{"slug":"gpt-5.6-sol","visibility":"list"},`+
+		`{"slug":"gpt-5.5","visibility":"list"}]}`,
+		time.Now().Add(-30*time.Second).Format(time.RFC3339))
+	if err := os.WriteFile(cachePath, []byte(cacheBody), 0o600); err != nil {
+		t.Fatalf("write cache: %v", err)
+	}
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("upstream must not be contacted for /healthz")
+	}))
+	defer upstream.Close()
+
+	cfg := config.Default()
+	cfg.Anthropic.BaseURL = upstream.URL
+	cfg.Codex.AuthFile = authPath
+	cfg.Codex.CachePath = cachePath
+
+	srv, err := newServer(cfg, slog.New(slog.DiscardHandler), nil)
+	if err != nil {
+		t.Fatalf("newServer: %v", err)
+	}
+	front := httptest.NewServer(srv)
+	defer front.Close()
+
+	resp, err := noRedirectClient().Get(front.URL + server.HealthPath)
+	if err != nil {
+		t.Fatalf("get healthz: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+
+	if bytes.Contains(body, []byte(accessToken)) {
+		t.Fatalf("healthz body leaked the access token: %s", body)
+	}
+
+	var health struct {
+		Status    string `json:"status"`
+		CodexAuth struct {
+			Status    string `json:"status"`
+			ExpiresIn int64  `json:"expires_in_s"`
+		} `json:"codex_auth"`
+		CodexCatalog struct {
+			Models int      `json:"models"`
+			AgeS   *float64 `json:"age_s"`
+		} `json:"codex_catalog"`
+	}
+	if err := json.Unmarshal(body, &health); err != nil {
+		t.Fatalf("decode health %q: %v", body, err)
+	}
+
+	if health.Status != server.StatusOK {
+		t.Errorf("status = %q, want %q", health.Status, server.StatusOK)
+	}
+	if health.CodexAuth.Status != "ok" {
+		t.Errorf("codex_auth.status = %q, want ok", health.CodexAuth.Status)
+	}
+	if health.CodexAuth.ExpiresIn <= 0 {
+		t.Errorf("codex_auth.expires_in_s = %d, want a positive whole number", health.CodexAuth.ExpiresIn)
+	}
+	if health.CodexCatalog.Models != 2 {
+		t.Errorf("codex_catalog.models = %d, want 2", health.CodexCatalog.Models)
+	}
+	if health.CodexCatalog.AgeS == nil || *health.CodexCatalog.AgeS < 0 {
+		t.Errorf("codex_catalog.age_s = %v, want a non-negative age", health.CodexCatalog.AgeS)
+	}
+}
+
+// TestHealthzReportsMissingCodexAuthWithoutAuthFile asserts that with no
+// credential file configured (a bare config.Default, as tests use), /healthz
+// reports codex auth "missing" and a zero-model catalog rather than erroring.
+func TestHealthzReportsMissingCodexAuthWithoutAuthFile(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("upstream must not be contacted for /healthz")
+	}))
+	defer upstream.Close()
+
+	front := frontDoor(t, upstream.URL) // config.Default: AuthFile and CachePath empty
+
+	resp, err := noRedirectClient().Get(front.URL + server.HealthPath)
+	if err != nil {
+		t.Fatalf("get healthz: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var health struct {
+		CodexAuth struct {
+			Status    string `json:"status"`
+			ExpiresIn *int64 `json:"expires_in_s"`
+		} `json:"codex_auth"`
+		CodexCatalog struct {
+			Models int `json:"models"`
+		} `json:"codex_catalog"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&health); err != nil {
+		t.Fatalf("decode health: %v", err)
+	}
+	if health.CodexAuth.Status != "missing" {
+		t.Errorf("codex_auth.status = %q, want missing", health.CodexAuth.Status)
+	}
+	if health.CodexAuth.ExpiresIn != nil {
+		t.Errorf("codex_auth.expires_in_s = %v, want omitted when missing", *health.CodexAuth.ExpiresIn)
+	}
+	if health.CodexCatalog.Models != 0 {
+		t.Errorf("codex_catalog.models = %d, want 0", health.CodexCatalog.Models)
 	}
 }

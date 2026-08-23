@@ -12,12 +12,16 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/hughescr/utraque/internal/anthropic"
 	"github.com/hughescr/utraque/internal/apierr"
+	"github.com/hughescr/utraque/internal/codex/auth"
+	"github.com/hughescr/utraque/internal/codex/catalog"
 	"github.com/hughescr/utraque/internal/config"
 	"github.com/hughescr/utraque/internal/idle"
 	"github.com/hughescr/utraque/internal/obs"
@@ -105,13 +109,54 @@ func newServer(cfg config.Config, log *slog.Logger, activity server.ActivityTrac
 		return nil, err
 	}
 
+	// Codex auth + catalog. The auth source is only built when a credential
+	// file path is configured. LoadFrom always resolves one; a bare
+	// config.Default() (used by tests) leaves it empty, in which case the codex
+	// leg has no credential and /healthz reports auth "missing" — rather than
+	// New failing at construction on auth.ErrNoPath.
+	var credSource *auth.Source
+	if cfg.Codex.AuthFile != "" {
+		credSource, err = auth.New(auth.Options{
+			Path:        cfg.Codex.AuthFile,
+			TokenURL:    cfg.Codex.TokenURL,
+			ClientID:    cfg.Codex.ClientID,
+			RefreshSkew: cfg.Codex.RefreshSkew,
+			LockTimeout: cfg.Codex.LockTimeout,
+			Logger:      log,
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	// The catalog client is always built; an empty CachePath just makes it
+	// memory-only. It performs no network or disk I/O until first used, and
+	// /healthz only ever reads its held snapshot (never triggering a fetch).
+	cat := catalog.New(catalog.Options{
+		CachePath:     cfg.Codex.CachePath,
+		ClientVersion: version,
+		Logger:        log,
+	})
+
 	d := &dispatcher{anthropic: passthrough}
+	// Only assign the interface field from a non-nil concrete source: a nil
+	// *auth.Source stored in the interface would be a non-nil interface value,
+	// defeating the nil check in dispatch.
+	if credSource != nil {
+		d.codexCred = credSource
+	}
+
+	hr := &healthReporter{cat: cat}
+	if credSource != nil {
+		hr.auth = credSource
+	}
 
 	return server.New(server.Options{
-		Config:   cfg,
-		Logger:   log,
-		Version:  version,
-		Activity: activity,
+		Config:      cfg,
+		Logger:      log,
+		Version:     version,
+		Activity:    activity,
+		HealthExtra: hr.extra,
 		Routes: server.Routes{
 			Messages:    http.HandlerFunc(d.messages),
 			CountTokens: http.HandlerFunc(d.countTokens),
@@ -123,13 +168,61 @@ func newServer(cfg config.Config, log *slog.Logger, activity server.ActivityTrac
 	})
 }
 
+// healthReporter contributes the codex auth and catalog fields to /healthz. It
+// reads only cached/local state — a token-expiry decode from a file stat and
+// the catalog's held snapshot — so a health poll never contacts the network and
+// never reveals a token value.
+type healthReporter struct {
+	auth *auth.Source    // nil when no credential file is configured
+	cat  *catalog.Client // always set
+}
+
+func (h *healthReporter) extra(context.Context) map[string]any {
+	codex := map[string]any{"status": auth.StateMissing}
+	if h.auth != nil {
+		st := h.auth.Peek()
+		codex["status"] = st.State
+		if st.HasExpiry {
+			// Whole seconds; may be negative for an already-expired token. The
+			// token value itself is never included.
+			codex["expires_in_s"] = int64(st.ExpiresIn / time.Second)
+		}
+	}
+
+	catInfo := map[string]any{"models": 0}
+	if h.cat != nil {
+		n, age, loaded := h.cat.Snapshot()
+		catInfo["models"] = n
+		if loaded {
+			catInfo["age_s"] = roundSeconds(age.Seconds())
+		}
+	}
+
+	return map[string]any{
+		"codex_auth":    codex,
+		"codex_catalog": catInfo,
+	}
+}
+
+// roundSeconds keeps a duration-in-seconds to millisecond precision so the
+// health JSON stays short.
+func roundSeconds(s float64) float64 { return math.Round(s*1000) / 1000 }
+
 // dispatcher reads the request body once, peeks the two fields that decide
 // routing, and hands the whole thing to the leg the router picked.
 type dispatcher struct {
 	anthropic router.Leg
 
-	// codex is nil until the Codex leg lands; nil means "answer the 503 stub".
+	// codex is nil until the Codex inference leg lands; nil means "answer the
+	// 503 stub".
 	codex router.Leg
+
+	// codexCred is the Codex credential source. It is wired now (phases 2-3)
+	// even though the inference leg is not: a codex-routed request obtains a
+	// credential through it to prove the auth leg is live, then still answers
+	// the 503 stub because translation/streaming lands in phases 4-5. Nil when
+	// no credential file is configured.
+	codexCred auth.CredentialSource
 }
 
 // peeked is the minimal shape the dispatcher needs out of a Messages or
@@ -201,6 +294,12 @@ func (d *dispatcher) dispatch(w http.ResponseWriter, r *http.Request, call legCa
 		}
 	case router.BackendCodex:
 		if d.codex == nil {
+			// The inference leg is not built yet. Do NOT exercise the credential
+			// here: Get can trigger a network refresh and rewrite the shared
+			// auth.json, and doing that as a side effect of a request that can
+			// only 503 spends a token rotation (and risks a write-back race with
+			// the Codex CLI) for no served response. The credential source stays
+			// wired for phases 4-5, where a real codex request will consume it.
 			_ = apierr.Write(w, codexNotImplemented(dec))
 			return
 		}
