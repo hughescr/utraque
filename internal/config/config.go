@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -34,6 +35,28 @@ const (
 	DefaultLogLevel    = "info"
 	DefaultLogFormat   = "json"
 
+	// Codex auth-leg defaults. The auth file is resolved from the environment
+	// (see resolveCodexAuthFile) rather than being a fixed string, so it has no
+	// Default* constant. ClientID is OpenAI's public Codex CLI OAuth client id,
+	// not a secret.
+	DefaultCodexTokenURL    = "https://auth.openai.com/oauth/token"
+	DefaultCodexClientID    = "app_EMoamEEZ73f0CkXaXp7hrann"
+	DefaultCodexRefreshSkew = 120 * time.Second
+	DefaultCodexLockTimeout = 10 * time.Second
+
+	// CodexDirName / CodexAuthFileName build the default {~/.codex}/auth.json
+	// path. CODEX_HOME (the Codex CLI's own variable, unprefixed) overrides the
+	// directory; UTRAQUE_CODEX_AUTH_FILE overrides the whole path.
+	CodexDirName      = ".codex"
+	CodexAuthFileName = "auth.json"
+
+	// CodexCacheDirName / CodexCacheFileName build utraque's OWN catalog cache
+	// path under the user cache directory. It is deliberately NOT the Codex
+	// CLI's models_cache.json: utraque keeps its own file and never overwrites
+	// the CLI's. UTRAQUE_CODEX_CACHE_FILE overrides the whole path.
+	CodexCacheDirName  = "utraque"
+	CodexCacheFileName = "models_cache.json"
+
 	EnvPrefix = "UTRAQUE_"
 )
 
@@ -47,6 +70,17 @@ const (
 	EnvIdleTimeout         = EnvPrefix + "IDLE_TIMEOUT"
 	EnvLogLevel            = EnvPrefix + "LOG_LEVEL"
 	EnvLogFormat           = EnvPrefix + "LOG_FORMAT"
+
+	EnvCodexAuthFile    = EnvPrefix + "CODEX_AUTH_FILE"
+	EnvCodexCacheFile   = EnvPrefix + "CODEX_CACHE_FILE"
+	EnvCodexTokenURL    = EnvPrefix + "CODEX_TOKEN_URL"
+	EnvCodexRefreshSkew = EnvPrefix + "CODEX_REFRESH_SKEW"
+	EnvCodexLockTimeout = EnvPrefix + "CODEX_LOCK_TIMEOUT"
+
+	// EnvCodexHome is the Codex CLI's own variable and is deliberately not
+	// UTRAQUE_-prefixed: pointing utraque at the same CODEX_HOME the CLI uses
+	// keeps both reading the one auth.json.
+	EnvCodexHome = "CODEX_HOME"
 )
 
 // Limits bounds what a single request may cost us.
@@ -65,6 +99,34 @@ type Idle struct {
 	Timeout time.Duration // UTRAQUE_IDLE_TIMEOUT
 }
 
+// Codex configures the Codex (OpenAI) auth leg: where the credential file
+// lives, where refresh tokens are exchanged, and the timing knobs that govern
+// pre-emptive refresh and cross-process locking. None of these fields is a
+// secret — the tokens themselves live only in AuthFile on disk and are never
+// held in Config.
+type Codex struct {
+	// AuthFile is the absolute path to the Codex CLI credential file. It is
+	// resolved from UTRAQUE_CODEX_AUTH_FILE, else CODEX_HOME/auth.json, else
+	// ~/.codex/auth.json. Empty on a bare Default(); LoadFrom always fills it.
+	AuthFile string
+	// CachePath is utraque's OWN catalog cache file (never the Codex CLI's
+	// models_cache.json). Resolved from UTRAQUE_CODEX_CACHE_FILE, else a file
+	// under the user cache directory. Empty disables the on-disk cache (the
+	// catalog runs memory-only). Empty on a bare Default(); LoadFrom fills it
+	// when a user cache directory is available.
+	CachePath string
+	// TokenURL is the OAuth token endpoint used to exchange a refresh token.
+	TokenURL string
+	// ClientID is the public OAuth client id presented on refresh.
+	ClientID string
+	// RefreshSkew triggers a pre-emptive refresh once the access token is
+	// within this long of expiry.
+	RefreshSkew time.Duration
+	// LockTimeout bounds how long a refresh waits for the cross-process
+	// advisory file lock before giving up.
+	LockTimeout time.Duration
+}
+
 // Log configures the slog handler.
 type Log struct {
 	Level  string // UTRAQUE_LOG_LEVEL:  debug|info|warn|error
@@ -78,6 +140,7 @@ type Config struct {
 	LocalToken string // UTRAQUE_LOCAL_TOKEN (secret)
 	Limits     Limits
 	Anthropic  Anthropic
+	Codex      Codex
 	Idle       Idle
 	Log        Log
 }
@@ -96,8 +159,16 @@ func Default() Config {
 			UpstreamIdleTimeout: DefaultUpstreamIdleTimeout,
 		},
 		Anthropic: Anthropic{BaseURL: DefaultAnthropicBaseURL},
-		Idle:      Idle{Timeout: DefaultIdleTimeout},
-		Log:       Log{Level: DefaultLogLevel, Format: DefaultLogFormat},
+		Codex: Codex{
+			// AuthFile is intentionally empty here: a bare Default() performs no
+			// environment or filesystem lookups. LoadFrom resolves it.
+			TokenURL:    DefaultCodexTokenURL,
+			ClientID:    DefaultCodexClientID,
+			RefreshSkew: DefaultCodexRefreshSkew,
+			LockTimeout: DefaultCodexLockTimeout,
+		},
+		Idle: Idle{Timeout: DefaultIdleTimeout},
+		Log:  Log{Level: DefaultLogLevel, Format: DefaultLogFormat},
 	}
 }
 
@@ -121,8 +192,12 @@ func LoadFrom(getenv func(string) string) (Config, error) {
 	setString(EnvListen, &c.Listen)
 	setString(EnvLocalToken, &c.LocalToken)
 	setString(EnvAnthropicBaseURL, &c.Anthropic.BaseURL)
+	setString(EnvCodexTokenURL, &c.Codex.TokenURL)
 	setString(EnvLogLevel, &c.Log.Level)
 	setString(EnvLogFormat, &c.Log.Format)
+
+	c.Codex.AuthFile = resolveCodexAuthFile(getenv)
+	c.Codex.CachePath = resolveCodexCacheFile(getenv)
 
 	if v, ok := lookup(getenv, EnvMaxBodyBytes); ok {
 		n, err := strconv.ParseInt(v, 10, 64)
@@ -150,7 +225,14 @@ func LoadFrom(getenv func(string) string) (Config, error) {
 	if err := setDuration(EnvIdleTimeout, &c.Idle.Timeout); err != nil {
 		return Config{}, err
 	}
+	if err := setDuration(EnvCodexRefreshSkew, &c.Codex.RefreshSkew); err != nil {
+		return Config{}, err
+	}
+	if err := setDuration(EnvCodexLockTimeout, &c.Codex.LockTimeout); err != nil {
+		return Config{}, err
+	}
 
+	c.Codex.TokenURL = strings.TrimRight(strings.TrimSpace(c.Codex.TokenURL), "/")
 	c.Listen = strings.TrimSpace(c.Listen)
 	c.Log.Level = strings.ToLower(strings.TrimSpace(c.Log.Level))
 	c.Log.Format = strings.ToLower(strings.TrimSpace(c.Log.Format))
@@ -168,6 +250,62 @@ func lookup(getenv func(string) string, key string) (string, bool) {
 		return "", false
 	}
 	return v, true
+}
+
+// resolveCodexAuthFile picks the Codex credential path, most specific first:
+// UTRAQUE_CODEX_AUTH_FILE, else CODEX_HOME/auth.json, else ~/.codex/auth.json.
+// A leading "~/" is expanded against the resolved home directory. The result
+// is a path only; the file is neither opened nor required to exist here.
+func resolveCodexAuthFile(getenv func(string) string) string {
+	if v, ok := lookup(getenv, EnvCodexAuthFile); ok {
+		return expandHome(strings.TrimSpace(v), getenv)
+	}
+	if v, ok := lookup(getenv, EnvCodexHome); ok {
+		return filepath.Join(expandHome(strings.TrimSpace(v), getenv), CodexAuthFileName)
+	}
+	return filepath.Join(homeDir(getenv), CodexDirName, CodexAuthFileName)
+}
+
+// resolveCodexCacheFile picks utraque's own catalog cache path:
+// UTRAQUE_CODEX_CACHE_FILE if set (with "~/" expansion), else a file under the
+// OS user cache directory. When no cache directory can be determined the result
+// is empty, which the catalog treats as "memory only". This is never the Codex
+// CLI's models_cache.json.
+func resolveCodexCacheFile(getenv func(string) string) string {
+	if v, ok := lookup(getenv, EnvCodexCacheFile); ok {
+		return expandHome(strings.TrimSpace(v), getenv)
+	}
+	dir, err := os.UserCacheDir()
+	if err != nil || dir == "" {
+		return ""
+	}
+	return filepath.Join(dir, CodexCacheDirName, CodexCacheFileName)
+}
+
+// homeDir resolves the user's home directory, preferring an explicit HOME so
+// the result tracks the getenv passed to LoadFrom (and so tests can steer it),
+// and falling back to os.UserHomeDir.
+func homeDir(getenv func(string) string) string {
+	if h := strings.TrimSpace(getenv("HOME")); h != "" {
+		return h
+	}
+	if h, err := os.UserHomeDir(); err == nil {
+		return h
+	}
+	return ""
+}
+
+// expandHome rewrites a leading "~" or "~/" to the home directory. A bare path
+// is returned unchanged.
+func expandHome(p string, getenv func(string) string) string {
+	switch {
+	case p == "~":
+		return homeDir(getenv)
+	case strings.HasPrefix(p, "~/"):
+		return filepath.Join(homeDir(getenv), p[2:])
+	default:
+		return p
+	}
 }
 
 // Validate reports the first configuration problem, if any. It rejects a
@@ -231,6 +369,41 @@ func (c Config) Validate() error {
 		return fmt.Errorf("config: %s must not contain a fragment", EnvAnthropicBaseURL)
 	}
 
+	if c.Codex.RefreshSkew < 0 {
+		return fmt.Errorf("config: %s must not be negative, got %s", EnvCodexRefreshSkew, c.Codex.RefreshSkew)
+	}
+	if c.Codex.LockTimeout <= 0 {
+		return fmt.Errorf("config: %s must be positive, got %s", EnvCodexLockTimeout, c.Codex.LockTimeout)
+	}
+	if c.Codex.ClientID == "" {
+		return fmt.Errorf("config: codex client id must not be empty")
+	}
+	// The token URL must be a plain https/http endpoint with no embedded
+	// credentials — same rule as the Anthropic base URL, since a misconfigured
+	// value is printed to stderr on failure.
+	if c.Codex.TokenURL == "" {
+		return fmt.Errorf("config: %s must not be empty", EnvCodexTokenURL)
+	}
+	tu, err := url.Parse(c.Codex.TokenURL)
+	if err != nil {
+		var ue *url.Error
+		if errors.As(err, &ue) {
+			return fmt.Errorf("config: %s is not a valid URL: %w", EnvCodexTokenURL, ue.Err)
+		}
+		return fmt.Errorf("config: %s is not a valid URL", EnvCodexTokenURL)
+	}
+	switch tu.Scheme {
+	case "http", "https":
+	default:
+		return fmt.Errorf("config: %s %q: scheme must be http or https", EnvCodexTokenURL, RedactURL(c.Codex.TokenURL))
+	}
+	if tu.Host == "" {
+		return fmt.Errorf("config: %s %q: missing host", EnvCodexTokenURL, RedactURL(c.Codex.TokenURL))
+	}
+	if tu.User != nil {
+		return fmt.Errorf("config: %s must not contain userinfo credentials", EnvCodexTokenURL)
+	}
+
 	switch c.Log.Level {
 	case "debug", "info", "warn", "error":
 	default:
@@ -270,6 +443,12 @@ func (c Config) String() string {
 	fmt.Fprintf(&b, " max_body_bytes=%d", c.Limits.MaxBodyBytes)
 	fmt.Fprintf(&b, " upstream_idle_timeout=%s", c.Limits.UpstreamIdleTimeout)
 	fmt.Fprintf(&b, " anthropic.base_url=%s", RedactURL(c.Anthropic.BaseURL))
+	fmt.Fprintf(&b, " codex.auth_file=%s", c.Codex.AuthFile)
+	fmt.Fprintf(&b, " codex.cache_file=%s", c.Codex.CachePath)
+	fmt.Fprintf(&b, " codex.token_url=%s", RedactURL(c.Codex.TokenURL))
+	fmt.Fprintf(&b, " codex.client_id=%s", c.Codex.ClientID)
+	fmt.Fprintf(&b, " codex.refresh_skew=%s", c.Codex.RefreshSkew)
+	fmt.Fprintf(&b, " codex.lock_timeout=%s", c.Codex.LockTimeout)
 	fmt.Fprintf(&b, " idle_timeout=%s", c.Idle.Timeout)
 	fmt.Fprintf(&b, " log.level=%s", c.Log.Level)
 	fmt.Fprintf(&b, " log.format=%s", c.Log.Format)
@@ -285,6 +464,12 @@ func (c Config) LogValue() slog.Value {
 		slog.Int64("max_body_bytes", c.Limits.MaxBodyBytes),
 		slog.Duration("upstream_idle_timeout", c.Limits.UpstreamIdleTimeout),
 		slog.String("anthropic.base_url", RedactURL(c.Anthropic.BaseURL)),
+		slog.String("codex.auth_file", c.Codex.AuthFile),
+		slog.String("codex.cache_file", c.Codex.CachePath),
+		slog.String("codex.token_url", RedactURL(c.Codex.TokenURL)),
+		slog.String("codex.client_id", c.Codex.ClientID),
+		slog.Duration("codex.refresh_skew", c.Codex.RefreshSkew),
+		slog.Duration("codex.lock_timeout", c.Codex.LockTimeout),
 		slog.Duration("idle_timeout", c.Idle.Timeout),
 		slog.String("log.level", c.Log.Level),
 		slog.String("log.format", c.Log.Format),

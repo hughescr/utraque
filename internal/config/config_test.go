@@ -3,6 +3,7 @@ package config_test
 import (
 	"bytes"
 	"log/slog"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -244,6 +245,150 @@ func TestLoadReadsProcessEnv(t *testing.T) {
 	}
 	if c.Listen != "127.0.0.1:7777" || c.Log.Level != "warn" {
 		t.Errorf("Load did not read the process environment: %+v", c)
+	}
+}
+
+func TestCodexDefaults(t *testing.T) {
+	c, err := config.LoadFrom(envFrom(map[string]string{"HOME": "/home/tester"}))
+	if err != nil {
+		t.Fatalf("LoadFrom: %v", err)
+	}
+	if c.Codex.TokenURL != config.DefaultCodexTokenURL {
+		t.Errorf("TokenURL = %q, want %q", c.Codex.TokenURL, config.DefaultCodexTokenURL)
+	}
+	if c.Codex.ClientID != config.DefaultCodexClientID {
+		t.Errorf("ClientID = %q", c.Codex.ClientID)
+	}
+	if c.Codex.RefreshSkew != config.DefaultCodexRefreshSkew {
+		t.Errorf("RefreshSkew = %s", c.Codex.RefreshSkew)
+	}
+	if c.Codex.LockTimeout != config.DefaultCodexLockTimeout {
+		t.Errorf("LockTimeout = %s", c.Codex.LockTimeout)
+	}
+	want := filepath.Join("/home/tester", config.CodexDirName, config.CodexAuthFileName)
+	if c.Codex.AuthFile != want {
+		t.Errorf("AuthFile = %q, want %q", c.Codex.AuthFile, want)
+	}
+}
+
+func TestCodexAuthFileResolution(t *testing.T) {
+	const home = "/home/tester"
+	cases := []struct {
+		name string
+		env  map[string]string
+		want string
+	}{
+		{
+			name: "default under HOME/.codex",
+			env:  map[string]string{"HOME": home},
+			want: filepath.Join(home, ".codex", "auth.json"),
+		},
+		{
+			name: "CODEX_HOME overrides the directory",
+			env:  map[string]string{"HOME": home, config.EnvCodexHome: "/opt/codex"},
+			want: "/opt/codex/auth.json",
+		},
+		{
+			name: "UTRAQUE_CODEX_AUTH_FILE overrides the whole path",
+			env: map[string]string{
+				"HOME":                  home,
+				config.EnvCodexHome:     "/opt/codex",
+				config.EnvCodexAuthFile: "/custom/place/creds.json",
+			},
+			want: "/custom/place/creds.json",
+		},
+		{
+			name: "tilde in the explicit override expands to HOME",
+			env:  map[string]string{"HOME": home, config.EnvCodexAuthFile: "~/somewhere/auth.json"},
+			want: filepath.Join(home, "somewhere", "auth.json"),
+		},
+		{
+			name: "tilde in CODEX_HOME expands to HOME",
+			env:  map[string]string{"HOME": home, config.EnvCodexHome: "~/xdg/codex"},
+			want: filepath.Join(home, "xdg", "codex", "auth.json"),
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c, err := config.LoadFrom(envFrom(tc.env))
+			if err != nil {
+				t.Fatalf("LoadFrom: %v", err)
+			}
+			if c.Codex.AuthFile != tc.want {
+				t.Errorf("AuthFile = %q, want %q", c.Codex.AuthFile, tc.want)
+			}
+		})
+	}
+}
+
+func TestCodexEnvOverrides(t *testing.T) {
+	c, err := config.LoadFrom(envFrom(map[string]string{
+		"HOME":                     "/home/tester",
+		config.EnvCodexTokenURL:    "https://auth.example.test/oauth/token/",
+		config.EnvCodexRefreshSkew: "30s",
+		config.EnvCodexLockTimeout: "3s",
+	}))
+	if err != nil {
+		t.Fatalf("LoadFrom: %v", err)
+	}
+	if c.Codex.TokenURL != "https://auth.example.test/oauth/token" {
+		t.Errorf("TokenURL = %q, want the trailing slash trimmed", c.Codex.TokenURL)
+	}
+	if c.Codex.RefreshSkew != 30*time.Second {
+		t.Errorf("RefreshSkew = %s", c.Codex.RefreshSkew)
+	}
+	if c.Codex.LockTimeout != 3*time.Second {
+		t.Errorf("LockTimeout = %s", c.Codex.LockTimeout)
+	}
+}
+
+func TestCodexValidateRejects(t *testing.T) {
+	cases := map[string]func(*config.Config){
+		"negative refresh skew": func(c *config.Config) { c.Codex.RefreshSkew = -time.Second },
+		"zero lock timeout":     func(c *config.Config) { c.Codex.LockTimeout = 0 },
+		"negative lock timeout": func(c *config.Config) { c.Codex.LockTimeout = -time.Second },
+		"empty client id":       func(c *config.Config) { c.Codex.ClientID = "" },
+		"empty token url":       func(c *config.Config) { c.Codex.TokenURL = "" },
+		"token url bad scheme":  func(c *config.Config) { c.Codex.TokenURL = "ftp://auth.openai.com/x" },
+		"token url userinfo":    func(c *config.Config) { c.Codex.TokenURL = "https://u:p@auth.openai.com/x" },
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			c := config.Default()
+			// Default() leaves AuthFile empty; give the rest a valid baseline.
+			mutate(&c)
+			if err := c.Validate(); err == nil {
+				t.Fatalf("Validate() = nil, want an error for %s", name)
+			}
+		})
+	}
+}
+
+func TestCodexTokenURLErrorDoesNotLeakUserinfo(t *testing.T) {
+	c := config.Default()
+	c.Codex.TokenURL = "ftp://user:hunter2@auth.openai.com/oauth/token"
+	err := c.Validate()
+	if err == nil {
+		t.Fatal("want error")
+	}
+	if strings.Contains(err.Error(), "hunter2") {
+		t.Errorf("Validate leaked the credential: %v", err)
+	}
+}
+
+func TestCodexConfigRenderedAndNotSecret(t *testing.T) {
+	c, err := config.LoadFrom(envFrom(map[string]string{"HOME": "/home/tester"}))
+	if err != nil {
+		t.Fatalf("LoadFrom: %v", err)
+	}
+	s := c.String()
+	if !strings.Contains(s, "codex.auth_file=") || !strings.Contains(s, "codex.client_id=") {
+		t.Errorf("String() missing codex fields: %s", s)
+	}
+	var buf bytes.Buffer
+	slog.New(slog.NewJSONHandler(&buf, nil)).Info("cfg", "config", c)
+	if !strings.Contains(buf.String(), "codex.token_url") {
+		t.Errorf("LogValue missing codex.token_url: %s", buf.String())
 	}
 }
 
