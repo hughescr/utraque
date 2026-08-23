@@ -1,0 +1,13 @@
+{
+  "model": "sol",
+  "max_tokens": 1024,
+  "system": [ { "type": "text", "text": "Sys", "cache_control": { "type": "ephemeral" } } ],
+  "tools": [
+    { "name": "noop", "description": "does nothing", "input_schema": { "type": "object", "properties": {} }, "cache_control": { "type": "ephemeral" } }
+  ],
+  "messages": [
+    { "role": "user", "content": [
+      { "type": "text", "text": "Cached prompt", "cache_control": { "type": "ephemeral" } }
+    ] }
+  ]
+}

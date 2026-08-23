@@ -1,0 +1,11 @@
+{
+  "model": "sol",
+  "max_tokens": 1024,
+  "tools": [
+    { "name": "Read", "description": "read a file", "input_schema": { "type": "object" } },
+    { "name": "Bash", "description": "run a command", "input_schema": { "type": "object" } }
+  ],
+  "messages": [
+    { "role": "user", "content": "do something" }
+  ]
+}

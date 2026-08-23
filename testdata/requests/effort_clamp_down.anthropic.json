@@ -1,0 +1,5 @@
+{
+  "model": "gpt-5.4-ultra",
+  "max_tokens": 1024,
+  "messages": [ { "role": "user", "content": "think hardest" } ]
+}

@@ -1,0 +1,31 @@
+{
+  "model": "gpt-5.6-sol",
+  "input": [
+    {
+      "type": "function_call",
+      "name": "screenshot",
+      "arguments": "{}",
+      "call_id": "toolu_shot"
+    },
+    {
+      "type": "function_call_output",
+      "call_id": "toolu_shot",
+      "output": "Here is the screenshot\n\n[1 image(s) provided in the following user message]"
+    },
+    {
+      "type": "message",
+      "role": "user",
+      "content": [
+        {
+          "type": "input_image",
+          "image_url": "data:image/jpeg;base64,/9j/4AAQ="
+        }
+      ]
+    }
+  ],
+  "reasoning": {
+    "effort": "low"
+  },
+  "store": false,
+  "stream": true
+}

@@ -36,6 +36,7 @@ type Model struct {
 	Visibility               string           `json:"visibility,omitempty"`
 	ContextWindow            int              `json:"context_window,omitempty"`
 	DefaultReasoningLevel    string           `json:"default_reasoning_level,omitempty"`
+	DefaultReasoningSummary  string           `json:"default_reasoning_summary,omitempty"`
 	SupportedReasoningLevels []ReasoningLevel `json:"supported_reasoning_levels,omitempty"`
 	Priority                 int              `json:"priority,omitempty"`
 }

@@ -1,0 +1,15 @@
+{
+  "model": "sol",
+  "max_tokens": 1024,
+  "messages": [
+    { "role": "assistant", "content": [
+      { "type": "tool_use", "id": "toolu_shot", "name": "screenshot", "input": {} }
+    ] },
+    { "role": "user", "content": [
+      { "type": "tool_result", "tool_use_id": "toolu_shot", "content": [
+        { "type": "text", "text": "Here is the screenshot" },
+        { "type": "image", "source": { "type": "base64", "media_type": "image/jpeg", "data": "/9j/4AAQ=" } }
+      ] }
+    ] }
+  ]
+}

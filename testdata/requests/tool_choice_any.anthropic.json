@@ -1,0 +1,7 @@
+{
+  "model": "sol",
+  "max_tokens": 1024,
+  "tools": [ { "name": "get_weather", "description": "get weather", "input_schema": { "type": "object" } } ],
+  "tool_choice": { "type": "any" },
+  "messages": [ { "role": "user", "content": "hi" } ]
+}

@@ -1,0 +1,20 @@
+{
+  "model": "gpt-5.4",
+  "input": [
+    {
+      "type": "message",
+      "role": "user",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "think hardest"
+        }
+      ]
+    }
+  ],
+  "reasoning": {
+    "effort": "xhigh"
+  },
+  "store": false,
+  "stream": true
+}

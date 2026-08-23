@@ -1,0 +1,9 @@
+{
+  "model": "sol",
+  "max_tokens": 1024,
+  "messages": [
+    { "role": "user", "content": [
+      { "type": "image", "source": { "type": "url", "url": "https://example.com/cat.png" } }
+    ] }
+  ]
+}

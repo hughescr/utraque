@@ -1,0 +1,11 @@
+{
+  "model": "sol",
+  "max_tokens": 1024,
+  "system": [
+    { "type": "text", "text": "First instruction." },
+    { "type": "text", "text": "Second instruction.", "cache_control": { "type": "ephemeral" } }
+  ],
+  "messages": [
+    { "role": "user", "content": [ { "type": "text", "text": "Hi" } ] }
+  ]
+}

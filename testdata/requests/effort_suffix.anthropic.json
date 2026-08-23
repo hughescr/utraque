@@ -1,0 +1,5 @@
+{
+  "model": "sol-high",
+  "max_tokens": 1024,
+  "messages": [ { "role": "user", "content": "think hard" } ]
+}

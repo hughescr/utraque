@@ -1,0 +1,15 @@
+{
+  "model": "gpt-5.6-sol",
+  "input": [
+    {
+      "type": "function_call_output",
+      "call_id": "toolu_missing",
+      "output": "orphan output"
+    }
+  ],
+  "reasoning": {
+    "effort": "low"
+  },
+  "store": false,
+  "stream": true
+}

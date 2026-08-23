@@ -1,0 +1,20 @@
+{
+  "model": "gpt-5.6-sol",
+  "input": [
+    {
+      "type": "message",
+      "role": "user",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "think hard"
+        }
+      ]
+    }
+  ],
+  "reasoning": {
+    "effort": "high"
+  },
+  "store": false,
+  "stream": true
+}
