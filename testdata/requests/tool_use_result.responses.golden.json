@@ -16,7 +16,7 @@
       "role": "assistant",
       "content": [
         {
-          "type": "output_text",
+          "type": "input_text",
           "text": "Let me check."
         }
       ]

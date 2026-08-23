@@ -64,6 +64,11 @@ const (
 	DroppedTopK          = "top_k"
 	DroppedMaxTokens     = "max_tokens"
 	DroppedStopSequences = "stop_sequences"
+	// DroppedThinking records that the client's thinking config (budget_tokens)
+	// was discarded. Reasoning effort is resolved by precedence (suffix > beta >
+	// config > catalog), never from the Anthropic thinking budget, so the budget
+	// has no effect — but the package's contract is that every drop is recorded.
+	DroppedThinking = "thinking"
 )
 
 // Options tunes a translation. The zero value is valid: it uses
@@ -115,11 +120,13 @@ type Metadata struct {
 	Effort EffortResult
 	// Summary is the reasoning summary mode actually applied ("" when none).
 	Summary string
-	// ParallelToolCallsDisabled reports whether a mutating tool forced
-	// parallel_tool_calls:false.
+	// ParallelToolCallsDisabled reports whether parallel_tool_calls:false was
+	// forced, by either a mutating tool or the client's explicit
+	// tool_choice.disable_parallel_tool_use.
 	ParallelToolCallsDisabled bool
 	// MutatingTools lists the request tool names that triggered the disable,
-	// sorted, for logging.
+	// sorted, for logging. It may be empty when the disable came solely from the
+	// client's disable_parallel_tool_use flag.
 	MutatingTools []string
 	// OrphanedToolResults lists tool_result call_ids with no matching prior
 	// tool_use in the same request. They are still emitted as
@@ -157,7 +164,11 @@ func Translate(req *aschema.MessagesRequest, dec router.Decision, model cschema.
 	out.Tools = translateTools(req.Tools)
 	out.ToolChoice = translateToolChoice(req.ToolChoice)
 
-	if disabled, names := disableParallel(req.Tools, opts.mutatingSet()); disabled {
+	disabled, names := disableParallel(req.Tools, opts.mutatingSet())
+	clientDisableParallel := req.ToolChoice != nil && req.ToolChoice.DisableParallelToolUse
+	if disabled || clientDisableParallel {
+		// Either a mutating tool (the local footgun heuristic) or the client's
+		// explicit tool_choice.disable_parallel_tool_use forces serial calls.
 		f := false
 		out.ParallelToolCalls = &f
 		meta.ParallelToolCallsDisabled = true
@@ -214,11 +225,12 @@ func translateMessages(messages []aschema.Message) (items []cschema.InputItem, o
 		for _, blk := range msg.Content.Blocks {
 			switch blk.Type {
 			case aschema.BlockText:
-				if role == aschema.RoleAssistant {
-					pending = append(pending, cschema.OutputText(blk.Text))
-				} else {
-					pending = append(pending, cschema.InputText(blk.Text))
-				}
+				// Every message part in a Responses input[] is input_text,
+				// regardless of role: the input content union is
+				// input_text/input_image/input_file, and output_text (an output
+				// content type) is not accepted on an input message. The role
+				// field alone carries the user/assistant distinction.
+				pending = append(pending, cschema.InputText(blk.Text))
 
 			case aschema.BlockImage:
 				url, ierr := imageURL(blk.Source)
@@ -244,6 +256,11 @@ func translateMessages(messages []aschema.Message) (items []cschema.InputItem, o
 				text, images, terr := flattenToolResult(blk.Content)
 				if terr != nil {
 					return nil, nil, terr
+				}
+				if blk.IsError {
+					// A Responses function_call_output has no is_error field, so
+					// the failure signal is preserved as an explicit text marker.
+					text = markToolError(text)
 				}
 				output := text
 				if len(images) > 0 {
@@ -329,6 +346,19 @@ func flattenToolResult(content *aschema.Content) (text string, images []cschema.
 		}
 	}
 	return strings.Join(texts, "\n\n"), images, nil
+}
+
+// ToolErrorMarker prefixes the flattened text of a tool_result whose is_error
+// flag is set. The Responses function_call_output carries no error field, so
+// this explicit marker is the only way to preserve that the tool failed.
+const ToolErrorMarker = "[tool error]"
+
+// markToolError prepends ToolErrorMarker to a failed tool result's text.
+func markToolError(text string) string {
+	if text == "" {
+		return ToolErrorMarker
+	}
+	return ToolErrorMarker + "\n\n" + text
 }
 
 // withImagePlaceholder appends a note to a tool result's text saying its images
@@ -459,9 +489,12 @@ func clampEffort(requested string, model cschema.Model) (applied string, clamped
 
 	reqRank, ok := effortRank[requested]
 	if !ok {
-		// An effort the canonical order doesn't know, and the model doesn't
-		// support: treat it as above the top so it clamps to the model's max.
-		reqRank = len(effortRank)
+		// An effort the canonical order doesn't know (e.g. a config or header
+		// typo like "hgh"), and the model doesn't support it verbatim. Treat it
+		// as below the floor so it clamps DOWN to the lowest supported level
+		// rather than escalating to the model's max — an unrecognised token
+		// must never silently buy the most expensive reasoning tier.
+		reqRank = -1
 	}
 
 	bestBelow, bestBelowRank := "", -1
@@ -504,6 +537,9 @@ func droppedParams(req *aschema.MessagesRequest) []string {
 	dropped = append(dropped, DroppedMaxTokens)
 	if len(req.StopSequences) > 0 {
 		dropped = append(dropped, DroppedStopSequences)
+	}
+	if req.Thinking != nil {
+		dropped = append(dropped, DroppedThinking)
 	}
 	return dropped
 }

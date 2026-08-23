@@ -16,12 +16,14 @@ const (
 	ItemFunctionCallOutput = "function_call_output"
 )
 
-// Content part types inside a message input item. Anthropic's user/assistant
-// text maps onto input_text/output_text respectively; images (base64 data URLs
-// or passed-through URLs) map onto input_image.
+// Content part types inside a message input item. Every message in a Responses
+// request's input[] carries input_text (the input content union is
+// input_text/input_image/input_file regardless of role, so assistant history is
+// emitted as input_text too); output_text belongs to a response's output and is
+// not a valid input part. Images (base64 data URLs or passed-through URLs) map
+// onto input_image.
 const (
 	PartInputText  = "input_text"
-	PartOutputText = "output_text"
 	PartInputImage = "input_image"
 )
 
@@ -63,11 +65,6 @@ func InputText(text string) ContentPart {
 	return ContentPart{Type: PartInputText, Text: text}
 }
 
-// OutputText builds an output_text part (assistant-authored text in history).
-func OutputText(text string) ContentPart {
-	return ContentPart{Type: PartOutputText, Text: text}
-}
-
 // InputImage builds an input_image part from an already-formed URL (a
 // "data:<media>;base64,<data>" URL for inline images, or a passed-through
 // remote URL).
@@ -95,8 +92,11 @@ type InputItem struct {
 	// function_call and function_call_output
 	CallID string `json:"call_id,omitempty"`
 
-	// function_call_output
-	Output string `json:"output,omitempty"`
+	// function_call_output. A pointer so a genuinely empty tool result still
+	// serialises the required "output":"" — the Responses API rejects a
+	// function_call_output that omits output — while message/function_call items
+	// (nil here) leave the field off.
+	Output *string `json:"output,omitempty"`
 }
 
 // MessageItem builds a message input item with the given role and parts.
@@ -111,9 +111,10 @@ func FunctionCall(callID, name, arguments string) InputItem {
 }
 
 // FunctionCallOutput builds a function_call_output item carrying a tool's
-// flattened text result.
+// flattened text result. output is always set (even when empty) so the required
+// output field is present on the wire.
 func FunctionCallOutput(callID, output string) InputItem {
-	return InputItem{Type: ItemFunctionCallOutput, CallID: callID, Output: output}
+	return InputItem{Type: ItemFunctionCallOutput, CallID: callID, Output: &output}
 }
 
 // Tool is a function tool declaration on a Responses request. Parameters is the

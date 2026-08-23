@@ -458,6 +458,151 @@ func TestToolChoiceObjectShape(t *testing.T) {
 	}
 }
 
+// TestDisableParallelToolUseFlag confirms the client's explicit
+// tool_choice.disable_parallel_tool_use forces parallel_tool_calls:false even
+// when no mutating tool is present.
+func TestDisableParallelToolUseFlag(t *testing.T) {
+	req := &aschema.MessagesRequest{
+		Model: "m", MaxTokens: 10,
+		Tools:      []aschema.Tool{{Name: "Read"}, {Name: "Grep"}},
+		ToolChoice: &aschema.ToolChoice{Type: aschema.ToolChoiceAuto, DisableParallelToolUse: true},
+		Messages:   []aschema.Message{{Role: "user", Content: aschema.StringContent("hi")}},
+	}
+	out, meta, err := request.Translate(req, defaultCase().dec, defaultCase().model, request.Options{})
+	if err != nil {
+		t.Fatalf("translate: %v", err)
+	}
+	if out.ParallelToolCalls == nil || *out.ParallelToolCalls != false {
+		t.Fatalf("ParallelToolCalls = %v, want *false from client flag", out.ParallelToolCalls)
+	}
+	if !meta.ParallelToolCallsDisabled {
+		t.Error("metadata should record ParallelToolCallsDisabled from client flag")
+	}
+	if len(meta.MutatingTools) != 0 {
+		t.Errorf("MutatingTools = %v, want empty (no mutating tool triggered it)", meta.MutatingTools)
+	}
+
+	// Without the flag and with non-mutating tools, the field stays unset.
+	req.ToolChoice.DisableParallelToolUse = false
+	out2, _, err := request.Translate(req, defaultCase().dec, defaultCase().model, request.Options{})
+	if err != nil {
+		t.Fatalf("translate: %v", err)
+	}
+	if out2.ParallelToolCalls != nil {
+		t.Error("ParallelToolCalls should stay unset without the flag or a mutating tool")
+	}
+}
+
+// TestToolResultIsError confirms a tool_result with is_error:true is marked so
+// the failure signal survives into the function_call_output, since Responses has
+// no is_error field.
+func TestToolResultIsError(t *testing.T) {
+	raw := readFixture(t, "tool_result_is_error")
+	var req aschema.MessagesRequest
+	if err := json.Unmarshal(raw, &req); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	out, _, err := request.Translate(&req, defaultCase().dec, defaultCase().model, request.Options{})
+	if err != nil {
+		t.Fatalf("translate: %v", err)
+	}
+	var outputItem *cschema.InputItem
+	for i := range out.Input {
+		if out.Input[i].Type == cschema.ItemFunctionCallOutput {
+			outputItem = &out.Input[i]
+		}
+	}
+	if outputItem == nil {
+		t.Fatalf("no function_call_output emitted: %+v", out.Input)
+	}
+	if outputItem.Output == nil {
+		t.Fatal("function_call_output.Output is nil, want marked error text")
+	}
+	if !strings.HasPrefix(*outputItem.Output, request.ToolErrorMarker) {
+		t.Errorf("output = %q, want prefix %q", *outputItem.Output, request.ToolErrorMarker)
+	}
+	if !strings.Contains(*outputItem.Output, "exit 1: build failed") {
+		t.Errorf("output = %q, want original text preserved", *outputItem.Output)
+	}
+}
+
+// TestEmptyToolResultHasOutput confirms a successful no-output tool still emits
+// the required output field as an empty string (not omitted).
+func TestEmptyToolResultHasOutput(t *testing.T) {
+	raw := readFixture(t, "empty_tool_result")
+	var req aschema.MessagesRequest
+	if err := json.Unmarshal(raw, &req); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	out, _, err := request.Translate(&req, defaultCase().dec, defaultCase().model, request.Options{})
+	if err != nil {
+		t.Fatalf("translate: %v", err)
+	}
+	var outputItem *cschema.InputItem
+	for i := range out.Input {
+		if out.Input[i].Type == cschema.ItemFunctionCallOutput {
+			outputItem = &out.Input[i]
+		}
+	}
+	if outputItem == nil {
+		t.Fatalf("no function_call_output emitted: %+v", out.Input)
+	}
+	if outputItem.Output == nil || *outputItem.Output != "" {
+		t.Fatalf("Output = %v, want non-nil empty string", outputItem.Output)
+	}
+	// The field must actually serialise, not be dropped by omitempty.
+	b, err := json.Marshal(*outputItem)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(b), `"output":""`) {
+		t.Errorf("serialised item = %s, want an explicit \"output\":\"\"", b)
+	}
+}
+
+// TestUnknownEffortClampsToFloor confirms an unrecognised effort token clamps
+// DOWN to the lowest supported level rather than escalating to the model's max.
+func TestUnknownEffortClampsToFloor(t *testing.T) {
+	req := &aschema.MessagesRequest{
+		Model:    "m",
+		Messages: []aschema.Message{{Role: "user", Content: aschema.StringContent("hi")}},
+	}
+	dec := router.Decision{UpstreamModel: "m", Effort: "hgh", EffortSource: router.EffortSourceSuffix}
+	_, meta, err := request.Translate(req, dec, gpt54Model(), request.Options{})
+	if err != nil {
+		t.Fatalf("translate: %v", err)
+	}
+	if meta.Effort.Applied != cschema.EffortLow {
+		t.Errorf("applied = %q, want %q (floor, not max)", meta.Effort.Applied, cschema.EffortLow)
+	}
+	if !meta.Effort.Clamped {
+		t.Error("expected clamped=true for an unknown effort token")
+	}
+}
+
+// TestThinkingRecordedDropped confirms a client thinking config is recorded as a
+// dropped param, honouring the package's every-drop-is-recorded contract.
+func TestThinkingRecordedDropped(t *testing.T) {
+	req := &aschema.MessagesRequest{
+		Model: "m", MaxTokens: 100,
+		Thinking: &aschema.ThinkingConfig{Type: "enabled", BudgetTokens: 8000},
+		Messages: []aschema.Message{{Role: "user", Content: aschema.StringContent("hi")}},
+	}
+	_, meta, err := request.Translate(req, defaultCase().dec, defaultCase().model, request.Options{})
+	if err != nil {
+		t.Fatalf("translate: %v", err)
+	}
+	found := false
+	for _, d := range meta.Dropped {
+		if d == request.DroppedThinking {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("dropped = %v, want it to include %q", meta.Dropped, request.DroppedThinking)
+	}
+}
+
 func readFixture(t *testing.T, name string) []byte {
 	t.Helper()
 	raw, err := os.ReadFile(filepath.Join(requestsDir, name+".anthropic.json"))

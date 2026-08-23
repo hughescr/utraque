@@ -1,0 +1,13 @@
+{
+  "model": "sol",
+  "max_tokens": 1024,
+  "messages": [
+    { "role": "user", "content": [ { "type": "text", "text": "Build the project." } ] },
+    { "role": "assistant", "content": [
+      { "type": "tool_use", "id": "toolu_build", "name": "Bash", "input": { "command": "make" } }
+    ] },
+    { "role": "user", "content": [
+      { "type": "tool_result", "tool_use_id": "toolu_build", "is_error": true, "content": "exit 1: build failed" }
+    ] }
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "model": "sol",
+  "max_tokens": 1024,
+  "tools": [
+    { "name": "Read", "description": "read a file", "input_schema": { "type": "object" } },
+    { "name": "Grep", "description": "search files", "input_schema": { "type": "object" } }
+  ],
+  "tool_choice": { "type": "auto", "disable_parallel_tool_use": true },
+  "messages": [
+    { "role": "user", "content": "find the bug" }
+  ]
+}

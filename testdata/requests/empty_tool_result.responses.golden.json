@@ -1,0 +1,21 @@
+{
+  "model": "gpt-5.6-sol",
+  "input": [
+    {
+      "type": "function_call",
+      "name": "Touch",
+      "arguments": "{}",
+      "call_id": "toolu_noop"
+    },
+    {
+      "type": "function_call_output",
+      "call_id": "toolu_noop",
+      "output": ""
+    }
+  ],
+  "reasoning": {
+    "effort": "low"
+  },
+  "store": false,
+  "stream": true
+}

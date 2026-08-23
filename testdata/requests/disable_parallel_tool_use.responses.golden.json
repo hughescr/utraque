@@ -1,0 +1,40 @@
+{
+  "model": "gpt-5.6-sol",
+  "input": [
+    {
+      "type": "message",
+      "role": "user",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "find the bug"
+        }
+      ]
+    }
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "name": "Read",
+      "description": "read a file",
+      "parameters": {
+        "type": "object"
+      }
+    },
+    {
+      "type": "function",
+      "name": "Grep",
+      "description": "search files",
+      "parameters": {
+        "type": "object"
+      }
+    }
+  ],
+  "tool_choice": "auto",
+  "parallel_tool_calls": false,
+  "reasoning": {
+    "effort": "low"
+  },
+  "store": false,
+  "stream": true
+}
