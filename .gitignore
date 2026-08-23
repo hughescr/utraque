@@ -1,0 +1,6 @@
+/utraque
+/dist/
+*.out
+*.test
+coverage.*
+.DS_Store
