@@ -21,7 +21,11 @@
 #                        or environment forms below)
 #   --local-token-file F read the shared secret from F, or from stdin for '-'
 #                        (also read from $UTRAQUE_LOCAL_TOKEN if neither is given)
-#   --codex-home PATH    CODEX_HOME for the agent (default: inherit/none)
+#   --codex-home PATH    CODEX_HOME to write into the plist. launchd does NOT
+#                        inherit your shell's CODEX_HOME, so pass this if you
+#                        keep Codex somewhere other than ~/.codex -- otherwise
+#                        the agent reads ~/.codex/auth.json and reports a
+#                        missing credential (default: omitted)
 #   --log-level LEVEL    debug|info|warn|error (default: info)
 #   --log-format FORMAT  json|text (default: json)
 #   --load               after writing, run the launchctl bootstrap for you
@@ -86,8 +90,14 @@ if [ -z "$binary" ]; then
 		binary="$repo/bin/utraque"
 	elif command -v utraque >/dev/null 2>&1; then
 		binary=$(command -v utraque)
+	elif command -v go >/dev/null 2>&1 && [ -x "$(go env GOBIN 2>/dev/null)/utraque" ]; then
+		# `go install ./cmd/utraque` lands here, and this directory is often not
+		# on PATH on a fresh Go setup, so command -v above would miss it.
+		binary="$(go env GOBIN)/utraque"
+	elif command -v go >/dev/null 2>&1 && [ -x "$(go env GOPATH 2>/dev/null)/bin/utraque" ]; then
+		binary="$(go env GOPATH)/bin/utraque"
 	else
-		die "no utraque binary found. Build one with 'go build -o bin/utraque ./cmd/utraque', or pass --binary PATH."
+		die "no utraque binary found. Build one with 'go build -o bin/utraque ./cmd/utraque', or install one with 'go install ./cmd/utraque', or pass --binary PATH."
 	fi
 fi
 case "$binary" in
@@ -264,9 +274,11 @@ say ""
 domain="gui/$(id -u)"
 if [ "$do_load" -eq 1 ]; then
 	say "loading the agent (--load was given)"
+	booted_out=0
 	if launchctl print "$domain/$LABEL" >/dev/null 2>&1; then
 		say "+ launchctl bootout $domain/$LABEL"
 		launchctl bootout "$domain/$LABEL" || true
+		booted_out=1
 	fi
 	say "+ launchctl bootstrap $domain $plist"
 	if ! launchctl bootstrap "$domain" "$plist"; then
@@ -280,6 +292,16 @@ if [ "$do_load" -eq 1 ]; then
 				say "the previous agent is loaded again; the new plist was not installed"
 			else
 				say "the previous agent could not be reloaded either — NOTHING is loaded now"
+			fi
+		elif [ "$booted_out" -eq 1 ]; then
+			# No backup exists because the plist on disk was already identical --
+			# but an agent WAS running and the bootout above stopped it. The
+			# installed plist is still the right one, so just load it again.
+			say "bootstrap failed; the plist was unchanged, so reloading it as-is"
+			if launchctl bootstrap "$domain" "$plist"; then
+				say "the previous agent is loaded again"
+			else
+				say "the previous agent could not be reloaded either -- NOTHING is loaded now"
 			fi
 		else
 			say "nothing was loaded before this, so nothing was rolled back"

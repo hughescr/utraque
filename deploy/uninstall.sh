@@ -13,6 +13,7 @@
 #   --unload      run the launchctl bootout before removing the plist
 #   --keep-logs   leave ~/Library/Logs/utraque in place (the default)
 #   --purge-logs  delete ~/Library/Logs/utraque too
+#   --purge-cache delete utraque's own catalog cache too
 #   -h, --help    this text
 
 set -euo pipefail
@@ -22,9 +23,12 @@ LABEL="com.hughescr.utraque"
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 plist="$HOME/Library/LaunchAgents/$LABEL.plist"
 log_dir="$HOME/Library/Logs/utraque"
+# utraque's OWN catalog cache (never the Codex CLI's models_cache.json).
+cache_dir="$HOME/Library/Caches/utraque"
 
 do_unload=0
 purge_logs=0
+purge_cache=0
 
 say() { printf '%s\n' "$*"; }
 die() { printf 'uninstall.sh: %s\n' "$*" >&2; exit 1; }
@@ -35,6 +39,7 @@ while [ $# -gt 0 ]; do
 		--unload)     do_unload=1; shift ;;
 		--keep-logs)  purge_logs=0; shift ;;
 		--purge-logs) purge_logs=1; shift ;;
+		--purge-cache) purge_cache=1; shift ;;
 		-h|--help)    usage; exit 0 ;;
 		*)            die "unknown option $1 (try --help)" ;;
 	esac
@@ -101,7 +106,18 @@ elif [ -d "$log_dir" ]; then
 	say "kept     $log_dir (pass --purge-logs to delete it)"
 fi
 
+if [ "$purge_cache" -eq 1 ]; then
+	if [ -d "$cache_dir" ]; then
+		rm -rf "$cache_dir"
+		say "removed  $cache_dir"
+	else
+		say "absent   $cache_dir"
+	fi
+elif [ -d "$cache_dir" ]; then
+	say "kept     $cache_dir (pass --purge-cache to delete it)"
+fi
+
 say ""
-say "Nothing outside launchd was touched: your ~/.codex/auth.json, the utraque"
+say "Nothing outside utraque was touched: your ~/.codex/auth.json, the utraque"
 say "binary and any ANTHROPIC_BASE_URL you set elsewhere are all still there."
 say "Reinstall with: $here/install.sh"

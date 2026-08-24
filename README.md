@@ -23,16 +23,19 @@ request returned a real OpenAI answer billed to the Codex subscription, and a
 Claude request streamed a correct Anthropic SSE sequence, through one proxy in
 one session.
 
-- **Anthropic leg.** A transparent passthrough: Claude Code behaves exactly as
-  if it were talking to `api.anthropic.com` directly.
+- **Anthropic leg.** A transparent passthrough: the request, including Claude
+  Code's own OAuth credential, is forwarded byte-for-byte. The transport is
+  transparent; one *client-side* behaviour is not, which is why
+  `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL=1` is required — see *Install & run*.
 - **Codex/GPT leg.** A GPT model reaches the Codex backend and streams back as
   Anthropic-shaped SSE — or as a single `MessagesResponse` when the client sends
   `stream:false` — billed against your Codex subscription. `GET /v1/models`
   serves the merged picker catalog, and `POST /v1/messages/count_tokens` is
   answered locally for GPT-routed models.
-- A GPT request answers `503` only when there is no Codex credential to spend.
-  Run `codex login`, or point `UTRAQUE_CODEX_AUTH_FILE` at a file that holds
-  one.
+- A missing Codex credential makes a GPT request answer `503`. Run `codex
+  login`, or point `UTRAQUE_CODEX_AUTH_FILE` at a file that holds a token. A
+  request racing the idle exit can also see `503`; under launchd a retry
+  activates a fresh daemon.
 - **It runs unattended.** launchd holds the listening socket and starts
   `utraque` on the first connection; it exits after an idle hour and launchd
   re-activates it on the next request. See *Unattended, on demand* below.
@@ -65,48 +68,149 @@ subscription, not a separate API key.
 
 ## Install & run
 
-Requires Go 1.27.
+### Prerequisites
+
+- **Go 1.27** to build. The macOS launchd deployment additionally needs cgo
+  (`CGO_ENABLED=1`, the default) and the Xcode Command Line Tools: adopting
+  launchd's socket calls `launch_activate_socket(3)` through a small Darwin
+  shim, and a `CGO_ENABLED=0` build cannot do it — it would bind
+  `UTRAQUE_LISTEN` itself and collide with the socket launchd already holds.
+- **Claude Code**, signed in to the Claude Max account the Anthropic leg should
+  bill.
+- **The Codex CLI**, signed in to the ChatGPT/Codex account the GPT leg should
+  bill. Run `codex login` before the first GPT request, or it answers `503`:
+  `utraque` holds no credential of its own to fall back on.
+- **No Anthropic API key in the environment.** An `ANTHROPIC_API_KEY` or
+  `ANTHROPIC_AUTH_TOKEN` left in a shell profile displaces the subscription
+  OAuth credential and quietly bills metered API usage instead — the one thing
+  this project exists to avoid.
+
+### Quickstart
+
+From nothing to a GPT model answering inside Claude Code:
 
 ```sh
-# Build a binary at ./bin/utraque:
+git clone https://github.com/hughescr/utraque.git
+cd utraque
 go build -o bin/utraque ./cmd/utraque
 
-# …or install it onto your PATH, at $GOBIN (typically ~/go/bin/utraque):
-go install ./cmd/utraque
+codex login                    # if you have not already
+unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN
+
+./bin/utraque &                # or let launchd do it — see below
+curl -sf http://127.0.0.1:8317/healthz | head -c 200   # codex_auth should say "ok"
+
+export ANTHROPIC_BASE_URL=http://127.0.0.1:8317
+export _CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL=1
+
+claude --model terra-high      # a GPT model, billed to the Codex subscription
 ```
+
+Inside that session, `/model` switches back to any Claude model, which bills
+the Max subscription. One session, both subscriptions.
+
+### About those build commands
 
 Both name the **`./cmd/utraque` package**, not `./...`, and that distinction
 matters: `go build ./...` over a multi-package module compiles everything as a
 check and then *discards* the binaries, so it produces nothing you can run —
 use it to verify the tree, not to install it. `-o` chooses where the binary
-lands; `go install` puts it in `$GOBIN` (`$GOPATH/bin`, usually `~/go/bin`).
-
-Then start it and point Claude Code at it:
-
-```sh
-./bin/utraque &                       # or let launchd do it — see below
-export ANTHROPIC_BASE_URL=http://127.0.0.1:8317
-```
+lands; `go install ./cmd/utraque` puts it in `$GOBIN` (`$GOPATH/bin`, usually
+`~/go/bin`) instead.
 
 ### Pointing Claude Code at it
 
 | Variable | Why |
 | --- | --- |
-| `ANTHROPIC_BASE_URL=http://127.0.0.1:8317` | Sends every request through `utraque`. Match `UTRAQUE_LISTEN`. |
-| `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1` | Turns on `GET /v1/models`, so the GPT models appear in the `/model` picker. Without it the picker shows only the client's built-in Claude list — GPT names still route when typed or set in agent frontmatter. |
-| `CLAUDE_CODE_MAX_CONTEXT_TOKENS` | Sets the context window Claude Code *assumes* for a model id it does not recognise as one of its own Claude models — which is exactly what every GPT model routed through `utraque` looks like (`sol`, `terra`, `luna`, `gpt-5.5`, and the rest have no `claude-` prefix and resolve to nothing in the client's built-in list). Without it, the client falls back to a default window sized for Claude, so auto-compaction fires at the wrong point in a GPT session — either too early or too late relative to what the GPT model can actually hold. |
+| `ANTHROPIC_BASE_URL=http://127.0.0.1:8317` | **Required.** Sends every request through `utraque`. Match `UTRAQUE_LISTEN`. |
+| `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL=1` | **Required.** See below — without it every Claude model silently loses most of its context window. |
+| `CLAUDE_CODE_MAX_CONTEXT_TOKENS` | Optional, and **GPT-only**. See below. |
+| `ANTHROPIC_CUSTOM_HEADERS="X-Utraque-Token: <token>"` | Required **only** if you set `UTRAQUE_LOCAL_TOKEN`. Without it Claude Code cannot authenticate to your own proxy. |
+| `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1` | Optional, and it does nothing on a plain Max subscription. See *Using a GPT route*. |
 
-Claude Code applies this one value globally to *every* unrecognised model id — there is no per-model override. The live Codex catalog reports a 272,000-token window for `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-5.5`, `gpt-5.4`, and `gpt-5.4-mini`, and 128,000 for `gpt-5.3-codex-spark`. Because one number has to cover all of them: set it to `272000` and a `spark` session can grow past its real 128K window before Claude Code ever thinks to compact, risking a hard "too long" error from the backend; set it to `128000` and the 272K-window models compact well before they need to, discarding context they could have kept. **Default to `128000`** — an early compaction just costs some context you can re-establish by asking again, while an overshoot on `spark` breaks the conversation outright. Raise it to `272000` only if your routing rarely reaches `spark` and the extra headroom on the larger models matters more than that risk.
+#### `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL` — do not skip this
+
+The HTTP forwarding is transparent, but pointing Claude Code at a local address
+changes a decision it makes **client-side**, before any request is sent. Claude
+Code treats any `ANTHROPIC_BASE_URL` whose host is not `api.anthropic.com` as
+third-party, and third-party Claude models get a 200,000-token default instead
+of their real window — 1,000,000 for the current Opus, Sonnet and Fable models.
+
+The loss is worse than a smaller window. Once a session's live context is past
+that clamp, auto-compaction has to summarise a history larger than the limit it
+is compacting to; that request fails, the context never shrinks, and compaction
+re-fires immediately, forever. Setting this variable restores the client's
+native window handling. It is accurate rather than a trick: `utraque` really is
+a transparent pass-through to `api.anthropic.com` carrying the client's own
+credential.
+
+#### `CLAUDE_CODE_MAX_CONTEXT_TOKENS` — GPT routes only
+
+Claude Code applies this value **only when the resolved model name does not
+start with `claude-`**. It sizes the GPT routes and can never change a Claude
+model's window, so it is not an alternative to the variable above — the two do
+not overlap.
+
+One value covers every GPT route, and their real windows differ: the live Codex
+catalog reports 272,000 tokens for `gpt-5.6-sol`, `gpt-5.6-terra`,
+`gpt-5.6-luna`, `gpt-5.5`, `gpt-5.4` and `gpt-5.4-mini`, but **128,000** for
+`gpt-5.3-codex-spark`. Set `272000` and a `spark` session can grow past its real
+window before Claude Code thinks to compact, risking a hard "too long" error
+from the backend; set `128000` and the larger models compact earlier than they
+need to. Prefer `128000` if your routing ever reaches `spark` — an early
+compaction costs context you can re-establish, while an overshoot breaks the
+conversation outright. Leave it unset if you only use Claude models.
+
+#### If you turn the local token on
+
+With `UTRAQUE_LOCAL_TOKEN` set, every request must carry it back in the
+`X-Utraque-Token` header — a dedicated header, so the client's `Authorization`
+passes through untouched — and `/healthz` is the only exempt route. Claude Code
+can send it:
+
+```sh
+export ANTHROPIC_CUSTOM_HEADERS="X-Utraque-Token: $(< ~/.utraque-token)"
+```
+
+Because `/healthz` is exempt, a healthy-looking probe does **not** prove the
+token is wired. Verify with a real request.
 
 With no Anthropic API key set in the environment, Claude Code's own Max
 subscription OAuth credential remains the active credential and is forwarded
 untouched, as described above.
 
-If you set `UTRAQUE_LOCAL_TOKEN`, every request must carry it back in the
-`X-Utraque-Token` header — a dedicated header, so the client's `Authorization`
-header passes through untouched — and `/healthz` is the only route exempt. That
-means the client has to be able to add a custom header; check yours before
-turning the token on, or you will lock yourself out of your own proxy.
+### Using a GPT route
+
+Three ways in, in the order most people want them:
+
+**1. An agent definition** — the durable option. A file in `.claude/agents/`:
+
+```md
+---
+name: gpt-terra-high
+description: Cross-family substantive work, or review of Claude's own output.
+model: terra-high
+effort: high
+---
+```
+
+**2. At launch or in-session** — `claude --model terra-high`, or `/model` and
+type the name.
+
+Any of these name forms resolve: a bare alias (`sol`, `terra`, `luna`), a
+version pin (`sol-5.6`), an effort suffix (`sol-high`, `sol-5.6-ultra`), or the
+raw upstream slug (`gpt-5.6-sol`). Effort composes with any of them and is
+clamped to what that model actually supports.
+
+**3. The `/model` picker** — *but only if Claude Code is using an API key.*
+This is the honest caveat: Claude Code attempts gateway model discovery only
+when `ANTHROPIC_AUTH_TOKEN` or an API key is present. On the plain Max
+subscription OAuth session this project is built around, it never calls
+`GET /v1/models` at all, so no GPT rows appear in the picker no matter what
+`CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY` is set to. Typed names and agent
+frontmatter are unaffected — they never depended on discovery. The merged
+catalog is still served, and is still useful to any client that does ask for it.
+
 
 ### Unattended, on demand (macOS)
 
@@ -117,18 +221,21 @@ the client never notices.
 
 ```sh
 go build -o bin/utraque ./cmd/utraque
-openssl rand -hex 16 > ~/.utraque-token && chmod 600 ~/.utraque-token
+(umask 077; openssl rand -hex 16 > ~/.utraque-token)
 deploy/install.sh --local-token-file ~/.utraque-token
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.hughescr.utraque.plist
 ```
 
-`--local-token` is optional and writes `UTRAQUE_LOCAL_TOKEN` into the plist; omit
-it if your client cannot send the `X-Utraque-Token` header, and understand what
+`--local-token-file` is optional (as is `--local-token`, which takes the value
+directly) and writes `UTRAQUE_LOCAL_TOKEN` into the plist; pair it with
+`ANTHROPIC_CUSTOM_HEADERS` as shown above, and if you omit it understand what
 you are choosing — without it any local process can spend both subscriptions
 through the loopback port.
 
-`deploy/install.sh` only writes `~/Library/LaunchAgents/com.hughescr.utraque.plist`
-and prints the commands; it never runs `launchctl` unless you pass `--load`.
+`deploy/install.sh` writes `~/Library/LaunchAgents/com.hughescr.utraque.plist`,
+creates `~/Library/LaunchAgents` and `~/Library/Logs/utraque` if they are
+missing, and prints the commands; it never runs `launchctl` unless you pass
+`--load`.
 Remove it again with `deploy/uninstall.sh --unload`. See
 [`deploy/README.md`](deploy/README.md) for the options, how to verify it, and
 what to check when it misbehaves.
@@ -170,7 +277,7 @@ This is the whole surface.
 | --- | --- | --- |
 | `UTRAQUE_CODEX_AUTH_FILE` | `$CODEX_HOME/auth.json`, else `~/.codex/auth.json` | The Codex login token — the same file the Codex CLI reads and writes. A leading `~/` is expanded. |
 | `CODEX_HOME` | *(unset)* | The Codex CLI's own variable, honoured unprefixed so pointing both tools at one directory works. |
-| `UTRAQUE_CODEX_CACHE_FILE` | `<user cache dir>/utraque/models_cache.json` | `utraque`'s **own** catalog cache. Never the Codex CLI's `models_cache.json`. Empty disables it and the catalog runs memory-only. |
+| `UTRAQUE_CODEX_CACHE_FILE` | `<user cache dir>/utraque/models_cache.json` | `utraque`'s **own** catalog cache. Never the Codex CLI's `models_cache.json`. An empty value counts as unset, so the default applies; the catalog runs memory-only only when no user cache directory can be determined. |
 | `UTRAQUE_CODEX_BASE_URL` | `https://chatgpt.com/backend-api/codex` | The backend root used for both the model catalog and inference. It exists so the test suite can aim the leg at a fake upstream; in normal use, leave it alone. |
 | `UTRAQUE_CODEX_TOKEN_URL` | `https://auth.openai.com/oauth/token` | Where a refresh token is exchanged. |
 | `UTRAQUE_CODEX_REFRESH_SKEW` | `2m` | Refresh pre-emptively once the access token is this close to expiry. |

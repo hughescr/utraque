@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        # macOS is the primary target: the launchd socket-activation path is
+        # darwin-only and needs cgo. Linux proves the plain-listen fallback
+        # stays portable.
+        os: [macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27'
+          check-latest: true
+
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l ./cmd ./internal)
+          if [ -n "$unformatted" ]; then
+            echo "not gofmt-clean:"; echo "$unformatted"; exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: build
+        run: go build -o bin/utraque ./cmd/utraque
+
+      # The default suite is hermetic: every upstream is an httptest server and
+      # every credential is a throwaway under t.TempDir(). The live contract
+      # test is excluded by a build tag and is never run here -- it would need
+      # real subscription credentials.
+      - name: test
+        run: go test ./...
+
+      - name: test -race
+        run: go test -race ./...
+
+  shell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck deploy scripts
+        run: |
+          sudo apt-get update && sudo apt-get install -y shellcheck
+          bash -n deploy/install.sh deploy/uninstall.sh
+          shellcheck deploy/install.sh deploy/uninstall.sh

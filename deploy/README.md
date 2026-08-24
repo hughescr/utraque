@@ -62,8 +62,7 @@ This is a runnable command, not an annotated one — a comment after a line
 continuation ends the command, so the options below carry their notes in prose:
 
 ```sh
-openssl rand -hex 16 > ~/.utraque-token
-chmod 600 ~/.utraque-token
+(umask 077; openssl rand -hex 16 > ~/.utraque-token)
 
 deploy/install.sh \
   --binary /usr/local/bin/utraque \
