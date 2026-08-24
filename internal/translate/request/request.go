@@ -242,6 +242,9 @@ func translateMessages(messages []aschema.Message) (items []cschema.InputItem, o
 	for mi := range messages {
 		msg := messages[mi]
 		role := msg.Role
+		if msg.Content == nil {
+			continue
+		}
 		if role == aschema.RoleSystem {
 			// The mid-conversation-system beta puts system-role messages inside
 			// messages[]. The Responses API refuses role "system" on an input
@@ -251,9 +254,6 @@ func translateMessages(messages []aschema.Message) (items []cschema.InputItem, o
 			// instructions via joinSystem.
 			role = cschema.RoleDeveloper
 			systemRemapped++
-		}
-		if msg.Content == nil {
-			continue
 		}
 
 		var pending []cschema.ContentPart
