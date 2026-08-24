@@ -23,14 +23,19 @@ Under active development. Honestly, right now:
 - The Anthropic passthrough and router foundation work: Claude Code can be
   pointed at `utraque` today and it behaves exactly as if talking to
   `api.anthropic.com` directly.
-- The Codex/GPT leg is **not yet implemented**. Requests that route to a GPT
-  model currently get a `503` stub response.
+- **Both legs answer.** A GPT model reaches the Codex backend and streams back
+  as Anthropic-shaped SSE — or as a single `MessagesResponse` when the client
+  sends `stream:false` — billed against your Codex subscription.
+  `GET /v1/models` serves the merged picker catalog, and
+  `POST /v1/messages/count_tokens` is answered locally for GPT-routed models.
+- A GPT request answers `503` only when there is no Codex credential to spend.
+  Run `codex login`, or point `UTRAQUE_CODEX_AUTH_FILE` at a file that holds
+  one.
 
-The Codex leg is being built out in phases — Codex auth handling, the model
-catalog, request translation, and finally the streaming translator that turns
-OpenAI's Responses API into Anthropic-shaped SSE. See the project's internal
-plan for the full phased roadmap; each phase is intended to be independently
-useful, ending with unattended operation via launchd.
+Still outstanding: observability polish, the uTLS transport for a possible
+Cloudflare fingerprint gate, and unattended operation via launchd socket
+activation with idle self-exit. See the project's internal plan for the full
+phased roadmap; each phase is independently useful.
 
 ## How it works / credentials
 
@@ -41,7 +46,7 @@ request; `utraque` forwards that request byte-for-byte to
 `anthropic-beta` headers. The proxy stores no Anthropic secret of its own —
 the credential lives entirely in the client and passes through untouched.
 
-**Codex/GPT leg (in progress).** Rather than a metered API key, this leg
+**Codex/GPT leg.** Rather than a metered API key, this leg
 reads the Codex CLI's own login token from `~/.codex/auth.json`, refreshes it
 when it's near expiry (writing the refreshed token back to that file safely,
 so it never clobbers the Codex CLI's own state), and uses it to call OpenAI's
@@ -78,6 +83,12 @@ is also planned). Knobs that exist today:
   subscriptions through the loopback port.
 - **Anthropic base URL** — the upstream Anthropic endpoint the passthrough
   leg forwards to (defaults to `api.anthropic.com`).
+- **Codex base URL** (`UTRAQUE_CODEX_BASE_URL`) — the Codex backend root used
+  for both the model catalog and inference. It exists so the test suite can
+  aim the leg at a fake upstream; in normal use, leave it alone.
+- **Codex auth file** (`UTRAQUE_CODEX_AUTH_FILE`) — where the Codex login
+  token lives. Defaults to `$CODEX_HOME/auth.json`, else `~/.codex/auth.json`,
+  which is the same file the Codex CLI reads and writes.
 - **Limits** — request body size and similar guardrails enforced by the
   server middleware.
 - **Idle timeout** — how long the process may sit idle before self-exiting

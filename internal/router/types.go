@@ -1,8 +1,27 @@
 package router
 
 import (
+	"errors"
 	"log/slog"
 	"net/http"
+)
+
+// The two conditions every leg must be able to report to the dispatcher, and
+// which the dispatcher must never answer with an error envelope.
+//
+// They live here, in the vocabulary both legs share, rather than in either
+// leg's own package: the Anthropic passthrough and the Codex leg fail in the
+// same two ways, and the dispatcher should not have to import one leg to
+// understand the other. internal/anthropic re-exports these under its original
+// names, so errors.Is keeps matching either spelling.
+var (
+	// ErrResponseStarted wraps any failure that happens after the status line
+	// and headers have gone out. A caller must not try to render an error
+	// envelope on top of it — the bytes are already committed.
+	ErrResponseStarted = errors.New("utraque: response already started")
+
+	// ErrClientGone wraps a failure caused by the caller disconnecting.
+	ErrClientGone = errors.New("utraque: client went away")
 )
 
 // Backend names one of the two upstream legs a request can be sent to.

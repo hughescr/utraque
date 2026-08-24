@@ -33,10 +33,15 @@ const copyBufferSize = 32 << 10
 // ErrResponseStarted wraps any failure that happens after the status line and
 // headers have gone out. A caller must not try to render an error envelope on
 // top of it — the bytes are already committed.
-var ErrResponseStarted = errors.New("utraque/anthropic: response already started")
+//
+// It is an alias for router.ErrResponseStarted, not a distinct sentinel: both
+// legs fail this way, so the dispatcher tests one value and errors.Is matches
+// whichever name the caller reaches for.
+var ErrResponseStarted = router.ErrResponseStarted
 
-// ErrClientGone wraps a failure caused by the caller disconnecting.
-var ErrClientGone = errors.New("utraque/anthropic: client went away")
+// ErrClientGone wraps a failure caused by the caller disconnecting. Like
+// ErrResponseStarted it is the shared router sentinel under a local name.
+var ErrClientGone = router.ErrClientGone
 
 // hopByHop is the RFC 7230 §6.1 connection-scoped header set. These describe
 // the caller-to-proxy connection and must never be relayed to upstream (nor

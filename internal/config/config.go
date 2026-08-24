@@ -39,6 +39,12 @@ const (
 	// (see resolveCodexAuthFile) rather than being a fixed string, so it has no
 	// Default* constant. ClientID is OpenAI's public Codex CLI OAuth client id,
 	// not a secret.
+	// DefaultCodexBaseURL is the undocumented Codex backend root the Codex CLI
+	// itself uses, for both the model catalog and /responses. It is overridable
+	// so tests (and only tests) can aim the leg at a fake upstream: the real
+	// host is never contacted by the test suite.
+	DefaultCodexBaseURL = "https://chatgpt.com/backend-api/codex"
+
 	DefaultCodexTokenURL    = "https://auth.openai.com/oauth/token"
 	DefaultCodexClientID    = "app_EMoamEEZ73f0CkXaXp7hrann"
 	DefaultCodexRefreshSkew = 120 * time.Second
@@ -71,6 +77,7 @@ const (
 	EnvLogLevel            = EnvPrefix + "LOG_LEVEL"
 	EnvLogFormat           = EnvPrefix + "LOG_FORMAT"
 
+	EnvCodexBaseURL     = EnvPrefix + "CODEX_BASE_URL"
 	EnvCodexAuthFile    = EnvPrefix + "CODEX_AUTH_FILE"
 	EnvCodexCacheFile   = EnvPrefix + "CODEX_CACHE_FILE"
 	EnvCodexTokenURL    = EnvPrefix + "CODEX_TOKEN_URL"
@@ -105,6 +112,9 @@ type Idle struct {
 // secret — the tokens themselves live only in AuthFile on disk and are never
 // held in Config.
 type Codex struct {
+	// BaseURL is the Codex backend root used for both the model catalog and the
+	// /responses inference endpoint.
+	BaseURL string
 	// AuthFile is the absolute path to the Codex CLI credential file. It is
 	// resolved from UTRAQUE_CODEX_AUTH_FILE, else CODEX_HOME/auth.json, else
 	// ~/.codex/auth.json. Empty on a bare Default(); LoadFrom always fills it.
@@ -162,6 +172,7 @@ func Default() Config {
 		Codex: Codex{
 			// AuthFile is intentionally empty here: a bare Default() performs no
 			// environment or filesystem lookups. LoadFrom resolves it.
+			BaseURL:     DefaultCodexBaseURL,
 			TokenURL:    DefaultCodexTokenURL,
 			ClientID:    DefaultCodexClientID,
 			RefreshSkew: DefaultCodexRefreshSkew,
@@ -192,6 +203,7 @@ func LoadFrom(getenv func(string) string) (Config, error) {
 	setString(EnvListen, &c.Listen)
 	setString(EnvLocalToken, &c.LocalToken)
 	setString(EnvAnthropicBaseURL, &c.Anthropic.BaseURL)
+	setString(EnvCodexBaseURL, &c.Codex.BaseURL)
 	setString(EnvCodexTokenURL, &c.Codex.TokenURL)
 	setString(EnvLogLevel, &c.Log.Level)
 	setString(EnvLogFormat, &c.Log.Format)
@@ -232,6 +244,7 @@ func LoadFrom(getenv func(string) string) (Config, error) {
 		return Config{}, err
 	}
 
+	c.Codex.BaseURL = strings.TrimRight(strings.TrimSpace(c.Codex.BaseURL), "/")
 	c.Codex.TokenURL = strings.TrimRight(strings.TrimSpace(c.Codex.TokenURL), "/")
 	c.Listen = strings.TrimSpace(c.Listen)
 	c.Log.Level = strings.ToLower(strings.TrimSpace(c.Log.Level))
@@ -378,30 +391,14 @@ func (c Config) Validate() error {
 	if c.Codex.ClientID == "" {
 		return fmt.Errorf("config: codex client id must not be empty")
 	}
-	// The token URL must be a plain https/http endpoint with no embedded
-	// credentials — same rule as the Anthropic base URL, since a misconfigured
-	// value is printed to stderr on failure.
-	if c.Codex.TokenURL == "" {
-		return fmt.Errorf("config: %s must not be empty", EnvCodexTokenURL)
+	// Both Codex endpoints must be plain https/http URLs with no embedded
+	// credentials — the same rule as the Anthropic base URL, since a
+	// misconfigured value is printed to stderr on failure.
+	if err := validateEndpoint(EnvCodexBaseURL, c.Codex.BaseURL); err != nil {
+		return err
 	}
-	tu, err := url.Parse(c.Codex.TokenURL)
-	if err != nil {
-		var ue *url.Error
-		if errors.As(err, &ue) {
-			return fmt.Errorf("config: %s is not a valid URL: %w", EnvCodexTokenURL, ue.Err)
-		}
-		return fmt.Errorf("config: %s is not a valid URL", EnvCodexTokenURL)
-	}
-	switch tu.Scheme {
-	case "http", "https":
-	default:
-		return fmt.Errorf("config: %s %q: scheme must be http or https", EnvCodexTokenURL, RedactURL(c.Codex.TokenURL))
-	}
-	if tu.Host == "" {
-		return fmt.Errorf("config: %s %q: missing host", EnvCodexTokenURL, RedactURL(c.Codex.TokenURL))
-	}
-	if tu.User != nil {
-		return fmt.Errorf("config: %s must not contain userinfo credentials", EnvCodexTokenURL)
+	if err := validateEndpoint(EnvCodexTokenURL, c.Codex.TokenURL); err != nil {
+		return err
 	}
 
 	switch c.Log.Level {
@@ -413,6 +410,42 @@ func (c Config) Validate() error {
 	case "json", "text":
 	default:
 		return fmt.Errorf("config: %s %q: want json|text", EnvLogFormat, c.Log.Format)
+	}
+	return nil
+}
+
+// validateEndpoint checks one configured URL: present, parseable, http(s), with
+// a host and without userinfo, query or fragment. Every message renders the URL
+// through RedactURL (or only url.Error's inner cause), because a misconfigured
+// value can carry credentials and these errors are printed to stderr.
+func validateEndpoint(name, raw string) error {
+	if raw == "" {
+		return fmt.Errorf("config: %s must not be empty", name)
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		var ue *url.Error
+		if errors.As(err, &ue) {
+			return fmt.Errorf("config: %s is not a valid URL: %w", name, ue.Err)
+		}
+		return fmt.Errorf("config: %s is not a valid URL", name)
+	}
+	switch u.Scheme {
+	case "http", "https":
+	default:
+		return fmt.Errorf("config: %s %q: scheme must be http or https", name, RedactURL(raw))
+	}
+	if u.Host == "" {
+		return fmt.Errorf("config: %s %q: missing host", name, RedactURL(raw))
+	}
+	if u.User != nil {
+		return fmt.Errorf("config: %s must not contain userinfo credentials", name)
+	}
+	if u.RawQuery != "" || u.ForceQuery {
+		return fmt.Errorf("config: %s must not contain a query string", name)
+	}
+	if u.Fragment != "" {
+		return fmt.Errorf("config: %s must not contain a fragment", name)
 	}
 	return nil
 }
@@ -443,6 +476,7 @@ func (c Config) String() string {
 	fmt.Fprintf(&b, " max_body_bytes=%d", c.Limits.MaxBodyBytes)
 	fmt.Fprintf(&b, " upstream_idle_timeout=%s", c.Limits.UpstreamIdleTimeout)
 	fmt.Fprintf(&b, " anthropic.base_url=%s", RedactURL(c.Anthropic.BaseURL))
+	fmt.Fprintf(&b, " codex.base_url=%s", RedactURL(c.Codex.BaseURL))
 	fmt.Fprintf(&b, " codex.auth_file=%s", c.Codex.AuthFile)
 	fmt.Fprintf(&b, " codex.cache_file=%s", c.Codex.CachePath)
 	fmt.Fprintf(&b, " codex.token_url=%s", RedactURL(c.Codex.TokenURL))
@@ -464,6 +498,7 @@ func (c Config) LogValue() slog.Value {
 		slog.Int64("max_body_bytes", c.Limits.MaxBodyBytes),
 		slog.Duration("upstream_idle_timeout", c.Limits.UpstreamIdleTimeout),
 		slog.String("anthropic.base_url", RedactURL(c.Anthropic.BaseURL)),
+		slog.String("codex.base_url", RedactURL(c.Codex.BaseURL)),
 		slog.String("codex.auth_file", c.Codex.AuthFile),
 		slog.String("codex.cache_file", c.Codex.CachePath),
 		slog.String("codex.token_url", RedactURL(c.Codex.TokenURL)),

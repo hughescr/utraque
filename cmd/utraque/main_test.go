@@ -314,11 +314,11 @@ func TestUnknownModelReturns404Envelope(t *testing.T) {
 	}
 }
 
-// TestCodexModelReturns503Stub asserts a GPT alias resolves to the Codex
-// backend and gets the clear not-yet-implemented stub rather than being
-// silently forwarded to Anthropic — a cross-leg fallback would spend the wrong
-// subscription.
-func TestCodexModelReturns503Stub(t *testing.T) {
+// TestCodexModelWithoutCredentialReturns503 asserts a GPT alias resolves to the
+// Codex backend and, with no `codex login` configured, gets a clear 503 rather
+// than being silently forwarded to Anthropic — a cross-leg fallback would spend
+// the wrong subscription.
+func TestCodexModelWithoutCredentialReturns503(t *testing.T) {
 	var hits atomic.Int64
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hits.Add(1)
@@ -341,10 +341,13 @@ func TestCodexModelReturns503Stub(t *testing.T) {
 	if ev.Error.Type != string(apierr.TypeAPI) {
 		t.Errorf("error type = %q, want %q", ev.Error.Type, apierr.TypeAPI)
 	}
-	if !strings.Contains(ev.Error.Message, "codex leg not yet implemented") {
-		t.Errorf("message = %q, want the not-implemented stub text", ev.Error.Message)
+	if !strings.Contains(ev.Error.Message, "no Codex credential is configured") {
+		t.Errorf("message = %q, want it to name the missing credential", ev.Error.Message)
 	}
-	// The stub must report the resolved upstream slug, proving the alias
+	if !strings.Contains(ev.Error.Message, "codex login") {
+		t.Errorf("message = %q, want it to say how to fix the problem", ev.Error.Message)
+	}
+	// The error must report the resolved upstream slug, proving the alias
 	// registry ran rather than the name being passed through raw.
 	if !strings.Contains(ev.Error.Message, "gpt-5.6-sol") {
 		t.Errorf("message = %q, want it to name the resolved upstream slug", ev.Error.Message)
@@ -384,6 +387,9 @@ func TestCountTokensRoutesToPassthrough(t *testing.T) {
 // TestCatchAllRoutesToPassthrough asserts an unrecognised path is relayed
 // upstream rather than 404'd locally: Claude Code reaches for assorted
 // endpoints under the base URL and none of them may fail here.
+//
+// /v1/models is deliberately NOT the example any more — discovery answers that
+// one locally now (see TestModelsServesTheMergedCatalog).
 func TestCatchAllRoutesToPassthrough(t *testing.T) {
 	var gotPath string
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -395,7 +401,7 @@ func TestCatchAllRoutesToPassthrough(t *testing.T) {
 
 	front := frontDoor(t, upstream.URL)
 
-	resp, err := noRedirectClient().Get(front.URL + "/v1/models")
+	resp, err := noRedirectClient().Get(front.URL + "/v1/organizations/me")
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
@@ -404,8 +410,8 @@ func TestCatchAllRoutesToPassthrough(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
-	if gotPath != "/v1/models" {
-		t.Errorf("upstream path = %q, want /v1/models", gotPath)
+	if gotPath != "/v1/organizations/me" {
+		t.Errorf("upstream path = %q, want /v1/organizations/me", gotPath)
 	}
 }
 
@@ -510,7 +516,7 @@ func TestCanonicalRoutesStillMatch(t *testing.T) {
 	resp := post(t, front.URL+"/v1/messages",
 		`{"model":"sol","max_tokens":8,"messages":[]}`, nil)
 	if resp.StatusCode != http.StatusServiceUnavailable {
-		t.Fatalf("status = %d, want the 503 Codex stub", resp.StatusCode)
+		t.Fatalf("status = %d, want the Codex leg's no-credential 503", resp.StatusCode)
 	}
 	if n := hits.Load(); n != 0 {
 		t.Errorf("upstream was contacted %d times, want 0", n)

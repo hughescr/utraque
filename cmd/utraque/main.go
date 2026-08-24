@@ -1,8 +1,9 @@
 // Command utraque is a local HTTP proxy that lets one Claude Code session
 // reach two subscriptions: Anthropic models pass through to api.anthropic.com
 // on the caller's own OAuth credential, and GPT models route to the Codex
-// backend. This build implements the Anthropic leg; the Codex leg answers with
-// a clear 503 stub until phase 5 lands.
+// backend on the credential the Codex CLI already holds. Both legs are live;
+// this file only assembles them, so the wiring stays readable and every
+// behaviour is testable in the package that owns it.
 package main
 
 import (
@@ -22,11 +23,16 @@ import (
 	"github.com/hughescr/utraque/internal/apierr"
 	"github.com/hughescr/utraque/internal/codex/auth"
 	"github.com/hughescr/utraque/internal/codex/catalog"
+	"github.com/hughescr/utraque/internal/codex/leg"
+	"github.com/hughescr/utraque/internal/codex/responses"
+	cschema "github.com/hughescr/utraque/internal/codex/schema"
 	"github.com/hughescr/utraque/internal/config"
+	"github.com/hughescr/utraque/internal/discovery"
 	"github.com/hughescr/utraque/internal/idle"
 	"github.com/hughescr/utraque/internal/obs"
 	"github.com/hughescr/utraque/internal/router"
 	"github.com/hughescr/utraque/internal/server"
+	"github.com/hughescr/utraque/internal/tokens"
 	"github.com/hughescr/utraque/internal/transport"
 )
 
@@ -133,18 +139,45 @@ func newServer(cfg config.Config, log *slog.Logger, activity server.ActivityTrac
 	// memory-only. It performs no network or disk I/O until first used, and
 	// /healthz only ever reads its held snapshot (never triggering a fetch).
 	cat := catalog.New(catalog.Options{
+		BaseURL:       cfg.Codex.BaseURL,
 		CachePath:     cfg.Codex.CachePath,
 		ClientVersion: version,
 		Logger:        log,
 	})
 
-	d := &dispatcher{anthropic: passthrough}
+	// The Codex inference leg. It is built even without a credential source:
+	// "no `codex login` here" is a state it reports per request, with an
+	// actionable message, rather than a construction failure that would take
+	// the working Anthropic leg down with it.
+	//
 	// Only assign the interface field from a non-nil concrete source: a nil
-	// *auth.Source stored in the interface would be a non-nil interface value,
-	// defeating the nil check in dispatch.
-	if credSource != nil {
-		d.codexCred = credSource
+	// *auth.Source stored in an interface is a non-nil interface value, which
+	// would defeat the leg's own nil check.
+	legOpts := leg.Options{
+		Client: responses.New(responses.Options{
+			BaseURL:   cfg.Codex.BaseURL,
+			Transport: tr,
+			Logger:    log,
+		}),
+		Catalog:      cat,
+		Estimator:    tokens.Default(),
+		UpstreamIdle: cfg.Limits.UpstreamIdleTimeout,
+		Logger:       log,
 	}
+	if credSource != nil {
+		legOpts.Credentials = credSource
+	}
+	codexLeg, err := leg.New(legOpts)
+	if err != nil {
+		return nil, err
+	}
+
+	models, err := newDiscovery(cfg, tr, cat, credSource, log)
+	if err != nil {
+		return nil, err
+	}
+
+	d := &dispatcher{anthropic: passthrough, codex: codexLeg}
 
 	hr := &healthReporter{cat: cat}
 	if credSource != nil {
@@ -160,11 +193,47 @@ func newServer(cfg config.Config, log *slog.Logger, activity server.ActivityTrac
 		Routes: server.Routes{
 			Messages:    http.HandlerFunc(d.messages),
 			CountTokens: http.HandlerFunc(d.countTokens),
-			// Everything else — /v1/models, /v1/organizations/..., whatever
-			// Claude Code reaches for next — relays upstream unchanged. None
-			// of it may 404 locally.
+			Models:      models,
+			// Everything else — /v1/organizations/..., whatever Claude Code
+			// reaches for next — relays upstream unchanged. None of it may 404
+			// locally.
 			Passthrough: passthrough,
 		},
+	})
+}
+
+// newDiscovery builds the merged GET /v1/models handler that populates Claude
+// Code's model picker.
+//
+// The Codex half is deliberately read through a Peek gate. discovery's contract
+// is that opening a picker must never be a reason to rotate a credential, and
+// auth.Source.Get can trigger a refresh and an auth.json write-back shared with
+// the Codex CLI. A live token serves real rows; anything else serves none,
+// which the handler already degrades to gracefully.
+func newDiscovery(cfg config.Config, tr transport.Transport, cat *catalog.Client, credSource *auth.Source, log *slog.Logger) (http.Handler, error) {
+	anthCat, err := anthropic.NewCatalog(cfg.Anthropic.BaseURL, tr, anthropic.WithCatalogLogger(log))
+	if err != nil {
+		return nil, err
+	}
+
+	codexCat := discovery.CodexCatalogFunc(func(ctx context.Context) ([]cschema.Model, error) {
+		if credSource == nil {
+			return nil, errors.New("no codex credential is configured")
+		}
+		if st := credSource.Peek(); st.State != auth.StateOK {
+			return nil, fmt.Errorf("codex credential is %q; not refreshing it just to open the model picker", st.State)
+		}
+		cred, err := credSource.Get(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return cat.Models(ctx, cred)
+	})
+
+	return discovery.New(discovery.Options{
+		Anthropic: anthCat,
+		Codex:     codexCat,
+		Logger:    log,
 	})
 }
 
@@ -209,20 +278,12 @@ func (h *healthReporter) extra(context.Context) map[string]any {
 func roundSeconds(s float64) float64 { return math.Round(s*1000) / 1000 }
 
 // dispatcher reads the request body once, peeks the two fields that decide
-// routing, and hands the whole thing to the leg the router picked.
+// routing, and hands the whole thing to the leg the router picked. Both legs
+// own their own responses; the dispatcher only chooses between them and renders
+// what neither of them could.
 type dispatcher struct {
 	anthropic router.Leg
-
-	// codex is nil until the Codex inference leg lands; nil means "answer the
-	// 503 stub".
-	codex router.Leg
-
-	// codexCred is the Codex credential source. It is wired now (phases 2-3)
-	// even though the inference leg is not: a codex-routed request obtains a
-	// credential through it to prove the auth leg is live, then still answers
-	// the 503 stub because translation/streaming lands in phases 4-5. Nil when
-	// no credential file is configured.
-	codexCred auth.CredentialSource
+	codex     router.Leg
 }
 
 // peeked is the minimal shape the dispatcher needs out of a Messages or
@@ -294,13 +355,10 @@ func (d *dispatcher) dispatch(w http.ResponseWriter, r *http.Request, call legCa
 		}
 	case router.BackendCodex:
 		if d.codex == nil {
-			// The inference leg is not built yet. Do NOT exercise the credential
-			// here: Get can trigger a network refresh and rewrite the shared
-			// auth.json, and doing that as a side effect of a request that can
-			// only 503 spends a token rotation (and risks a write-back race with
-			// the Codex CLI) for no served response. The credential source stays
-			// wired for phases 4-5, where a real codex request will consume it.
-			_ = apierr.Write(w, codexNotImplemented(dec))
+			// Defensive: newServer always builds the leg. A nil interface here
+			// would panic, and a panic is a much worse answer than a 503.
+			_ = apierr.Write(w, apierr.WithStatus(http.StatusServiceUnavailable, apierr.TypeAPI,
+				"codex leg is not configured"))
 			return
 		}
 		if err := call(d.codex, w, r, rq); err != nil {
@@ -316,21 +374,11 @@ func (d *dispatcher) dispatch(w http.ResponseWriter, r *http.Request, call legCa
 func (d *dispatcher) fail(w http.ResponseWriter, r *http.Request, err error) {
 	ctx := r.Context()
 	log := obs.LoggerFrom(ctx)
-	if errors.Is(err, anthropic.ErrResponseStarted) || errors.Is(err, anthropic.ErrClientGone) {
+	if errors.Is(err, router.ErrResponseStarted) || errors.Is(err, router.ErrClientGone) {
 		log.LogAttrs(context.WithoutCancel(ctx), slog.LevelWarn,
 			"leg failed after the response started", slog.String("err", err.Error()))
 		return
 	}
 	log.LogAttrs(ctx, slog.LevelWarn, "leg failed", slog.String("err", err.Error()))
 	_ = apierr.Write(w, err)
-}
-
-// codexNotImplemented is the phase-1 Codex stub. It is a 503 rather than a 501
-// so the client reads it as "this backend cannot serve you right now" — the
-// same shape it will see later when the Codex leg exists but is unhealthy —
-// and never as a malformed request it should stop retrying.
-func codexNotImplemented(dec router.Decision) *apierr.Error {
-	return apierr.WithStatus(http.StatusServiceUnavailable, apierr.TypeAPI,
-		"codex leg not yet implemented: model %q routes to upstream model %q, which utraque cannot serve yet",
-		dec.ClientModel, dec.UpstreamModel)
 }
