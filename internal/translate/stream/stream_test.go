@@ -135,7 +135,14 @@ func TestGrammarInvariantAllCases(t *testing.T) {
 // feed EVERY byte-prefix of the input and assert the emitted output is always a
 // well-formed Anthropic stream (or empty, when nothing was emitted yet). Every
 // truncation point — mid-frame, mid-JSON, mid-block — must still yield grammar.
+//
+// It sweeps BOTH on_truncate modes. error-mode force-closes via an error
+// terminus; finish-mode synthesises a clean terminus — and the grammar checker
+// enforces that a clean terminus never carries invalid tool JSON, so a prefix
+// cut mid-tool-arguments in finish mode must resolve to an error terminus, not a
+// fabricated tool_use the client cannot parse.
 func TestPrefixTruncation(t *testing.T) {
+	modes := []string{"error", "finish"}
 	for _, in := range fixtureInputs(t) {
 		name := caseName(in)
 		t.Run(name, func(t *testing.T) {
@@ -143,11 +150,15 @@ func TestPrefixTruncation(t *testing.T) {
 			if err != nil {
 				t.Fatalf("read: %v", err)
 			}
-			for k := 0; k <= len(raw); k++ {
-				got, _, _ := runToBytes(t, raw[:k], goldenOptions())
-				if err := grammarError(got); err != nil {
-					t.Fatalf("prefix len %d of %d produced ill-formed output: %v\n--- output ---\n%s",
-						k, len(raw), err, got)
+			for _, mode := range modes {
+				opts := goldenOptions()
+				opts.OnTruncate = mode
+				for k := 0; k <= len(raw); k++ {
+					got, _, _ := runToBytes(t, raw[:k], opts)
+					if err := grammarError(got); err != nil {
+						t.Fatalf("on_truncate=%s prefix len %d of %d produced ill-formed output: %v\n--- output ---\n%s",
+							mode, k, len(raw), err, got)
+					}
 				}
 			}
 		})
@@ -265,6 +276,177 @@ func TestOnTruncateFinish(t *testing.T) {
 	if strings.Contains(s, "event: error") {
 		t.Errorf("on_truncate=finish should not emit an error frame:\n%s", s)
 	}
+}
+
+// sseFrame renders one Anthropic SSE frame from an event name and JSON body.
+func sseFrame(event, data string) string {
+	return "event: " + event + "\ndata: " + data + "\n\n"
+}
+
+// TestGrammarRejectsIllFormed feeds the grammar checker hand-crafted ILL-FORMED
+// Anthropic streams and asserts it rejects each. Without these, the checker's
+// rejection branches are never exercised (every other test feeds it well-formed
+// translator output), so a deleted invariant would leave the suite green.
+func TestGrammarRejectsIllFormed(t *testing.T) {
+	msgStart := sseFrame("message_start", `{"type":"message_start","message":{"id":"m","model":"x","content":[],"usage":{"input_tokens":1}}}`)
+	cases := []struct {
+		name   string
+		stream string
+	}{
+		{
+			"content_block_start before message_start",
+			sseFrame("content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`),
+		},
+		{
+			"non-monotonic block index",
+			msgStart +
+				sseFrame("content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`) +
+				sseFrame("content_block_stop", `{"type":"content_block_stop","index":0}`) +
+				sseFrame("content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`),
+		},
+		{
+			"two blocks open at once",
+			msgStart +
+				sseFrame("content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`) +
+				sseFrame("content_block_start", `{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}`),
+		},
+		{
+			"invalid tool JSON on a clean terminus",
+			msgStart +
+				sseFrame("content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"t","name":"f","input":{}}}`) +
+				sseFrame("content_block_delta", `{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"a"}}`) +
+				sseFrame("content_block_stop", `{"type":"content_block_stop","index":0}`) +
+				sseFrame("message_delta", `{"type":"message_delta","delta":{"stop_reason":"tool_use"}}`) +
+				sseFrame("message_stop", `{"type":"message_stop"}`),
+		},
+		{
+			"delta kind mismatched to block kind",
+			msgStart +
+				sseFrame("content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"t","name":"f","input":{}}}`) +
+				sseFrame("content_block_delta", `{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"oops"}}`),
+		},
+		{
+			"event after terminus",
+			msgStart +
+				sseFrame("message_stop", `{"type":"message_stop"}`) +
+				sseFrame("message_stop", `{"type":"message_stop"}`),
+		},
+		{
+			"event name disagrees with json type",
+			msgStart +
+				sseFrame("error", `{"type":"message_stop"}`),
+		},
+		{
+			"no terminus",
+			msgStart +
+				sseFrame("content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`) +
+				sseFrame("content_block_stop", `{"type":"content_block_stop","index":0}`),
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if err := grammarError([]byte(c.stream)); err == nil {
+				t.Errorf("grammarError accepted an ill-formed stream:\n%s", c.stream)
+			}
+		})
+	}
+
+	// Positive control: a minimal well-formed stream is accepted.
+	good := msgStart + sseFrame("message_delta", `{"type":"message_delta","delta":{"stop_reason":"end_turn"}}`) +
+		sseFrame("message_stop", `{"type":"message_stop"}`)
+	if err := grammarError([]byte(good)); err != nil {
+		t.Errorf("grammarError rejected a well-formed stream: %v", err)
+	}
+}
+
+// TestFinishModePartialToolErrors confirms on_truncate=finish over a tool call
+// truncated mid-arguments does NOT fabricate a clean tool_use the client cannot
+// parse: it resolves to an error terminus instead. This is the cardinal sin the
+// finalize path must refuse — a faked clean terminus over truncated tool JSON.
+func TestFinishModePartialToolErrors(t *testing.T) {
+	input := sseFrame("response.created", `{"type":"response.created","response":{"id":"resp_test"}}`) +
+		sseFrame("response.output_item.added", `{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_0","call_id":"call_0","name":"get_weather"}}`) +
+		sseFrame("response.function_call_arguments.delta", `{"type":"response.function_call_arguments.delta","output_index":0,"delta":"{\"loc"}`)
+	opts := goldenOptions()
+	opts.OnTruncate = "finish"
+	got, res, err := runToBytes(t, []byte(input), opts)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	checkGrammar(t, got)
+	s := string(got)
+	if strings.Contains(s, "message_stop") {
+		t.Errorf("finish mode faked a clean terminus over a partial tool call:\n%s", s)
+	}
+	if !strings.Contains(s, "event: error") {
+		t.Errorf("finish mode over a partial tool call should emit an error terminus:\n%s", s)
+	}
+	if !res.Errored {
+		t.Errorf("Result.Errored should be true, got %+v", res)
+	}
+}
+
+// TestPendingBoundsAbort confirms exceeding the pending-item bound aborts the
+// stream with an error terminus rather than silently force-closing a block (and
+// dropping its later deltas or stranding invalid tool JSON under a clean stop).
+func TestPendingBoundsAbort(t *testing.T) {
+	var b strings.Builder
+	b.WriteString(sseFrame("response.created", `{"type":"response.created","response":{"id":"resp_test"}}`))
+	// Open output 0 as a text block that stays active and streaming.
+	b.WriteString(sseFrame("response.content_part.added", `{"type":"response.content_part.added","output_index":0,"content_index":0,"part":{"type":"output_text","text":""}}`))
+	b.WriteString(sseFrame("response.output_text.delta", `{"type":"response.output_text.delta","output_index":0,"delta":"hello"}`))
+	// Announce and buffer many parallel tool items (each a distinct output index),
+	// then stream a delta for each so they accumulate in the pending buffer.
+	for i := 1; i <= 20; i++ {
+		idx := fmt.Sprintf("%d", i)
+		b.WriteString(sseFrame("response.output_item.added", `{"type":"response.output_item.added","output_index":`+idx+`,"item":{"type":"function_call","id":"fc_`+idx+`","call_id":"call_`+idx+`","name":"f"}}`))
+		b.WriteString(sseFrame("response.function_call_arguments.delta", `{"type":"response.function_call_arguments.delta","output_index":`+idx+`,"delta":"{}"}`))
+	}
+	// A clean completion afterwards must NOT rescue this into a message_stop.
+	b.WriteString(sseFrame("response.completed", `{"type":"response.completed","response":{"id":"resp_test","status":"completed","usage":{"input_tokens":7,"output_tokens":1}}}`))
+
+	opts := goldenOptions() // maxPendingItems defaults to 16
+	got, res, err := runToBytes(t, []byte(b.String()), opts)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	checkGrammar(t, got)
+	s := string(got)
+	if strings.Contains(s, "message_stop") {
+		t.Errorf("bounds overflow produced a clean terminus:\n%s", s)
+	}
+	if !strings.Contains(s, "event: error") || !res.Errored {
+		t.Errorf("bounds overflow should abort with an error terminus, got %+v:\n%s", res, s)
+	}
+}
+
+// TestErrorFrameBeforeStartIsMode1 confirms an error frame arriving before any
+// output is failure mode 1: nothing emitted, Started false, error propagated for
+// the caller to render an HTTP envelope.
+func TestErrorFrameBeforeStartIsMode1(t *testing.T) {
+	input := sseFrame("error", `{"type":"error","message":"upstream boom"}`)
+	got, res, err := runToBytes(t, []byte(input), goldenOptions())
+	if err == nil {
+		t.Fatal("want an error for an error-frame-before-start")
+	}
+	if res.Started {
+		t.Errorf("Started should be false, got %+v", res)
+	}
+	if len(got) != 0 {
+		t.Errorf("nothing should be written before message_start, got:\n%s", got)
+	}
+}
+
+// TestDoneBeforeStartKeepsOrder confirms a terminal *.done arriving before any
+// start-triggering event still emits message_start before the block it opens, so
+// the "message_start first" invariant holds even on a pathological ordering.
+func TestDoneBeforeStartKeepsOrder(t *testing.T) {
+	input := sseFrame("response.output_text.done", `{"type":"response.output_text.done","output_index":0,"text":"hi"}`)
+	got, _, err := runToBytes(t, []byte(input), goldenOptions())
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	checkGrammar(t, got)
 }
 
 // TestSinkFoldEquivalence asserts decode(SSEWriter(events)) == events: the
@@ -474,6 +656,24 @@ func grammarError(data []byte) error {
 		case "content_block_delta":
 			if openIdx != ev.Index {
 				return fmt.Errorf("content_block_delta(%d) but open block is %d", ev.Index, openIdx)
+			}
+			// The delta kind must match the open block's kind: text_delta into text,
+			// thinking/signature_delta into thinking, input_json_delta into tool_use.
+			// A translator bug routing the wrong delta into a block is otherwise
+			// invisible.
+			if kind := blockKind[ev.Index]; ev.Delta.Type != "" {
+				ok := false
+				switch ev.Delta.Type {
+				case "text_delta":
+					ok = kind == "text"
+				case "thinking_delta", "signature_delta":
+					ok = kind == "thinking"
+				case "input_json_delta":
+					ok = kind == "tool_use"
+				}
+				if !ok {
+					return fmt.Errorf("delta type %q into %q block %d", ev.Delta.Type, kind, ev.Index)
+				}
 			}
 			if ev.Delta.Type == "input_json_delta" {
 				partial[ev.Index] += ev.Delta.PartialJSON

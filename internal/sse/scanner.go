@@ -64,8 +64,10 @@ func (s *Scanner) SetMaxLineBytes(n int) {
 // Scan advances to the next complete frame, returning true when one is
 // available (read it with Frame). It returns false at end of stream or on
 // error; call Err to tell them apart. A trailing frame not terminated by a
-// blank line before EOF is still dispatched if it accumulated any field, so a
-// truncated stream never silently drops its last event.
+// blank line before EOF is still dispatched if it accumulated a data field, so a
+// truncated stream never silently drops its last (complete) event — but a block
+// carrying no data does not dispatch, so a stream cut off after an event: line
+// cannot fabricate a terminal event.
 func (s *Scanner) Scan() bool {
 	if s.done {
 		return false
@@ -75,12 +77,11 @@ func (s *Scanner) Scan() bool {
 		event    string
 		data     []byte
 		haveData bool
-		haveAny  bool
 	)
 
 	dispatch := func() bool {
 		s.frame = Frame{Event: event, Data: data}
-		return haveAny
+		return haveData
 	}
 
 	for {
@@ -88,8 +89,11 @@ func (s *Scanner) Scan() bool {
 		if err != nil {
 			s.done = true
 			if err == io.EOF {
-				// Flush a frame that was mid-accumulation when the stream ended.
-				if haveAny {
+				// Flush a frame that was mid-accumulation when the stream ended, but
+				// only if it carried a data field. A block with no data does not
+				// dispatch (WHATWG), so a stream truncated after an event:/id: line
+				// but before its data can never manufacture a terminal event.
+				if haveData {
 					return dispatch()
 				}
 				return false
@@ -98,11 +102,11 @@ func (s *Scanner) Scan() bool {
 			return false
 		}
 
-		// Blank line: dispatch whatever we have. An empty accumulation (a run of
-		// blank lines, or comment-only frames) dispatches nothing and we keep
-		// reading.
+		// Blank line: dispatch a frame that accumulated a data field. An empty
+		// accumulation (blank-line runs, comment-only frames, or an event:/id:/retry:
+		// block with no data) dispatches nothing and we keep reading.
 		if len(line) == 0 {
-			if haveAny {
+			if haveData {
 				return dispatch()
 			}
 			continue
@@ -119,18 +123,15 @@ func (s *Scanner) Scan() bool {
 		switch string(name) {
 		case "event":
 			event = string(value)
-			haveAny = true
 		case "data":
 			if haveData {
 				data = append(data, '\n')
 			}
 			data = append(data, value...)
 			haveData = true
-			haveAny = true
 		case "id", "retry":
 			// Parsed and ignored: a proxy neither resumes nor honours reconnection
-			// timing, but these are valid fields and must not corrupt the frame.
-			haveAny = true
+			// timing. They do not by themselves cause a frame to dispatch.
 		default:
 			// Unknown field name: ignored per the event-stream rules.
 		}

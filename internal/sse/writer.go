@@ -5,12 +5,25 @@ import (
 	"io"
 )
 
-// Flusher is the flush half of http.Flusher / bufio.Writer, so a FrameWriter
-// can push a frame down the wire the instant it is written. It is optional: a
-// FrameWriter over a plain io.Writer simply does not flush.
+// Flusher is the flush half of bufio.Writer, so a FrameWriter can push a frame
+// down the wire the instant it is written. It is optional: a FrameWriter over a
+// plain io.Writer simply does not flush.
 type Flusher interface {
 	Flush() error
 }
+
+// httpFlusher matches the standard library's http.Flusher, whose Flush returns
+// no error. A *http.ResponseWriter (and the server's recorder wrapper) satisfies
+// this, not Flusher, so NewFrameWriter must recognise it explicitly or SSE
+// frames would sit in net/http's buffer instead of streaming.
+type httpFlusher interface {
+	Flush()
+}
+
+// flusherFunc adapts an error-less Flush() to the Flusher interface.
+type flusherFunc func()
+
+func (f flusherFunc) Flush() error { f(); return nil }
 
 // FrameWriter writes SSE frames to an io.Writer. It is the mirror of Scanner:
 // each frame is "event: <name>\n" (omitted when name is empty) followed by one
@@ -22,15 +35,19 @@ type FrameWriter struct {
 	err error
 }
 
-// NewFrameWriter builds a FrameWriter over w. If w is an http.Flusher (or any
-// Flusher), Flush forwards to it so frames are not held in a kernel or handler
-// buffer; a bufio.Writer is layered on to coalesce the small per-line writes of
-// a single frame into one syscall.
+// NewFrameWriter builds a FrameWriter over w. If w can flush — either the
+// error-returning Flusher or the standard library's error-less http.Flusher —
+// Flush forwards to it so frames are not held in a kernel or handler buffer; a
+// bufio.Writer is layered on to coalesce the small per-line writes of a single
+// frame into one syscall.
 func NewFrameWriter(w io.Writer) *FrameWriter {
 	bw := bufio.NewWriter(w)
 	fw := &FrameWriter{w: w, bw: bw}
-	if fl, ok := w.(Flusher); ok {
+	switch fl := w.(type) {
+	case Flusher:
 		fw.fl = fl
+	case httpFlusher:
+		fw.fl = flusherFunc(fl.Flush)
 	}
 	return fw
 }

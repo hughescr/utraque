@@ -264,7 +264,10 @@ func (t *Translator) Run(ctx context.Context, r io.Reader, sink Sink) (Result, e
 			if err != nil {
 				return finish(err)
 			}
-			if done {
+			// done covers the explicit terminus paths; t.terminated additionally
+			// catches a mid-stream error emitted from deep inside handling (a
+			// pending-buffer-bounds abort), which returns done=false.
+			if done || t.terminated {
 				return finish(nil)
 			}
 
@@ -272,8 +275,14 @@ func (t *Translator) Run(ctx context.Context, r io.Reader, sink Sink) (Result, e
 			return finish(t.handleEnd(sink, err))
 
 		case <-heartbeatC:
-			if err := sink.Ping(); err != nil {
-				return finish(err)
+			// A ping before message_start would commit a 200 with bytes on the wire
+			// while Result.Started is still false, breaking the mode-1 contract, and
+			// would precede message_start — an order real Anthropic streams never
+			// emit. Hold the keepalive until the stream has started.
+			if t.started {
+				if err := sink.Ping(); err != nil {
+					return finish(err)
+				}
 			}
 			// A ping is our own output, not upstream activity: reset only the
 			// heartbeat, leaving the idle bound to keep counting upstream silence.
@@ -357,6 +366,7 @@ func (t *Translator) handle(sink Sink, fr sse.Frame) (bool, error) {
 		if ev.Arguments != "" {
 			b.fullArgs = ev.Arguments
 		}
+		b.argsDone = true
 		return false, t.markDoneOrClose(sink, b)
 
 	case cschema.EventOutputItemDone:
@@ -483,6 +493,7 @@ func (t *Translator) onItemDone(sink Sink, ev *cschema.StreamEvent) error {
 		if b.fullArgs == "" && ev.Item.Arguments != "" {
 			b.fullArgs = ev.Item.Arguments
 		}
+		b.argsDone = true
 		return t.markDoneOrClose(sink, b)
 	default:
 		b := t.blocks[ev.OutputIndex]
@@ -552,7 +563,17 @@ func (t *Translator) emitMidStreamError(sink Sink, message string) error {
 }
 
 // finalizeClean drains every block, then emits message_delta and message_stop.
+// A tool call whose arguments streamed incrementally but never finalized (no
+// function_call_arguments.done / output_item.done) is a truncated call: the
+// partial_json already on the wire is not valid JSON, so a clean terminus would
+// present an unparseable tool_use. Refuse to fake it — abort with a mid-stream
+// error instead. This also governs on_truncate=finish over a partial tool call.
 func (t *Translator) finalizeClean(sink Sink) error {
+	for _, oi := range t.order {
+		if b := t.blocks[oi]; b != nil && b.kind == kindToolUse && b.argsSeen && !b.argsDone {
+			return t.emitMidStreamError(sink, "the upstream stream was truncated before the tool call arguments completed")
+		}
+	}
 	if err := t.finalizeAllBlocks(sink); err != nil {
 		return err
 	}

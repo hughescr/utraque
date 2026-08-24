@@ -35,6 +35,7 @@ type block struct {
 	done    bool // a terminal *.done arrived while buffering; close on promotion
 
 	argsSeen bool   // a function_call_arguments.delta arrived for this call
+	argsDone bool   // arguments.done / output_item.done finalised this call's args
 	fullArgs string // full arguments from arguments.done / output_item.done
 
 	pending []schema.Delta // deltas buffered while another block is active
@@ -74,6 +75,13 @@ func contentBlock(b *block) schema.ContentBlock {
 func (t *Translator) openBlock(sink Sink, b *block) error {
 	if b.started || b.stopped || b.dropped {
 		return nil
+	}
+	// message_start must precede any content_block_start. Every caller already
+	// starts the stream first; this makes the ordering invariant airtight against
+	// a *.done-first event that would otherwise open a block via the drain before
+	// message_start was emitted.
+	if err := t.ensureStarted(sink); err != nil {
+		return err
 	}
 	b.index = t.nextIndex
 	t.nextIndex++
@@ -236,9 +244,11 @@ func (t *Translator) finalizeAllBlocks(sink Sink) error {
 }
 
 // enforceBounds guards the pending buffer. When the count of buffered items
-// exceeds pending_items, or any one exceeds pending_item_bytes, it force-closes
-// the active block (relieving the head-of-line block that is holding everything
-// else up) and lets the drain promote the next item.
+// exceeds pending_items, or any one exceeds pending_item_bytes, the buffer can
+// no longer be drained without either dropping later deltas or force-closing a
+// block mid-arguments (which would strand invalid tool JSON and then fake a
+// clean terminus). A resource limit must therefore abort the stream with a
+// mid-stream error, never quietly truncate output.
 func (t *Translator) enforceBounds(sink Sink) error {
 	if t.active == nil {
 		return nil
@@ -258,13 +268,10 @@ func (t *Translator) enforceBounds(sink Sink) error {
 	if count <= t.maxPendingItems && !overflow {
 		return nil
 	}
-	t.log.Warn("stream pending buffer bounds exceeded; force-closing active block",
+	t.log.Warn("stream pending buffer bounds exceeded; aborting stream",
 		"pending_items", count, "max_pending_items", t.maxPendingItems,
 		"byte_overflow", overflow, "max_pending_bytes", t.maxPendingBytes)
-	if err := t.stopBlock(sink, t.active); err != nil {
-		return err
-	}
-	return t.drainNext(sink)
+	return t.emitMidStreamError(sink, "the upstream stream exceeded the translator's pending-buffer bounds")
 }
 
 // syntheticSignature builds the signature carried by a thinking block's closing

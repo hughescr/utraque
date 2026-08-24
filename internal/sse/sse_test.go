@@ -213,6 +213,29 @@ func TestWriterForwardsFlush(t *testing.T) {
 	}
 }
 
+// plainFlusher has the standard library's error-less http.Flusher signature,
+// which is NOT the sse.Flusher interface. NewFrameWriter must still recognise and
+// forward to it, or real *http.ResponseWriter SSE frames never leave net/http's
+// buffer.
+type plainFlusher struct {
+	io.Writer
+	flushes int
+}
+
+func (c *plainFlusher) Flush() { c.flushes++ }
+
+func TestWriterForwardsPlainHTTPFlush(t *testing.T) {
+	pf := &plainFlusher{Writer: &bytes.Buffer{}}
+	fw := NewFrameWriter(pf)
+	_ = fw.WriteFrame("e", []byte("d"))
+	if err := fw.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	if pf.flushes != 1 {
+		t.Errorf("downstream flushes = %d, want 1", pf.flushes)
+	}
+}
+
 // FuzzScanner asserts the scanner never panics and never loops forever on
 // arbitrary bytes, and that whatever frames it emits re-serialise and re-parse
 // to the identical frame sequence (a codec round-trip invariant).
