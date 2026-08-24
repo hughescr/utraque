@@ -333,9 +333,13 @@ func TestHealthzReportsTheFullOperationalPicture(t *testing.T) {
 			t.Errorf("/healthz is missing %q: %v", key, health)
 		}
 	}
+	// Both legs are reported, because they hold separate transports and only the
+	// Codex one can ever flip. "kind" names the Codex stack for the same reason.
 	transport, _ := health["transport"].(map[string]any)
-	if transport["kind"] != "std" {
-		t.Errorf("transport.kind = %v, want std", transport["kind"])
+	for key, want := range map[string]any{"kind": "std", "anthropic": "std", "codex": "std"} {
+		if transport[key] != want {
+			t.Errorf("transport.%s = %v, want %v", key, transport[key], want)
+		}
 	}
 	// Quota is present even before the backend has said anything, so "no quota
 	// block" can never be misread as "quota is fine".

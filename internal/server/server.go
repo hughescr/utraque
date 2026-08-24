@@ -69,14 +69,20 @@ type Options struct {
 	// Default obs.DefaultRedactor().
 	Redactor *obs.Redactor
 
-	// TransportKind reports which HTTP transport the upstream legs are using
+	// TransportKind reports the DEFAULT HTTP transport a request goes out on
 	// ("std" or "utls"). It appears on every request line, because "which TLS
 	// stack answered" is the first question once the Cloudflare fallback is in
 	// play and a useful constant when it is not.
 	//
-	// It is a func rather than a string because the auto transport can switch
-	// stacks mid-process: a kind captured at construction would keep claiming
-	// "std" long after every request had moved to uTLS.
+	// It is only a default. The legs hold separate transports and a leg that
+	// knows better overrides this by calling Summary.SetTransport at dispatch;
+	// the Codex responses client does exactly that, which is what makes an
+	// auto-transport flip visible on the request line. Wiring the flippable
+	// transport in here instead would mislabel every Anthropic request.
+	//
+	// It is a func rather than a string because a transport can switch stacks
+	// mid-process: a kind captured at construction would keep claiming "std"
+	// long after every request had moved to uTLS.
 	TransportKind func() string
 
 	// Tracer, when enabled, dumps a per-request trace. Nil — the default, and

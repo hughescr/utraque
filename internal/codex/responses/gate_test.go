@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/hughescr/utraque/internal/obs"
 	"github.com/hughescr/utraque/internal/transport"
 )
 
@@ -165,5 +166,39 @@ func TestFixedTransportsIgnoreAGate(t *testing.T) {
 		if tr.Kind() != want {
 			t.Errorf("%s transport changed to %q after a gate", want, tr.Kind())
 		}
+	}
+}
+
+// TestTheRequestLineFollowsTheTransportFlip pins the signal that makes a flip
+// visible at all. The stack is recorded by THIS client at dispatch, not by the
+// server middleware (which only ever sees the Anthropic leg's fixed std
+// transport), so the gated request reads "std" and its successor reads "utls".
+func TestTheRequestLineFollowsTheTransportFlip(t *testing.T) {
+	srv := httptest.NewServer(gateHandler())
+	defer srv.Close()
+
+	tr := transport.NewAuto(transport.DefaultOptions(), quietLogger())
+	c := newClient(t, srv.URL, func(o *Options) { o.Transport = tr })
+
+	kinds := make([]string, 0, 2)
+	for i := range 2 {
+		sum := obs.NewSummary()
+		ctx := obs.WithSummary(context.Background(), sum)
+		body, err := c.Stream(ctx, testCred(), testRequest())
+		if err == nil {
+			_ = body.Close()
+			t.Fatalf("request %d: want a gate error, got a stream", i)
+		}
+		kind, _ := sum.Fields()["transport"].(string)
+		kinds = append(kinds, kind)
+	}
+
+	if kinds[0] != transport.KindStd {
+		t.Errorf("the gated request logged transport %q, want %q: it really did go out on std",
+			kinds[0], transport.KindStd)
+	}
+	if kinds[1] != transport.KindUTLS {
+		t.Errorf("the request after the flip logged transport %q, want %q",
+			kinds[1], transport.KindUTLS)
 	}
 }

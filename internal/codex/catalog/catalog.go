@@ -168,6 +168,14 @@ func New(opts Options) *Client {
 	c.http.CheckRedirect = func(*http.Request, []*http.Request) error {
 		return http.ErrUseLastResponse
 	}
+	// A catalog read is a bounded request/response, not a stream, so it always
+	// gets an overall deadline. The proxy's shared transports deliberately carry
+	// Timeout 0 — an overall deadline would cut a long SSE answer — so passing
+	// one of those in must not silently make this fetch unbounded. The copy above
+	// is what makes setting it safe.
+	if c.http.Timeout <= 0 {
+		c.http.Timeout = defaultHTTPTimeout
+	}
 	if c.now == nil {
 		c.now = time.Now
 	}

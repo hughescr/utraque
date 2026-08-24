@@ -240,10 +240,19 @@ func newApp(cfg config.Config, log *slog.Logger, activity server.ActivityTracker
 	// The catalog client is always built; an empty CachePath just makes it
 	// memory-only. It performs no network or disk I/O until first used, and
 	// /healthz only ever reads its held snapshot (never triggering a fetch).
+	//
+	// It dials on the CODEX transport, not the default one: {base}/models and
+	// {base}/responses are the same host, chatgpt.com, and that host is the whole
+	// reason uTLS exists. On its own client the catalog would keep dialling std
+	// after a gate had already flipped inference onto uTLS, so the picker would
+	// serve no GPT rows and per-request effort clamping would stay stuck on the
+	// compiled-in seed. The constructor copies the client and re-imposes both its
+	// no-redirect policy and its own fetch timeout.
 	cat := catalog.New(catalog.Options{
 		BaseURL:       cfg.Codex.BaseURL,
 		CachePath:     cfg.Codex.CachePath,
 		ClientVersion: version,
+		HTTPClient:    codexTr.Client(),
 		Logger:        log,
 	})
 
@@ -313,7 +322,10 @@ func newApp(cfg config.Config, log *slog.Logger, activity server.ActivityTracker
 
 	d := &dispatcher{anthropic: passthrough, codex: codexLeg}
 
-	hr := &healthReporter{cat: cat, catState: catState, obs: obsv, transport: tr, tracer: tracer}
+	hr := &healthReporter{
+		cat: cat, catState: catState, obs: obsv,
+		anthTransport: tr, codexTransport: codexTr, tracer: tracer,
+	}
 	if credSource != nil {
 		hr.auth = credSource
 	}
@@ -708,12 +720,17 @@ func (s *catalogState) read() (state, err string, age time.Duration) {
 // token-expiry decode from a file stat and the catalog's held snapshot — so a
 // health poll never contacts the network and never reveals a token value.
 type healthReporter struct {
-	auth      *auth.Source        // nil when no credential file is configured
-	cat       *catalog.Client     // always set
-	catState  *catalogState       // always set
-	obs       *codexObserver      // always set
-	transport transport.Transport // always set
-	tracer    *obs.Tracer         // nil unless tracing is on
+	auth     *auth.Source    // nil when no credential file is configured
+	cat      *catalog.Client // always set
+	catState *catalogState   // always set
+	obs      *codexObserver  // always set
+	// The two legs hold SEPARATE transports and only the Codex one can ever
+	// change stack, so both are reported. Reporting one number for "the"
+	// transport was wrong in the only case that matters: after an auto flip,
+	// the Anthropic leg is still std and the Codex leg is not.
+	anthTransport  transport.Transport // always set
+	codexTransport transport.Transport // always set
+	tracer         *obs.Tracer         // nil unless tracing is on
 }
 
 func (h *healthReporter) extra(context.Context) map[string]any {
@@ -739,10 +756,20 @@ func (h *healthReporter) extra(context.Context) map[string]any {
 		// whole point of reporting burn-down is to see it before it is one.
 		out["codex_quota"] = h.obs.quotaHealth()
 	}
-	if h.transport != nil {
-		// Which TLS stack is in force. Under the auto transport this can change
-		// mid-process, so it is read live rather than captured at startup.
-		out["transport"] = map[string]any{"kind": h.transport.Kind()}
+	// Which TLS stack is in force, per leg. Under the auto transport the Codex
+	// one can change mid-process, so both are read live rather than captured at
+	// startup. "kind" names the CODEX stack: it is the only one that can flip,
+	// and a single-valued field that could never change would be worthless.
+	tr := map[string]any{}
+	if h.anthTransport != nil {
+		tr["anthropic"] = h.anthTransport.Kind()
+	}
+	if h.codexTransport != nil {
+		tr["codex"] = h.codexTransport.Kind()
+		tr["kind"] = h.codexTransport.Kind()
+	}
+	if len(tr) > 0 {
+		out["transport"] = tr
 	}
 	// Tracing state is reported because a directory of prompts accumulating on
 	// disk should never be a surprise. The path is not a secret; the contents

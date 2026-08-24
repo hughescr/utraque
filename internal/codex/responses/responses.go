@@ -216,6 +216,15 @@ func (c *Client) StreamResponse(ctx context.Context, cred auth.Credential, req *
 	httpReq.Header.Set(headerContentType, contentTypeJSON)
 	httpReq.Header.Set(headerAccept, acceptSSE)
 
+	// Which TLS stack this request is about to go out on. It is read HERE rather
+	// than captured by the server middleware at the top of the request: the
+	// middleware only ever sees the Anthropic leg's transport, which is a
+	// compile-time "std", while the Codex leg's is the only one that can flip.
+	// Reading it immediately before Do also names the stack that actually
+	// carried THIS request, so the request that trips a gate is logged as std
+	// and its successor as utls.
+	obs.SummaryFrom(ctx).SetTransport(c.tr.Kind())
+
 	resp, err := c.http.Do(httpReq)
 	if err != nil {
 		// A refused TLS handshake is what a fingerprint gate looks like when
