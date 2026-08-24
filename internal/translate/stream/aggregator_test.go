@@ -355,3 +355,34 @@ func TestAggregatorPingIsIgnored(t *testing.T) {
 		t.Errorf("input_tokens = %d, want the message_start estimate 2", msg.Usage.InputTokens)
 	}
 }
+
+// TestAggregatorMidStreamFailureIs502: an upstream that opened a stream and then
+// failed is a GATEWAY failure, not an internal one. The distinction is what
+// tells the caller whether retrying could help, and it is the status the
+// streaming path's siblings (ErrNoData, ErrTruncated) already use.
+func TestAggregatorMidStreamFailureIs502(t *testing.T) {
+	for _, fixture := range []string{"midstream_error", "response_failed", "truncated_stream"} {
+		t.Run(fixture, func(t *testing.T) {
+			raw, err := os.ReadFile(filepath.Join(streamsDir, fixture+".codex.sse"))
+			if err != nil {
+				t.Fatalf("read: %v", err)
+			}
+			agg := stream.NewAggregator()
+			tr := stream.New(goldenOptions())
+			if _, err := tr.Run(context.Background(), bytes.NewReader(raw), agg); err != nil {
+				t.Fatalf("run: %v", err)
+			}
+			_, err = agg.Message()
+			if err == nil {
+				t.Fatal("a failed stream folded into a message")
+			}
+			var ae *apierr.Error
+			if !errors.As(err, &ae) {
+				t.Fatalf("error %v is not an *apierr.Error", err)
+			}
+			if ae.HTTPStatus() != 502 {
+				t.Errorf("status = %d, want 502", ae.HTTPStatus())
+			}
+		})
+	}
+}

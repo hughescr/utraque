@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 
 	"github.com/hughescr/utraque/internal/anthropic/schema"
@@ -149,9 +150,13 @@ func (a *Aggregator) BlockStop(index int) error {
 	return nil
 }
 
-// MessageDelta records the terminal stop reason and usage. Upstream usage wins,
-// except that a zero input count keeps the message_start estimate rather than
-// reporting an implausible zero-token prompt.
+// MessageDelta records the terminal stop reason and usage.
+//
+// The Translator already substitutes the message_start estimate for a zero
+// upstream input count (see Translator.terminalUsage), so both sinks see the
+// same numbers. This repeats the rule only for a caller driving the Sink
+// directly, which has no translator to do it: it must never be the ONLY place
+// the substitution happens, or the streaming path would diverge again.
 func (a *Aggregator) MessageDelta(d MessageDelta) error {
 	a.stopReason = d.StopReason
 	u := d.Usage
@@ -260,7 +265,16 @@ func (a *Aggregator) finishedBlocks() ([]schema.ContentBlock, error) {
 		if msg == "" {
 			msg = "the upstream stream failed"
 		}
-		return nil, apierr.New(kind, "%s", msg)
+		e := apierr.New(kind, "%s", msg)
+		if kind == apierr.TypeAPI {
+			// The generic type means "the upstream failed and said no more", which
+			// is a gateway failure (502), not an internal one (500). Its siblings
+			// ErrNoData / ErrTruncated / ErrIncomplete are pinned to 502 for the
+			// same reason: the status is what tells the caller whether retrying
+			// could help. A more specific upstream type keeps its own status.
+			e.Status = http.StatusBadGateway
+		}
+		return nil, e
 	}
 	if !a.started {
 		return nil, apierr.Wrap(ErrNoData, apierr.TypeAPI, "the upstream returned no response")

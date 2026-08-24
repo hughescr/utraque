@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net/http"
 	"time"
 
 	"github.com/hughescr/utraque/internal/anthropic/schema"
@@ -509,7 +510,11 @@ func (t *Translator) onItemDone(sink Sink, ev *cschema.StreamEvent) error {
 // render); after, it is mode 2 (close the active block, emit an error frame).
 func (t *Translator) fail(sink Sink, msg string) (bool, error) {
 	if !t.started {
-		return true, apierr.API("%s", msg)
+		// 502, not the api_error default of 500: the UPSTREAM failed, and the
+		// distinction is what tells the caller whether retrying could help. It
+		// matches the status ErrNoData and ErrTruncated already carry for the
+		// same class of condition.
+		return true, apierr.WithStatus(http.StatusBadGateway, apierr.TypeAPI, "%s", msg)
 	}
 	return true, t.emitMidStreamError(sink, msg)
 }
@@ -546,15 +551,31 @@ func endMessage(cause error) string {
 	}
 }
 
-// emitMidStreamError closes the active block with a bare content_block_stop (to
-// keep the block grammar balanced) and emits an error frame, then STOPS: no
-// message_delta / message_stop is written over a broken stream.
+// emitMidStreamError closes the active block (keeping the block grammar
+// balanced) and emits an error frame, then STOPS: no message_delta /
+// message_stop is written over a broken stream.
 func (t *Translator) emitMidStreamError(sink Sink, message string) error {
-	if t.active != nil {
-		if err := sink.BlockStop(t.active.index); err != nil {
+	if b := t.active; b != nil {
+		// A thinking block still closes with its synthetic signature_delta, even
+		// on a failure. That signature carries the marker the Anthropic-leg
+		// sanitizer recognises; without it the client keeps an UNSIGNED thinking
+		// block in its history, the sanitizer cannot classify it, and the next
+		// turn on a Claude model forwards it to Anthropic, which rejects an
+		// unsigned thinking block with a 400.
+		//
+		// Only thinking. A tool_use closed here is deliberately left without
+		// fabricated arguments: the stream is broken, and inventing "{}" would
+		// present an unmade call as a made one.
+		if b.kind == kindThinking {
+			sig := schema.Delta{Type: schema.DeltaSignature, Signature: t.syntheticSignature(b)}
+			if err := sink.BlockDelta(b.index, sig); err != nil {
+				return err
+			}
+		}
+		if err := sink.BlockStop(b.index); err != nil {
 			return err
 		}
-		t.active.stopped = true
+		b.stopped = true
 		t.active = nil
 	}
 	t.terminated = true
@@ -577,7 +598,7 @@ func (t *Translator) finalizeClean(sink Sink) error {
 	if err := t.finalizeAllBlocks(sink); err != nil {
 		return err
 	}
-	if err := sink.MessageDelta(MessageDelta{StopReason: t.stopReason(), Usage: t.usage}); err != nil {
+	if err := sink.MessageDelta(MessageDelta{StopReason: t.stopReason(), Usage: t.terminalUsage()}); err != nil {
 		return err
 	}
 	if err := sink.MessageStop(); err != nil {
@@ -585,6 +606,25 @@ func (t *Translator) finalizeClean(sink Sink) error {
 	}
 	t.terminated = true
 	return nil
+}
+
+// terminalUsage is the usage reported on message_delta.
+//
+// An upstream terminus that carried no usage block, or an explicit zero input
+// count, keeps the message_start estimate: a zero-token prompt is never a true
+// statement, and a client that shows a context bar would read it as one.
+//
+// The substitution belongs HERE rather than in a sink. Both sinks see the same
+// MessageDelta, so stream:true and stream:false report identical numbers by
+// construction — which is the whole point of the Sink seam. Doing it in the
+// Aggregator alone (as it once was) let the streaming path emit
+// "input_tokens":0 for a request whose non-streaming twin reported the estimate.
+func (t *Translator) terminalUsage() schema.Usage {
+	u := t.usage
+	if u.InputTokens == 0 {
+		u.InputTokens = t.inputTokens
+	}
+	return u
 }
 
 // stopReason applies the finalization rule: tool_use wins; else max_tokens on a

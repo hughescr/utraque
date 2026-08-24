@@ -18,6 +18,7 @@ import (
 
 	"github.com/hughescr/utraque/internal/anthropic"
 	schema "github.com/hughescr/utraque/internal/anthropic/schema"
+	"github.com/hughescr/utraque/internal/apierr"
 	"github.com/hughescr/utraque/internal/sse"
 	"github.com/hughescr/utraque/internal/translate/stream"
 )
@@ -949,4 +950,96 @@ func assertNoLeak(t *testing.T, before int) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Errorf("goroutine leak: baseline=%d, still-running=%d", before, runtime.NumGoroutine())
+}
+
+// TestTerminalUsageFallsBackToTheEstimateOnBothSinks is the regression guard for
+// a divergence TestAggregatorEqualsSSEFold structurally cannot see: it folds the
+// SSE golden back through the SAME Aggregator, so a substitution done only in
+// the Aggregator looks identical on both sides. The check that matters is what
+// goes ON THE WIRE, so this asserts the SSE bytes directly and then confirms the
+// non-streaming fold reports the same number.
+func TestTerminalUsageFallsBackToTheEstimateOnBothSinks(t *testing.T) {
+	// A completed response whose usage block is absent entirely: mapUsage yields
+	// the zero Usage, so the terminal input count is 0.
+	input := sseFrame("response.created", `{"type":"response.created","response":{"id":"resp_test"}}`) +
+		sseFrame("response.content_part.added",
+			`{"type":"response.content_part.added","output_index":0,"part":{"type":"output_text"}}`) +
+		sseFrame("response.output_text.delta",
+			`{"type":"response.output_text.delta","output_index":0,"delta":"hi"}`) +
+		sseFrame("response.output_text.done",
+			`{"type":"response.output_text.done","output_index":0,"text":"hi"}`) +
+		sseFrame("response.completed", `{"type":"response.completed","response":{"id":"resp_test","status":"completed"}}`)
+
+	wire, _, err := runToBytes(t, []byte(input), goldenOptions())
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	checkGrammar(t, wire)
+	if strings.Contains(string(wire), `"input_tokens":0`) {
+		t.Errorf("the streamed message_delta reported a zero-token prompt:\n%s", wire)
+	}
+	if !strings.Contains(string(wire), `"usage":{"input_tokens":7`) {
+		t.Errorf("the streamed message_delta did not carry the message_start estimate:\n%s", wire)
+	}
+
+	folded, err := aggregateFixture(t, []byte(input), goldenOptions())
+	if err != nil {
+		t.Fatalf("fold: %v", err)
+	}
+	if !strings.Contains(string(folded), `"usage":{"input_tokens":7`) {
+		t.Errorf("the folded message disagrees with the stream:\n%s", folded)
+	}
+}
+
+// TestMidStreamErrorSignsAnOpenThinkingBlock: a thinking block force-closed by a
+// mid-stream failure must still carry the synthetic signature. Without it the
+// client keeps an unsigned thinking block, the Anthropic-leg sanitizer cannot
+// classify it, and the next turn on a Claude model is rejected with a 400.
+func TestMidStreamErrorSignsAnOpenThinkingBlock(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join(streamsDir, "midstream_error_in_thinking.codex.sse"))
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	got, res, err := runToBytes(t, raw, goldenOptions())
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if !res.Errored {
+		t.Fatalf("fixture should terminate in an error, got %+v", res)
+	}
+	checkGrammar(t, got)
+	if !strings.Contains(string(got), anthropic.SyntheticThinkingMarker) {
+		t.Errorf("a thinking block closed by a mid-stream error carries no synthetic signature:\n%s", got)
+	}
+}
+
+// TestUpstreamFailureBeforeMessageStartIs502: the upstream opened a 200 and
+// immediately failed. That is a gateway failure, the same class as an empty or
+// truncated stream, and must not read as an internal 500.
+func TestUpstreamFailureBeforeMessageStartIs502(t *testing.T) {
+	for _, tc := range []struct{ name, frame string }{
+		{"response.failed", sseFrame("response.failed",
+			`{"type":"response.failed","response":{"id":"r","status":"failed","error":{"message":"backend on fire"}}}`)},
+		{"error event", sseFrame("error", `{"type":"error","message":"backend on fire"}`)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, res, err := runToBytes(t, []byte(tc.frame), goldenOptions())
+			if err == nil {
+				t.Fatal("want an error the caller can render as an HTTP status")
+			}
+			if res.Started {
+				t.Error("Started should be false: nothing was emitted")
+			}
+			if len(out) != 0 {
+				t.Errorf("bytes were committed before the failure:\n%s", out)
+			}
+			ae := apierr.From(err)
+			if ae.HTTPStatus() != 502 {
+				t.Errorf("status = %d, want 502", ae.HTTPStatus())
+			}
+			if !strings.Contains(ae.Message, "backend on fire") {
+				t.Errorf("message = %q, want the upstream's own reason", ae.Message)
+			}
+		})
+	}
 }
