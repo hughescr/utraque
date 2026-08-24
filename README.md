@@ -574,19 +574,51 @@ What to do when the tripwire fires: add a case for each named event type to
 switch from drifting apart, so the table can be trusted as the thing the live
 test compares against.
 
-## A note on terms of service
+## Is this allowed?
 
-The Anthropic leg follows Anthropic's own documented gateway behavior: a
-saved Claude Code login remains the active credential when the client is
-pointed at a custom base URL, so its usage limits and billing apply as
-normal. This half is officially sanctioned.
+As far as we can tell, yes — for personal use of your own two subscriptions.
+The two legs rest on different kinds of evidence, so they are worth separating.
 
-The Codex/GPT leg is different. It uses an undocumented endpoint via the
-Codex CLI's own login token, replaying the same requests the Codex CLI
-itself would make. This is not part of any published API and OpenAI could
-change or restrict it without notice. It is intended for personal use of
-your own subscription, not for pooling or reselling access. Use it with that
-understanding.
+**The Anthropic leg is documented behaviour.** Claude Code's own docs describe
+pointing `ANTHROPIC_BASE_URL` at a gateway while a subscription login stays
+active:
+
+> Claude Code checks these plan requirements only when it connects to the
+> Anthropic API directly. If you point `ANTHROPIC_BASE_URL` at an
+> [LLM gateway](https://code.claude.com/docs/en/llm-gateway#subscriptions-and-gateways)
+> and your saved claude.ai login stays the active credential, Claude Code
+> doesn't check your plan's usage credits.
+
+— [Model configuration](https://code.claude.com/docs/en/model-config). That is
+exactly this arrangement: the client stays genuine Claude Code, the proxy holds
+no Anthropic secret, and the subscription's own limits and billing apply.
+
+**The OpenAI leg is endorsed in public but not written into the terms.** OpenAI
+has repeatedly pointed people at this pattern. Romain Huet, OpenAI's Head of
+Developer Experience,
+[said in March 2026](https://x.com/romainhuet/status/2038699202834841962):
+
+> "We want people to be able to use Codex, and their ChatGPT subscription,
+> wherever they like! That means in the app, in the terminal, but also in
+> JetBrains, Xcode, OpenCode, Pi, and now Claude Code."
+
+More directly, Thibault Sottiaux, who led Codex, published a five-minute recipe
+in July 2026 for pointing Claude Code at GPT-5.6 Sol through a third-party
+translating proxy on a ChatGPT subscription —
+[the same architecture as this project](https://x.com/thsottiaux/status/2076119366647894371).
+
+The line OpenAI does draw is between personal reuse and resale: Codex
+leadership has called out "sub2api" setups, which pool one subscription and
+re-serve it as shared API traffic, as unsupported, while naming sign-in through
+official or open-source clients as the supported path. `utraque` is single-user
+by construction and has no multi-tenancy of any kind.
+
+**What is missing is a written guarantee.** Asked directly whether "Sign in with
+ChatGPT" is permitted from a forked or custom client, an OpenAI maintainer
+[confirmed only that forking is fine under the Apache licence](https://github.com/openai/codex/discussions/8338)
+and declined to answer the credential question. The endpoint is undocumented and
+could change or be restricted without notice. Use your own subscription, for
+yourself, and take that risk knowingly.
 
 ## License
 
