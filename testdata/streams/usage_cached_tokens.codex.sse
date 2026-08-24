@@ -1,0 +1,21 @@
+event: response.created
+data: {"type":"response.created","response":{"id":"resp_test","model":"gpt-5.6-sol"}}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_0","role":"assistant"}}
+
+event: response.content_part.added
+data: {"type":"response.content_part.added","output_index":0,"content_index":0,"part":{"type":"output_text","text":""}}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","output_index":0,"delta":"Reusing the cached prompt."}
+
+event: response.output_text.done
+data: {"type":"response.output_text.done","output_index":0,"text":"Reusing the cached prompt."}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","output_index":0,"item":{"type":"message","id":"msg_0","role":"assistant"}}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_test","status":"completed","usage":{"input_tokens":1000,"output_tokens":20,"input_tokens_details":{"cached_tokens":800},"output_tokens_details":{"reasoning_tokens":5}}}}
+
