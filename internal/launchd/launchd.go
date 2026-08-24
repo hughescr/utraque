@@ -113,6 +113,20 @@ func Listen(opts Options) ([]net.Listener, Source, error) {
 		}
 		ln, lerr := net.Listen("tcp", opts.Addr)
 		if lerr != nil {
+			// A fallback bind that fails after ErrNotSupported has one
+			// overwhelmingly likely cause, and the bare "address already in use"
+			// does not name it: a CGO_ENABLED=0 build cannot call
+			// launch_activate_socket, so it never inherits the socket launchd is
+			// holding on that very address, and then collides with it. With
+			// ThrottleInterval 1 in the shipped plist that is a respawn loop once a
+			// second, so the error has to say what to do about it.
+			if errors.Is(err, ErrNotSupported) {
+				return nil, SourceListen, fmt.Errorf(
+					"launchd: cannot bind the fallback address %s, and this build cannot inherit a launchd socket (%w). "+
+						"If launchd is holding that address, rebuild with cgo enabled (CGO_ENABLED=1 on darwin): a cgo-less binary "+
+						"cannot be socket-activated and will collide with launchd's own socket: %w",
+					opts.Addr, err, lerr)
+			}
 			return nil, SourceListen, lerr
 		}
 		log.Info("no launchd socket; listening on the configured address",

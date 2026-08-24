@@ -55,13 +55,26 @@ fi
 say ""
 
 if [ "$do_unload" -eq 1 ]; then
-	if [ "$loaded" -eq 1 ]; then
-		say "+ launchctl bootout $domain/$LABEL"
-		launchctl bootout "$domain/$LABEL"
-		say "booted out. launchd has released the listening socket."
-	else
-		say "nothing to boot out"
-	fi
+	# Ask launchd to boot the job out unconditionally and read its answer,
+	# rather than deciding from the `launchctl print` above. `print` fails for
+	# reasons other than "not loaded", and treating any failure as "nothing to
+	# do" would go on to remove the plist while the job — and the socket it
+	# holds — were still live, leaving nothing to reinstall from.
+	say "+ launchctl bootout $domain/$LABEL"
+	set +e
+	bootout_output=$(launchctl bootout "$domain/$LABEL" 2>&1)
+	bootout_rc=$?
+	set -e
+	case "$bootout_rc" in
+		0)
+			say "booted out. launchd has released the listening socket." ;;
+		3|113)
+			# ESRCH / "Could not find specified service": it really was not loaded.
+			say "nothing to boot out (launchd does not have this job)" ;;
+		*)
+			if [ -n "$bootout_output" ]; then say "$bootout_output"; fi
+			die "launchctl bootout failed (exit $bootout_rc); the plist was left in place so you can retry" ;;
+	esac
 elif [ "$loaded" -eq 1 ]; then
 	say "The agent is still loaded and launchd still holds the port."
 	say "Nothing has been unloaded. To stop it, run:"

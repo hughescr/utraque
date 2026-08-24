@@ -17,6 +17,10 @@
 #   --node HOST          address launchd binds (default: localhost, both loopback families)
 #   --idle DURATION      idle self-exit, Go duration; 0 never exits (default: 1h)
 #   --local-token TOKEN  UTRAQUE_LOCAL_TOKEN shared secret for the loopback port
+#                        (visible in ps while this script runs; prefer the file
+#                        or environment forms below)
+#   --local-token-file F read the shared secret from F, or from stdin for '-'
+#                        (also read from $UTRAQUE_LOCAL_TOKEN if neither is given)
 #   --codex-home PATH    CODEX_HOME for the agent (default: inherit/none)
 #   --log-level LEVEL    debug|info|warn|error (default: info)
 #   --log-format FORMAT  json|text (default: json)
@@ -44,6 +48,7 @@ port="8317"
 node="localhost"
 idle="1h"
 local_token=""
+local_token_file=""
 codex_home=""
 log_level="info"
 log_format="json"
@@ -62,6 +67,7 @@ while [ $# -gt 0 ]; do
 		--node)        node="${2:-}"; shift 2 ;;
 		--idle)        idle="${2:-}"; shift 2 ;;
 		--local-token) local_token="${2:-}"; shift 2 ;;
+		--local-token-file) local_token_file="${2:-}"; shift 2 ;;
 		--codex-home)  codex_home="${2:-}"; shift 2 ;;
 		--log-level)   log_level="${2:-}"; shift 2 ;;
 		--log-format)  log_format="${2:-}"; shift 2 ;;
@@ -90,8 +96,71 @@ case "$binary" in
 esac
 [ -x "$binary" ] || die "not an executable file: $binary"
 
+# Every rendered value is validated HERE. utraque validates its own
+# configuration before it reaches launchd's socket, so a value launchd accepts
+# but utraque rejects makes the daemon exit 1 on every activation — and with
+# ThrottleInterval 1 in the template, that is a respawn loop once a second.
+# Stopping now is much easier to debug than reading launchd's log to find out.
 case "$port" in
 	''|*[!0-9]*) die "--port must be a number, got '$port'" ;;
+esac
+if [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
+	die "--port must be between 1 and 65535, got '$port'"
+fi
+
+[ -n "$node" ] || die "--node must not be empty"
+case "$node" in
+	*[!A-Za-z0-9.:_-]*) die "--node must be a hostname or an IP literal, got '$node'" ;;
+esac
+
+# UTRAQUE_LISTEN is parsed with net.SplitHostPort, so an IPv6 literal has to be
+# bracketed. Without this, '--node ::1' renders '::1:8317', which utraque
+# rejects at startup — the respawn loop above, from an address that is fine.
+# SockNodeName in the plist takes the bare form, so only the env var changes.
+case "$node" in
+	*:*) listen="[$node]:$port" ;;
+	*)   listen="$node:$port" ;;
+esac
+
+# A Go duration, which is what config.LoadFrom parses. '0' means never exit.
+if ! printf '%s' "$idle" | grep -Eq '^(0|([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+)$'; then
+	die "--idle must be a Go duration such as 90s, 1h or 1h30m (or 0 to never self-exit), got '$idle'"
+fi
+
+case "$log_level" in
+	debug|info|warn|error) ;;
+	*) die "--log-level must be debug|info|warn|error, got '$log_level'" ;;
+esac
+case "$log_format" in
+	json|text) ;;
+	*) die "--log-format must be json|text, got '$log_format'" ;;
+esac
+
+# The shared secret, in decreasing order of how much of it ends up in `ps` and
+# in your shell history: a file (or stdin), the environment, then argv.
+if [ -n "$local_token_file" ]; then
+	[ -z "$local_token" ] || die "pass --local-token or --local-token-file, not both"
+	if [ "$local_token_file" = "-" ]; then
+		local_token=$(cat)
+	else
+		[ -r "$local_token_file" ] || die "cannot read --local-token-file: $local_token_file"
+		local_token=$(cat -- "$local_token_file")
+	fi
+	local_token=${local_token%%$'\n'*}
+	[ -n "$local_token" ] || die "--local-token-file gave an empty token"
+elif [ -z "$local_token" ] && [ -n "${UTRAQUE_LOCAL_TOKEN:-}" ]; then
+	local_token="$UTRAQUE_LOCAL_TOKEN"
+fi
+
+# Binding off loopback publishes both subscriptions to the network. With no
+# shared secret that is unauthenticated spending by anything that can route to
+# this machine, so it is refused rather than warned about. A token makes it a
+# deliberate choice, which is the user's to make.
+case "$node" in
+	localhost|Localhost|LOCALHOST|127.*|::1|0:0:0:0:0:0:0:1) ;;
+	*)
+		[ -n "$local_token" ] || die "--node '$node' is not loopback, so the port would be reachable from your network with no authentication at all. Pass a shared secret too (--local-token-file, or \$UTRAQUE_LOCAL_TOKEN), or bind loopback."
+		say "WARNING: --node '$node' is not loopback. Both subscriptions will be reachable from your network, gated only by the shared secret." ;;
 esac
 
 # launchd re-executes the recorded path, so a binary inside a build directory
@@ -125,7 +194,7 @@ substitute PROGRAM           "$(xml_escape "$binary")"
 substitute SOCKET_NAME       "$(xml_escape "$SOCKET_NAME")"
 substitute SOCK_NODE         "$(xml_escape "$node")"
 substitute SOCK_PORT         "$(xml_escape "$port")"
-substitute LISTEN            "$(xml_escape "$node:$port")"
+substitute LISTEN            "$(xml_escape "$listen")"
 substitute IDLE_TIMEOUT      "$(xml_escape "$idle")"
 substitute LOG_LEVEL         "$(xml_escape "$log_level")"
 substitute LOG_FORMAT        "$(xml_escape "$log_format")"
@@ -136,7 +205,7 @@ substitute EXTRA_ENVIRONMENT "$extra_env"
 say "utraque launchd agent"
 say "  label      $LABEL"
 say "  binary     $binary"
-say "  socket     $SOCKET_NAME -> $node:$port (launchd binds it; utraque adopts it)"
+say "  socket     $SOCKET_NAME -> $listen (launchd binds it; utraque adopts it)"
 say "  idle exit  $idle"
 say "  logs       $stdout_path"
 if [ -n "$local_token" ]; then
@@ -149,7 +218,11 @@ say ""
 # Validate before touching anything installed: a malformed plist that launchd
 # refuses is much harder to debug than a script that stops here.
 tmp=$(mktemp "${TMPDIR:-/tmp}/utraque-plist.XXXXXX")
-trap 'rm -f "$tmp"' EXIT
+chmod 600 "$tmp"
+backup=""
+staged=""
+cleanup() { rm -f "$tmp" ${staged:+"$staged"} ${backup:+"$backup"}; }
+trap cleanup EXIT
 printf '%s\n' "$rendered" > "$tmp"
 if ! plutil -lint "$tmp" >/dev/null; then
 	die "the rendered plist is not valid; nothing was installed"
@@ -161,12 +234,29 @@ mkdir -p "$log_dir"
 say "ensured  $log_dir"
 
 if [ -f "$plist" ] && [ "$force" -eq 0 ] && cmp -s "$tmp" "$plist"; then
-	say "unchanged $plist"
+	# Re-assert the mode even when the contents are identical: the file may hold
+	# UTRAQUE_LOCAL_TOKEN and something else may have loosened it since.
+	chmod 600 "$plist"
+	say "unchanged $plist (mode 600)"
 else
 	action="wrote"
-	if [ -f "$plist" ]; then action="updated"; fi
-	cat "$tmp" > "$plist"
-	chmod 600 "$plist"
+	if [ -f "$plist" ]; then
+		action="updated"
+		# Kept only so --load can put the working agent back if the new plist
+		# fails to bootstrap. Removed by the EXIT trap either way.
+		backup=$(mktemp "${TMPDIR:-/tmp}/utraque-plist-prev.XXXXXX")
+		chmod 600 "$backup"
+		cat "$plist" > "$backup"
+	fi
+	# Stage inside the target directory and rename over the destination: the
+	# rename is atomic, it cannot be redirected by a symlink sitting at $plist,
+	# and the mode is right BEFORE any content exists rather than a chmod later
+	# — which, with a token in the file, was a world-readable window.
+	staged=$(mktemp "$agents_dir/.$LABEL.plist.XXXXXX")
+	chmod 600 "$staged"
+	cat "$tmp" > "$staged"
+	mv -f "$staged" "$plist"
+	staged=""
 	say "$action  $plist (mode 600)"
 fi
 say ""
@@ -179,9 +269,25 @@ if [ "$do_load" -eq 1 ]; then
 		launchctl bootout "$domain/$LABEL" || true
 	fi
 	say "+ launchctl bootstrap $domain $plist"
-	launchctl bootstrap "$domain" "$plist"
+	if ! launchctl bootstrap "$domain" "$plist"; then
+		# The bootout above already stopped whatever was working. Put it back
+		# rather than leaving the machine with no agent at all.
+		if [ -n "$backup" ] && [ -f "$backup" ]; then
+			say "bootstrap failed; restoring the previous plist and reloading it"
+			cat "$backup" > "$plist"
+			chmod 600 "$plist"
+			if launchctl bootstrap "$domain" "$plist"; then
+				say "the previous agent is loaded again; the new plist was not installed"
+			else
+				say "the previous agent could not be reloaded either — NOTHING is loaded now"
+			fi
+		else
+			say "nothing was loaded before this, so nothing was rolled back"
+		fi
+		die "launchctl bootstrap failed"
+	fi
 	say ""
-	say "loaded. launchd now holds $node:$port; the first request starts utraque."
+	say "loaded. launchd now holds $listen; the first request starts utraque."
 else
 	say "Nothing has been loaded. To start it, run:"
 	say ""
@@ -196,8 +302,8 @@ say ""
 say "Then, to confirm it works:"
 say ""
 say "    launchctl print $domain/$LABEL      # launchd's view of the job"
-say "    curl -s http://$node:$port/healthz  # first request; this is what starts utraque"
+say "    curl -s http://$listen/healthz      # first request; this is what starts utraque"
 say "    tail -f $stdout_path"
 say ""
-say "Point Claude Code at it with:  ANTHROPIC_BASE_URL=http://$node:$port"
+say "Point Claude Code at it with:  ANTHROPIC_BASE_URL=http://$listen"
 say "Uninstall with:               $here/uninstall.sh"

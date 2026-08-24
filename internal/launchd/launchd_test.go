@@ -98,6 +98,32 @@ func TestListenWithoutFallbackAddressIsAnError(t *testing.T) {
 	}
 }
 
+// The CGO_ENABLED=0 trap: the build cannot inherit launchd's socket, so it
+// falls back to binding the same address launchd is already holding and gets
+// EADDRINUSE. The plist throttles at one second, so the bare bind error would
+// scroll past once a second saying nothing about the actual cause.
+func TestFallbackBindFailureAfterUnsupportedNamesTheCause(t *testing.T) {
+	held, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = held.Close() }()
+
+	_, _, err = Listen(Options{
+		Addr:     held.Addr().String(),
+		activate: fakeActivator(nil, ErrNotSupported),
+	})
+	if err == nil {
+		t.Fatal("binding an address something else holds must fail")
+	}
+	if !errors.Is(err, ErrNotSupported) {
+		t.Errorf("err = %v, want it to name the activation failure too", err)
+	}
+	if !strings.Contains(err.Error(), "cgo") {
+		t.Errorf("err = %v, want it to say a cgo-less build cannot be socket-activated", err)
+	}
+}
+
 func TestListenDefaultsTheSocketName(t *testing.T) {
 	var asked string
 	_, _, err := Listen(Options{

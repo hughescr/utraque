@@ -58,24 +58,40 @@ Re-running `install.sh` is safe: identical input rewrites nothing and says
 
 ### Options worth knowing
 
+This is a runnable command, not an annotated one — a comment after a line
+continuation ends the command, so the options below carry their notes in prose:
+
 ```sh
+openssl rand -hex 16 > ~/.utraque-token
+chmod 600 ~/.utraque-token
+
 deploy/install.sh \
-  --binary /usr/local/bin/utraque \  # default: ./bin/utraque, then $PATH
-  --port 8317 \                      # the port launchd binds
-  --node localhost \                 # 'localhost' binds both loopback families
-  --idle 1h \                        # '0' means never self-exit
-  --local-token "$(openssl rand -hex 16)" \
+  --binary /usr/local/bin/utraque \
+  --port 8317 \
+  --node localhost \
+  --idle 1h \
+  --local-token-file ~/.utraque-token \
   --log-level info --log-format json
 ```
 
-`--local-token` is recommended. Without it, **any** local process can spend both
-of your subscriptions through the loopback port. With it, the plist is written
-mode `600` and callers must send `X-Utraque-Token`.
+`--binary` defaults to `./bin/utraque`, then whatever is on `$PATH`. `--port` is
+the port launchd binds. `--node localhost` binds both loopback families.
+`--idle` takes a Go duration, and `0` means never self-exit.
+
+A shared secret is strongly recommended. Without one, **any** local process can
+spend both of your subscriptions through the loopback port. With one, callers
+must send `X-Utraque-Token`, and the plist — which holds the secret — is written
+mode `600`. Prefer `--local-token-file` (or `-` to read stdin, or the
+`UTRAQUE_LOCAL_TOKEN` environment variable): `--local-token` still works, but an
+argv value is visible in `ps` for as long as the script runs.
 
 `--node localhost` makes launchd bind both `127.0.0.1` and `[::1]`, so it does
 not matter which one the client resolves to; utraque serves every descriptor
-launchd hands over. Use `--node 127.0.0.1` for IPv4 only. Do not widen it to
-`0.0.0.0` — that exposes both subscriptions to your network.
+launchd hands over. Use `--node 127.0.0.1` for IPv4 only. Anything off loopback
+— `0.0.0.0` above all — exposes both subscriptions to your network, so
+`install.sh` refuses it outright unless you also supply a shared secret, and
+warns even then. An IPv6 literal is accepted in bare form and bracketed for you
+where it has to be.
 
 ## Verify
 

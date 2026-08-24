@@ -106,6 +106,27 @@ func TestLoadFromParseErrors(t *testing.T) {
 	}
 }
 
+// deploy/install.sh renders UTRAQUE_LISTEN from --node and --port, and brackets
+// an IPv6 literal because that is what net.SplitHostPort needs. The bare form
+// is what the plist's SockNodeName takes, so both forms have to be settled
+// here: bracketed is valid, bare-with-a-port is not. A daemon that rejected its
+// own configured address after launchd had already handed it a good socket
+// would exit on every activation, once a second, forever.
+func TestValidateAcceptsABracketedIPv6Listen(t *testing.T) {
+	for _, addr := range []string{"[::1]:8317", "[::]:8317", "localhost:8317"} {
+		c := config.Default()
+		c.Listen = addr
+		if err := c.Validate(); err != nil {
+			t.Errorf("Validate() with Listen %q = %v, want nil", addr, err)
+		}
+	}
+	c := config.Default()
+	c.Listen = "::1:8317" // the unbracketed form, which is ambiguous
+	if err := c.Validate(); err == nil {
+		t.Error("Validate() accepted an unbracketed IPv6 listen address")
+	}
+}
+
 func TestValidateRejects(t *testing.T) {
 	cases := map[string]func(*config.Config){
 		"empty listen":      func(c *config.Config) { c.Listen = "" },
