@@ -13,7 +13,9 @@
 #   --unload      run the launchctl bootout before removing the plist
 #   --keep-logs   leave ~/Library/Logs/utraque in place (the default)
 #   --purge-logs  delete ~/Library/Logs/utraque too
-#   --purge-cache delete utraque's own catalog cache too
+#   --purge-cache delete utraque's own catalog cache too (the default
+#                 ~/Library/Caches/utraque only -- not a custom
+#                 UTRAQUE_CODEX_CACHE_FILE path)
 #   -h, --help    this text
 
 set -euo pipefail

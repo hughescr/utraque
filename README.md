@@ -98,7 +98,8 @@ codex login                    # if you have not already
 unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN
 
 ./bin/utraque &                # or let launchd do it — see below
-curl -sf http://127.0.0.1:8317/healthz | head -c 200   # codex_auth should say "ok"
+curl -sf http://127.0.0.1:8317/healthz | python3 -m json.tool | head -20
+#   codex_auth.status should read "ok"; if it says "missing", run codex login
 
 export ANTHROPIC_BASE_URL=http://127.0.0.1:8317
 export _CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL=1
@@ -202,14 +203,28 @@ version pin (`sol-5.6`), an effort suffix (`sol-high`, `sol-5.6-ultra`), or the
 raw upstream slug (`gpt-5.6-sol`). Effort composes with any of them and is
 clamped to what that model actually supports.
 
-**3. The `/model` picker** — *but only if Claude Code is using an API key.*
-This is the honest caveat: Claude Code attempts gateway model discovery only
-when `ANTHROPIC_AUTH_TOKEN` or an API key is present. On the plain Max
-subscription OAuth session this project is built around, it never calls
-`GET /v1/models` at all, so no GPT rows appear in the picker no matter what
-`CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY` is set to. Typed names and agent
-frontmatter are unaffected — they never depended on discovery. The merged
-catalog is still served, and is still useful to any client that does ask for it.
+**3. The `/model` picker** — *not available if you took the required context
+window fix, and you should.* The two settings are mutually exclusive. Claude
+Code gates gateway discovery on four conditions, and the third is the same
+predicate `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL` flips:
+
+```js
+if(!CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY) return false;
+if(providerKind() !== "firstParty")            return false;
+if(assumeFirstPartyBaseURL())                  return false;   // <-- here
+if(!ANTHROPIC_BASE_URL)                        return false;
+return true;
+```
+
+Telling the client to treat this proxy as first-party also tells it there is no
+gateway to interrogate, so it never calls `GET /v1/models` and no GPT rows
+appear in the picker — whatever `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY` is
+set to. That is the right trade: the picker is a convenience, while the context
+clamp costs 800,000 tokens on every Claude model and can hang a long session.
+
+Typed names and agent frontmatter never depended on discovery and are
+unaffected, which is why they are listed first. The merged catalog is still
+served and is still useful to any client that does ask for it.
 
 
 ### Unattended, on demand (macOS)
@@ -472,11 +487,11 @@ against the Claude Code binary rather than inferred:
 
 A failed or refused upstream read is **negative-cached for ~60s**, so a
 credential that cannot read that endpoint costs one slow picker open, not every
-one. Note that Claude Code only attempts gateway discovery at all when
-`ANTHROPIC_AUTH_TOKEN` or an API key is set — a plain subscription OAuth
-session sends neither, so in normal use the Claude half is served from the
-static list. That is the designed outcome, which is why the fallback, not the
-upstream read, is the load-bearing path.
+one. Note also that Claude Code will not request this catalog at all in the
+recommended setup: `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL=1` disables its
+gateway discovery, as *Using a GPT route* explains. The Claude half is served
+from the static list in normal use, which is why the fallback, not the upstream
+read, is the load-bearing path.
 
 ### Codex/GPT models
 

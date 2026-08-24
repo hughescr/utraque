@@ -61,9 +61,9 @@ with a fixture.
 
 If you add a request-translation case, build the fixture from a request the
 real client actually sent. Hand-written payloads have hidden a real bug here
-before: they did not carry the multi-block system array and mid-conversation
-system messages that Claude Code sends, and the translator was broken for
-months without any test noticing.
+before: they did not carry the mid-conversation system messages Claude Code
+sends, so the translator shipped broken and the whole GPT leg failed on the
+first request from a real client, with a green test suite.
 
 ## Logging
 
