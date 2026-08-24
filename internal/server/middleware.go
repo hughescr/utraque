@@ -156,10 +156,24 @@ func (s *Server) withRecover(next http.Handler) http.Handler {
 }
 
 // withActivity holds the idle timer open for the life of a non-exempt request.
+//
+// It also refuses a request that arrived after the idle deadline already fired.
+// The connection for such a request was accepted in the gap between the timer
+// deciding it was idle and the server actually beginning to shut down, so
+// serving it would start work — possibly a long stream — on a process that is
+// already draining, and the drain grace would cut it. Answering 503 instead is
+// clean and retryable: under launchd the retry re-activates the daemon, and the
+// caller sees a refusal rather than a truncated answer.
+//
+// The check is made AFTER the hold, deliberately: Hold and the timer's expiry
+// decision are serialised on one lock, so a hold taken first stops the timer
+// firing at all, and a hold taken second sees the fired flag. There is no third
+// case.
 func (s *Server) withActivity(next http.Handler) http.Handler {
 	if s.activity == nil {
 		return next
 	}
+	draining, _ := s.activity.(DrainReporter)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if s.activityExempt != nil && s.activityExempt(r) {
 			next.ServeHTTP(w, r)
@@ -167,6 +181,20 @@ func (s *Server) withActivity(next http.Handler) http.Handler {
 		}
 		release := s.activity.Hold()
 		defer release()
+		if draining != nil && draining.Fired() {
+			ctx := r.Context()
+			obs.LoggerFrom(ctx).LogAttrs(context.WithoutCancel(ctx), slog.LevelInfo,
+				"refused a request that arrived after the idle deadline fired",
+				slog.String("path", obs.SafePath(r.URL)),
+			)
+			w.Header().Set("Connection", "close")
+			// 503 is the honest status — temporarily unavailable, come back —
+			// while overloaded_error is the closest thing the Anthropic error
+			// vocabulary has to "retry me", which is what a client acts on.
+			_ = apierr.Write(w, apierr.WithStatus(http.StatusServiceUnavailable, apierr.TypeOverloaded,
+				"utraque is shutting down after an idle period; retry and it will be restarted"))
+			return
+		}
 		next.ServeHTTP(w, r)
 	})
 }

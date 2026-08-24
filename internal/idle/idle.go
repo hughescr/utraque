@@ -97,6 +97,10 @@ func (t *Timer) Start() {
 }
 
 // Touch records activity, deferring the idle callback by a further timeout.
+//
+// The proxy does not call it: Hold's release already refreshes the activity
+// time, so wrapping a request is enough. It exists for activity that is not a
+// request, and the tests use it to drive the expiry logic directly.
 func (t *Timer) Touch() {
 	if !t.Enabled() {
 		return
@@ -203,6 +207,13 @@ func (t *Timer) expire() {
 }
 
 // Middleware holds the timer open for the duration of each request.
+//
+// The proxy does NOT use it. server.withActivity does the same thing and two
+// more besides: it exempts /healthz, so a monitoring poll cannot keep the daemon
+// alive forever, and it refuses a request that arrived after Fired, so a
+// connection accepted in the shutdown gap cannot start a stream the drain would
+// cut. Prefer that one; this is the standalone version, for a caller with no
+// server around it.
 func (t *Timer) Middleware(next http.Handler) http.Handler {
 	if !t.Enabled() {
 		return next

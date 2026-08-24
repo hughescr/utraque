@@ -583,6 +583,14 @@ type fakeTracker struct {
 	holds    int
 	releases int
 	cur      int
+	fired    bool
+}
+
+// Fired makes fakeTracker a server.DrainReporter.
+func (f *fakeTracker) Fired() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.fired
 }
 
 func (f *fakeTracker) Hold() func() {
@@ -616,6 +624,52 @@ func TestActivityHeldForRequestsButNotHealth(t *testing.T) {
 	}
 	if tr.cur != 0 {
 		t.Errorf("a hold leaked: cur = %d", tr.cur)
+	}
+}
+
+// A connection accepted in the gap between the idle timer deciding it is idle
+// and the server beginning to shut down would otherwise start work — possibly a
+// long stream — on a draining process, and the drain grace would cut it. It is
+// refused instead: retryable, and under launchd the retry restarts the daemon.
+func TestRequestArrivingAfterTheIdleDeadlineIsRefused(t *testing.T) {
+	tr := &fakeTracker{fired: true}
+	served := false
+	s, buf := newServer(t, func(o *server.Options) {
+		o.Activity = tr
+		o.Routes.Passthrough = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			served = true
+			w.WriteHeader(http.StatusOK)
+		})
+	})
+
+	w := do(t, s, httptest.NewRequest(http.MethodGet, "/v1/anything", nil))
+	if served {
+		t.Error("the handler ran on a process that had already decided to exit")
+	}
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want 503", w.Code)
+	}
+	if got := w.Header().Get("Connection"); got != "close" {
+		t.Errorf("Connection = %q, want close", got)
+	}
+	ev := decodeErrorEnvelope(t, w.Body.Bytes())
+	if !strings.Contains(ev.Error.Message, "shutting down") {
+		t.Errorf("message = %q, want it to explain the refusal", ev.Error.Message)
+	}
+	tr.mu.Lock()
+	cur := tr.cur
+	tr.mu.Unlock()
+	if cur != 0 {
+		t.Errorf("the refusal leaked a hold: cur = %d", cur)
+	}
+
+	// /healthz is exempt from the activity hold, so it must still answer: a
+	// draining daemon still has to be able to say what it is doing.
+	if code := do(t, s, httptest.NewRequest(http.MethodGet, server.HealthPath, nil)).Code; code != http.StatusOK {
+		t.Errorf("/healthz status = %d while draining, want 200", code)
+	}
+	if !strings.Contains(buf.String(), "after the idle deadline fired") {
+		t.Errorf("the refusal was not logged: %s", buf.String())
 	}
 }
 

@@ -55,6 +55,22 @@ type ActivityTracker interface {
 	Hold() (release func())
 }
 
+// DrainReporter is the optional half of ActivityTracker: whether the idle
+// deadline has already fired, i.e. whether shutdown has begun.
+//
+// It closes the one gap Hold cannot close on its own. Hold and the timer's
+// expiry decision are serialised on the same lock, so a hold taken BEFORE the
+// decision keeps the timer from firing at all — but a connection accepted a
+// moment earlier can reach the handler and take its hold AFTER it. That request
+// would then start on a process that is already shutting down, and a stream
+// outliving the drain grace would be cut mid-flight. Asking here, with the hold
+// already taken, is exactly the other side of that same serialisation: either
+// the hold came first and the timer did not fire, or the timer fired and this
+// reports it. A tracker that does not implement it is simply never draining.
+type DrainReporter interface {
+	Fired() bool
+}
+
 // Options configures New. Only Config is required.
 type Options struct {
 	Config  config.Config
