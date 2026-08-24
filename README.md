@@ -127,7 +127,7 @@ lands; `go install ./cmd/utraque` puts it in `$GOBIN` (`$GOPATH/bin`, usually
 | `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL=1` | **Required.** See below — without it every Claude model silently loses most of its context window. |
 | `CLAUDE_CODE_MAX_CONTEXT_TOKENS` | Optional, and **GPT-only**. See below. |
 | `ANTHROPIC_CUSTOM_HEADERS="X-Utraque-Token: <token>"` | Required **only** if you set `UTRAQUE_LOCAL_TOKEN`. Without it Claude Code cannot authenticate to your own proxy. |
-| `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1` | Optional, and it does nothing on a plain Max subscription. See *Using a GPT route*. |
+| `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1` | Optional, and inert alongside the variable above — the two are mutually exclusive. See *Using a GPT route*. |
 
 #### `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL` — do not skip this
 
@@ -453,7 +453,10 @@ reports process status, version and uptime, plus, for the Codex leg:
 `utraque` serves its own `GET /v1/models`, merging Anthropic's model list with
 the Codex models it can route to, so both subscriptions show up in Claude
 Code's `/model` picker. Set `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1` in
-the client's environment to turn discovery on.
+the client's environment to turn discovery on — but note that it has no effect
+while `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL` is set, which the Claude leg
+needs. *Using a GPT route* explains the trade; this section describes what is
+served to a client that does ask.
 
 The options named in this section — `catalog_mode`, the emission strategy, the
 id template — are code-level defaults today. None of them reads an
