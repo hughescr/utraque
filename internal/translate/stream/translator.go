@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"slices"
 	"time"
 
 	"github.com/hughescr/utraque/internal/anthropic/schema"
@@ -34,6 +35,55 @@ const (
 	defaultHeartbeat       = 15 * time.Second
 	defaultUpstreamIdle    = 120 * time.Second
 )
+
+// handledEventTypes is the translator's mapping table: exactly the Codex
+// Responses stream event types handle dispatches on. Every other type falls to
+// handle's default branch, where it is counted as unknown and reported on
+// /healthz as protocol drift.
+//
+// It is written out as a list, rather than being read off the switch, because
+// the LIVE contract smoke test (cmd/utraque, build tag "live") needs to compare
+// the event types a REAL Codex stream carries against what this translator
+// claims to understand — the backend is undocumented and adds event types
+// without notice. A list that had drifted away from the switch would make that
+// tripwire lie, so TestHandledEventTypesMatchTheDispatchSwitch drives one frame
+// of every listed type through a Translator and fails if any of them is counted
+// as unknown.
+var handledEventTypes = []string{
+	cschema.EventResponseCreated,
+	cschema.EventResponseInProgress,
+	cschema.EventResponseCompleted,
+	cschema.EventResponseIncomplete,
+	cschema.EventResponseFailed,
+
+	cschema.EventOutputItemAdded,
+	cschema.EventOutputItemDone,
+
+	cschema.EventContentPartAdded,
+	cschema.EventContentPartDone,
+	cschema.EventOutputTextDelta,
+	cschema.EventOutputTextDone,
+
+	cschema.EventReasoningSummaryPartAdded,
+	cschema.EventReasoningSummaryTextDelta,
+	cschema.EventReasoningSummaryTextDone,
+	cschema.EventReasoningTextDelta,
+	cschema.EventReasoningTextDone,
+
+	cschema.EventFunctionCallArgumentsDelta,
+	cschema.EventFunctionCallArgumentsDone,
+
+	cschema.EventError,
+}
+
+// HandledEventTypes returns the mapping table: every Codex stream event type
+// this translator understands. The caller gets its own copy.
+func HandledEventTypes() []string { return slices.Clone(handledEventTypes) }
+
+// Handles reports whether typ is in the mapping table. An unhandled type is not
+// an error — it is counted and skipped — but a type a live stream carries that
+// this returns false for is the upstream having drifted.
+func Handles(typ string) bool { return slices.Contains(handledEventTypes, typ) }
 
 // Sentinel end-of-stream conditions.
 var (
