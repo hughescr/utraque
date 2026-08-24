@@ -94,7 +94,6 @@ export ANTHROPIC_BASE_URL=http://127.0.0.1:8317
 | --- | --- |
 | `ANTHROPIC_BASE_URL=http://127.0.0.1:8317` | Sends every request through `utraque`. Match `UTRAQUE_LISTEN`. |
 | `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1` | Turns on `GET /v1/models`, so the GPT models appear in the `/model` picker. Without it the picker shows only the client's built-in Claude list — GPT names still route when typed or set in agent frontmatter. |
-| `CLAUDE_CODE_MAX_CONTEXT_TOKENS=1000000` | Optional. Sets the window the client auto-compacts against. Pair it with a `[1m]` picker row (see *1M-context rows*) when you want a long-context model to use its real window rather than a conservative default. |
 
 With no Anthropic API key set in the environment, Claude Code's own Max
 subscription OAuth credential remains the active credential and is forwarded
@@ -196,10 +195,10 @@ This is the whole surface.
 | `UTRAQUE_TRACE_DIR` | *(off)* | Writes per-request trace dumps here. See [Logging and traces](#logging-and-traces): a trace holds the conversation, so it has its own switch rather than being reachable by raising the log level. |
 
 Not configurable by environment today: the model picker's own knobs
-(`catalog_mode`, the alias-emission strategy, the id template, the 1M-context
-rows). They are code-level options with working defaults — the ones described
-under *The model picker* — and nothing reads an environment variable for them
-yet. Do not go looking for a `UTRAQUE_DISCOVERY_*` key; there isn't one.
+(`catalog_mode`, the alias-emission strategy, the id template). They are
+code-level options with working defaults — the ones described under *The
+model picker* — and nothing reads an environment variable for them yet. Do not
+go looking for a `UTRAQUE_DISCOVERY_*` key; there isn't one.
 
 ## Transport
 
@@ -332,7 +331,7 @@ Code's `/model` picker. Set `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1` in
 the client's environment to turn discovery on.
 
 The options named in this section — `catalog_mode`, the emission strategy, the
-id template, the 1M rows — are code-level defaults today. None of them reads an
+id template — are code-level defaults today. None of them reads an
 environment variable yet, so what a build serves is what you get.
 
 Everything in this section is built to the client's actual behaviour, verified
@@ -388,31 +387,6 @@ Four emission strategies, alias emission **on by default**:
 
 An id template that could not produce a filter-passing id is rejected at
 startup rather than silently yielding a picker with no GPT rows in it.
-
-### 1M-context rows
-
-Because `utraque` is a gateway, Claude Code cannot verify that a model supports
-a 1M context window, so it does **not** offer the "(1M context)" picker entry
-it would offer on a direct connection. The capability is there; the row is not.
-
-So `utraque` emits the row itself: for each natively-1M Claude model it adds a
-second entry whose id carries the `[1m]` marker, e.g.
-
-```
-claude-sonnet-5        Sonnet 5
-claude-sonnet-5[1m]    Sonnet 5 (1M context)
-```
-
-Picking the second one makes the client send the `context-1m-2025-08-07` beta,
-treat the window as 1,000,000 tokens for auto-compaction, and strip the `[1m]`
-marker back off before putting the model in the request body — so the proxy
-receives an ordinary `claude-sonnet-5` request carrying the long-context beta,
-which the passthrough forwards untouched.
-
-The default set matches the client's own native-1M list (Sonnet 5, Fable 5,
-Opus 5, Opus 4.7, Opus 4.8) and is a code-level default, as is the whole
-feature. Pair it with `CLAUDE_CODE_MAX_CONTEXT_TOKENS` if you want those models
-to auto-compact at their true window rather than a conservative default.
 
 ## Tests
 

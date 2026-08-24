@@ -87,7 +87,6 @@ type Handler struct {
 	static   []anthropic.CatalogModel
 	codex    CodexCatalog
 	alias    AliasOptions
-	oneM     OneMOptions
 	reg      *router.Registry
 	log      *slog.Logger
 	now      func() time.Time
@@ -107,7 +106,6 @@ func New(opts Options) (*Handler, error) {
 		static:   opts.staticModels(),
 		codex:    opts.Codex,
 		alias:    opts.Alias,
-		oneM:     opts.OneM,
 		reg:      opts.Registry,
 		log:      opts.Logger,
 		now:      opts.Now,
@@ -242,15 +240,10 @@ func (h *Handler) Models(ctx context.Context, cred anthropic.Credential) Respons
 
 	for _, m := range anthModels {
 		base := Model{ID: m.ID, DisplayName: m.DisplayName, Type: m.Type, CreatedAt: m.CreatedAt}
-		// Normalize before deriving the long-context row so it inherits a real
-		// label rather than a bare " (1M context)".
 		if base.DisplayName == "" {
 			base.DisplayName = base.ID
 		}
 		add(base, router.PickerRoute{}, false)
-		if row, route, ok := h.oneMRow(base); ok {
-			add(row, route, true)
-		}
 	}
 
 	for _, row := range h.codexRows(codexList) {
@@ -329,47 +322,6 @@ func (h *Handler) codexModels(ctx context.Context) []schema.Model {
 		return nil
 	}
 	return models
-}
-
-// oneMRow derives the explicit long-context row for a native-1M Claude model.
-// ok=false means this model is not one of them, or the feature is off.
-func (h *Handler) oneMRow(base Model) (Model, router.PickerRoute, bool) {
-	if h.oneM.Disabled {
-		return Model{}, router.PickerRoute{}, false
-	}
-	suffix := h.oneM.idSuffix()
-	lower := strings.ToLower(base.ID)
-	if strings.Contains(lower, strings.ToLower(suffix)) {
-		// Upstream already advertises the long-context form; don't stack a
-		// second marker on it.
-		return Model{}, router.PickerRoute{}, false
-	}
-	matched := false
-	for _, prefix := range h.oneM.models() {
-		if prefix != "" && strings.HasPrefix(lower, strings.ToLower(prefix)) {
-			matched = true
-			break
-		}
-	}
-	if !matched {
-		return Model{}, router.PickerRoute{}, false
-	}
-
-	label := base.DisplayName
-	if label == "" {
-		label = base.ID
-	}
-	row := Model{
-		ID:          base.ID + suffix,
-		DisplayName: label + h.oneM.displaySuffix(),
-		Type:        base.Type,
-		CreatedAt:   base.CreatedAt,
-	}
-	// The route carries the undecorated id. The client strips "[1m]" itself
-	// before sending, so this is belt-and-braces — but it is what makes the
-	// decorated id resolve if anything ever does send it verbatim.
-	route := router.PickerRoute{Backend: router.BackendAnthropic, UpstreamModel: base.ID}
-	return row, route, true
 }
 
 // parseLimit reads the client's ?limit=. A missing, malformed, or non-positive

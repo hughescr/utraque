@@ -65,13 +65,6 @@ const (
 	// display name plus the alias to type, e.g. "GPT-5.6-Sol (sol)".
 	DefaultCodexDisplayTemplate = "{display} ({alias})"
 
-	// DefaultOneMIDSuffix is the marker Claude Code itself uses for the
-	// long-context form of a model id. See OneMOptions for why it works.
-	DefaultOneMIDSuffix = "[1m]"
-
-	// DefaultOneMDisplaySuffix matches the label Anthropic's gateway docs use.
-	DefaultOneMDisplaySuffix = " (1M context)"
-
 	// modelType is the "type" field of a model row in Anthropic's API.
 	modelType = "model"
 )
@@ -153,58 +146,6 @@ func (a AliasOptions) displayTemplate() string {
 	return a.DisplayTemplate
 }
 
-// OneMOptions governs the explicit long-context picker rows.
-//
-// Behind a gateway base URL Claude Code cannot verify that a model supports a
-// 1M context, so it does not offer the "(1M context)" entry it would offer
-// on a direct connection — the capability is there, the row is not. These
-// options put the row back.
-//
-// The mechanism, verified against client 2.1.226: an id containing "[1m]" makes
-// the client (a) send the context-1m-2025-08-07 beta, (b) treat the window as
-// 1,000,000 tokens for compaction, and (c) strip the "[1m]" marker back off
-// before putting the model in the request body. So utraque advertises
-// "claude-sonnet-5[1m]" and receives an ordinary "claude-sonnet-5" request
-// carrying the long-context beta, which the passthrough leg forwards untouched.
-//
-// The zero value means "on, with the built-in native-1M list".
-type OneMOptions struct {
-	// Disabled turns the extra rows off.
-	Disabled bool
-	// Models are id prefixes treated as natively 1M-capable. Empty means
-	// DefaultNativeOneMModels.
-	Models []string
-	// IDSuffix is appended to the base id. Empty means DefaultOneMIDSuffix.
-	// Changing it away from "[1m]" breaks the client-side mechanism described
-	// above; it exists so a future client marker can be configured, not so the
-	// marker can be invented.
-	IDSuffix string
-	// DisplaySuffix is appended to the base label. Empty means
-	// DefaultOneMDisplaySuffix.
-	DisplaySuffix string
-}
-
-func (o OneMOptions) idSuffix() string {
-	if o.IDSuffix == "" {
-		return DefaultOneMIDSuffix
-	}
-	return o.IDSuffix
-}
-
-func (o OneMOptions) displaySuffix() string {
-	if o.DisplaySuffix == "" {
-		return DefaultOneMDisplaySuffix
-	}
-	return o.DisplaySuffix
-}
-
-func (o OneMOptions) models() []string {
-	if len(o.Models) == 0 {
-		return defaultNativeOneMModels
-	}
-	return o.Models
-}
-
 // Options configures a Handler. Every field has a working default; New with a
 // zero Options serves the static Claude list plus nothing else, which is a
 // valid — if dull — catalog.
@@ -231,9 +172,6 @@ type Options struct {
 
 	// Alias governs Codex row emission.
 	Alias AliasOptions
-
-	// OneM governs the explicit long-context rows.
-	OneM OneMOptions
 
 	// Registry receives a picker route for every emitted id, so a picked row
 	// always routes back. Nil means router.DefaultRegistry.

@@ -301,10 +301,6 @@ func TestEveryEmittedIDPassesTheFilterAndRoutesBack(t *testing.T) {
 			// today's unanchored filter and must still route.
 			Alias: discovery.AliasOptions{IDTemplate: "{alias}.anthropic-compat"},
 		}},
-		{"one_m_disabled", discovery.Options{
-			CatalogMode: discovery.CatalogModeStatic, Codex: codexOK(),
-			OneM: discovery.OneMOptions{Disabled: true},
-		}},
 	}
 
 	for _, tc := range cases {
@@ -386,14 +382,14 @@ func TestRegistrationIsRebuiltEachTime(t *testing.T) {
 		t.Fatal("no picker routes registered")
 	}
 
-	// Every codex/1M row must have a route; plain Anthropic rows need none
-	// because the ordinary grammar already places them.
+	// Every codex row must have a route; plain Anthropic rows need none because
+	// the ordinary grammar already places them.
 	registered := make(map[string]bool)
 	for _, id := range reg.PickerIDs() {
 		registered[id] = true
 	}
 	for _, m := range resp.Data {
-		if strings.HasPrefix(m.ID, "anthropic-compat.") || strings.HasSuffix(m.ID, "[1m]") {
+		if strings.HasPrefix(m.ID, "anthropic-compat.") {
 			if !registered[strings.ToLower(m.ID)] {
 				t.Errorf("emitted id %q was not registered as a picker route", m.ID)
 			}
@@ -405,7 +401,6 @@ func TestRegistrationIsRebuiltEachTime(t *testing.T) {
 		CatalogMode: discovery.CatalogModeStatic,
 		Codex:       codexOK(),
 		Alias:       discovery.AliasOptions{Strategy: discovery.AliasOff},
-		OneM:        discovery.OneMOptions{Disabled: true},
 	})
 	off.Models(t.Context(), testCred)
 	if got := reg.PickerIDs(); len(got) != 0 {
@@ -630,131 +625,68 @@ func TestIncludeHiddenOffersHiddenModelsAndTheyStillRoute(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// 1M context rows
+// Static Claude model list
+//
+// utraque's static fallback is exactly the four current, fixed-context-window
+// Claude models. There is no long-context picker-row variant: Claude Code's
+// "(1M context)" mechanism required verifying a model's context window, and
+// utraque no longer advertises one, so no id it emits ever carries a "[1m]"
+// suffix.
 // ---------------------------------------------------------------------------
 
-func TestOneMRowsAreEmittedForNativeLongContextModels(t *testing.T) {
-	loadRegistry(t)
-	h := mustHandler(t, discovery.Options{CatalogMode: discovery.CatalogModeStatic})
-	resp := h.Models(t.Context(), testCred)
+func TestStaticModelListIsExactlyTheFourCurrentModels(t *testing.T) {
+	want := []anthropic.CatalogModel{
+		{ID: "claude-fable-5", DisplayName: "Fable 5", Type: "model"},
+		{ID: "claude-opus-5", DisplayName: "Opus 5", Type: "model"},
+		{ID: "claude-sonnet-5", DisplayName: "Sonnet 5", Type: "model"},
+		{ID: "claude-haiku-4-5", DisplayName: "Haiku 4.5", Type: "model"},
+	}
+	got := discovery.StaticAnthropicModels()
+	if len(got) != len(want) {
+		t.Fatalf("StaticAnthropicModels() = %+v, want %+v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("model %d = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+}
 
-	for _, base := range []string{"claude-sonnet-5", "claude-fable-5", "claude-opus-5"} {
-		want := base + "[1m]"
-		if !hasID(resp, want) {
-			t.Errorf("missing long-context row %q; got %v", want, ids(resp))
-			continue
-		}
-		if got := displayOf(resp, want); !strings.HasSuffix(got, "(1M context)") {
-			t.Errorf("display for %q = %q, want a \"(1M context)\" suffix", want, got)
-		}
-		// The row must sit next to its base model, not at the end of the list.
-		var baseIdx, oneMIdx = -1, -1
-		for i, m := range resp.Data {
-			switch m.ID {
-			case base:
-				baseIdx = i
-			case want:
-				oneMIdx = i
+// TestNoOneMRowIsEverEmitted pins down the removal of the long-context
+// picker-row feature across every catalog mode: given an upstream catalog
+// that carries no long-context row of its own, utraque never synthesizes one
+// — no emitted id or display name carries a "[1m]" / "(1M context)" marker.
+// (An upstream that already advertises such a row itself is a passthrough
+// concern, not this feature, and is out of scope here.)
+func TestNoOneMRowIsEverEmitted(t *testing.T) {
+	loadRegistry(t)
+	upstreamCat, _ := fakeAnthropic(t, upstreamModels(
+		anthropic.CatalogModel{ID: "claude-sonnet-5", DisplayName: "Sonnet 5"},
+	))
+
+	for _, tc := range []struct {
+		name string
+		opts discovery.Options
+	}{
+		{"static", discovery.Options{CatalogMode: discovery.CatalogModeStatic, Codex: codexOK()}},
+		{"merge", discovery.Options{CatalogMode: discovery.CatalogModeMerge, Anthropic: upstreamCat, Codex: codexOK()}},
+		{"upstream", discovery.Options{CatalogMode: discovery.CatalogModeUpstream, Anthropic: upstreamCat}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := mustHandler(t, tc.opts)
+			resp := h.Models(t.Context(), testCred)
+			if len(resp.Data) == 0 {
+				t.Fatal("no rows emitted; this test proves nothing")
 			}
-		}
-		if oneMIdx != baseIdx+1 {
-			t.Errorf("%q is at %d, want immediately after %q at %d", want, oneMIdx, base, baseIdx)
-		}
-	}
-
-	// A 200K model must not get one.
-	if hasID(resp, "claude-haiku-4-5[1m]") {
-		t.Error("haiku 4.5 is not natively 1M and must not get a long-context row")
-	}
-}
-
-func TestOneMRowsRouteToTheAnthropicLeg(t *testing.T) {
-	loadRegistry(t)
-	h := mustHandler(t, discovery.Options{CatalogMode: discovery.CatalogModeStatic})
-	h.Models(t.Context(), testCred)
-
-	dec, err := router.Resolve("claude-sonnet-5[1m]", "")
-	if err != nil {
-		t.Fatalf("Resolve: %v", err)
-	}
-	if dec.Backend != router.BackendAnthropic {
-		t.Errorf("Backend = %q, want anthropic", dec.Backend)
-	}
-	// The decorated id stands for the undecorated model; the client strips the
-	// marker itself, and the route records what it stands for.
-	if dec.ClientModel != "claude-sonnet-5" {
-		t.Errorf("ClientModel = %q, want claude-sonnet-5", dec.ClientModel)
-	}
-	if dec.UpstreamModel != "" {
-		t.Errorf("UpstreamModel = %q, want empty for the anthropic backend", dec.UpstreamModel)
-	}
-}
-
-func TestOneMRowsCanBeTurnedOff(t *testing.T) {
-	loadRegistry(t)
-	h := mustHandler(t, discovery.Options{
-		CatalogMode: discovery.CatalogModeStatic,
-		OneM:        discovery.OneMOptions{Disabled: true},
-	})
-	resp := h.Models(t.Context(), testCred)
-	for _, m := range resp.Data {
-		if strings.HasSuffix(m.ID, "[1m]") {
-			t.Errorf("long-context row %q emitted with OneM disabled", m.ID)
-		}
-	}
-}
-
-func TestOneMModelListIsConfigurable(t *testing.T) {
-	loadRegistry(t)
-	h := mustHandler(t, discovery.Options{
-		CatalogMode: discovery.CatalogModeStatic,
-		OneM:        discovery.OneMOptions{Models: []string{"claude-haiku-4-5"}},
-	})
-	resp := h.Models(t.Context(), testCred)
-	if !hasID(resp, "claude-haiku-4-5[1m]") {
-		t.Errorf("configured model got no long-context row; ids = %v", ids(resp))
-	}
-	if hasID(resp, "claude-sonnet-5[1m]") {
-		t.Error("a model outside the configured list got a long-context row")
-	}
-}
-
-func TestOneMRowLabelsAModelThatArrivedWithoutADisplayName(t *testing.T) {
-	loadRegistry(t)
-	cat, _ := fakeAnthropic(t, upstreamModels(
-		anthropic.CatalogModel{ID: "claude-sonnet-5"}, // no display_name
-	))
-	h := mustHandler(t, discovery.Options{
-		CatalogMode:           discovery.CatalogModeUpstream,
-		Anthropic:             cat,
-		StaticAnthropicModels: []anthropic.CatalogModel{},
-	})
-	resp := h.Models(t.Context(), testCred)
-
-	if got, want := displayOf(resp, "claude-sonnet-5"), "claude-sonnet-5"; got != want {
-		t.Errorf("base display = %q, want the id as a fallback", got)
-	}
-	if got, want := displayOf(resp, "claude-sonnet-5[1m]"), "claude-sonnet-5 (1M context)"; got != want {
-		t.Errorf("long-context display = %q, want %q", got, want)
-	}
-}
-
-func TestOneMRowIsNotStackedOnAnUpstreamOneMID(t *testing.T) {
-	loadRegistry(t)
-	cat, _ := fakeAnthropic(t, upstreamModels(
-		anthropic.CatalogModel{ID: "claude-sonnet-5[1m]", DisplayName: "Sonnet 5 (1M context)"},
-	))
-	h := mustHandler(t, discovery.Options{
-		CatalogMode:           discovery.CatalogModeUpstream,
-		Anthropic:             cat,
-		StaticAnthropicModels: []anthropic.CatalogModel{},
-	})
-	resp := h.Models(t.Context(), testCred)
-	if hasID(resp, "claude-sonnet-5[1m][1m]") {
-		t.Error("stacked a second [1m] marker on an id that already had one")
-	}
-	if !hasID(resp, "claude-sonnet-5[1m]") {
-		t.Errorf("upstream row was dropped; ids = %v", ids(resp))
+			for _, m := range resp.Data {
+				if strings.Contains(m.ID, "[1m]") {
+					t.Errorf("emitted id %q carries a [1m] marker; the long-context picker row has been removed", m.ID)
+				}
+				if strings.Contains(m.DisplayName, "1M context") {
+					t.Errorf("emitted display name %q carries a 1M context marker; the long-context picker row has been removed", m.DisplayName)
+				}
+			}
+		})
 	}
 }
 
