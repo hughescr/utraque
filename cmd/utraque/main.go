@@ -16,7 +16,10 @@ import (
 	"math"
 	"net/http"
 	"os"
+	"sort"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/hughescr/utraque/internal/anthropic"
@@ -145,6 +148,27 @@ func newServer(cfg config.Config, log *slog.Logger, activity server.ActivityTrac
 		Logger:        log,
 	})
 
+	// routing.alias_overrides, applied before anything loads a catalog, since
+	// LoadCatalog consults whatever overrides the registry already holds. This
+	// is the escape hatch for a slug the alias grammar cannot parse, so a
+	// newly-shipped irregular model is routable without a new build.
+	reg := router.DefaultRegistry
+	for _, ov := range cfg.Routing.AliasOverrides {
+		reg.SetOverride(ov.Slug, ov.Codename, ov.Version, ov.Modifier)
+		log.Info("registered a routing alias override",
+			slog.String("slug", ov.Slug), slog.String("codename", ov.Codename),
+			slog.String("version", ov.Version), slog.String("modifier", ov.Modifier))
+	}
+
+	// Every successful catalog read republishes the router's aliases. Without
+	// this the registry stays on the compiled-in static seed forever: a retired
+	// slug keeps resolving to a model the backend no longer serves, and a new
+	// codename never resolves at all — while /healthz and the leg's own effort
+	// clamping, which do read the live catalog, show the new one.
+	loadAliases := newAliasLoader(reg, log)
+
+	obsv := newCodexObserver()
+
 	// The Codex inference leg. It is built even without a credential source:
 	// "no `codex login` here" is a state it reports per request, with an
 	// actionable message, rather than a construction failure that would take
@@ -158,11 +182,16 @@ func newServer(cfg config.Config, log *slog.Logger, activity server.ActivityTrac
 			BaseURL:   cfg.Codex.BaseURL,
 			Transport: tr,
 			Logger:    log,
+			// The quota windows the backend reports on every answer, success or
+			// failure. Without this hook they were only ever seen on a failure.
+			OnRateLimits: obsv.observeRateLimits,
 		}),
-		Catalog:      cat,
-		Estimator:    tokens.Default(),
-		UpstreamIdle: cfg.Limits.UpstreamIdleTimeout,
-		Logger:       log,
+		Catalog:         cat,
+		OnCatalog:       loadAliases,
+		OnUnknownEvents: obsv.observeUnknownEvents,
+		Estimator:       tokens.Default(),
+		UpstreamIdle:    cfg.Limits.UpstreamIdleTimeout,
+		Logger:          log,
 	}
 	if credSource != nil {
 		legOpts.Credentials = credSource
@@ -172,14 +201,14 @@ func newServer(cfg config.Config, log *slog.Logger, activity server.ActivityTrac
 		return nil, err
 	}
 
-	models, err := newDiscovery(cfg, tr, cat, credSource, log)
+	models, err := newDiscovery(cfg, tr, cat, credSource, loadAliases, log)
 	if err != nil {
 		return nil, err
 	}
 
 	d := &dispatcher{anthropic: passthrough, codex: codexLeg}
 
-	hr := &healthReporter{cat: cat}
+	hr := &healthReporter{cat: cat, obs: obsv}
 	if credSource != nil {
 		hr.auth = credSource
 	}
@@ -210,7 +239,7 @@ func newServer(cfg config.Config, log *slog.Logger, activity server.ActivityTrac
 // auth.Source.Get can trigger a refresh and an auth.json write-back shared with
 // the Codex CLI. A live token serves real rows; anything else serves none,
 // which the handler already degrades to gracefully.
-func newDiscovery(cfg config.Config, tr transport.Transport, cat *catalog.Client, credSource *auth.Source, log *slog.Logger) (http.Handler, error) {
+func newDiscovery(cfg config.Config, tr transport.Transport, cat *catalog.Client, credSource *auth.Source, loadAliases func([]cschema.Model), log *slog.Logger) (http.Handler, error) {
 	anthCat, err := anthropic.NewCatalog(cfg.Anthropic.BaseURL, tr, anthropic.WithCatalogLogger(log))
 	if err != nil {
 		return nil, err
@@ -227,14 +256,171 @@ func newDiscovery(cfg config.Config, tr transport.Transport, cat *catalog.Client
 		if err != nil {
 			return nil, err
 		}
-		return cat.Models(ctx, cred)
+		models, err := cat.Models(ctx, cred)
+		if err != nil {
+			return nil, err
+		}
+		// A picker open is the other place a live catalog is already in hand, so
+		// it republishes the router's aliases too. Discovery derives the names it
+		// advertises FROM the registry, so loading first is what stops a picker
+		// offering yesterday's codenames.
+		loadAliases(models)
+		return models, nil
 	})
 
 	return discovery.New(discovery.Options{
 		Anthropic: anthCat,
 		Codex:     codexCat,
+		Registry:  router.DefaultRegistry,
 		Logger:    log,
 	})
+}
+
+// newAliasLoader returns the hook that republishes the router's alias tiers from
+// a live Codex model list.
+//
+// It is deliberately driven by reads that already happen — the leg's per-request
+// effort-clamping lookup and a picker open — rather than by a timer: no extra
+// upstream request, no extra goroutine, and no work at all until something
+// actually needs the catalog. An unchanged list is a no-op, so the common case
+// costs one fingerprint comparison rather than rebuilding three maps under the
+// registry's write lock while every Resolve waits.
+func newAliasLoader(reg *router.Registry, log *slog.Logger) func([]cschema.Model) {
+	var (
+		mu   sync.Mutex
+		last string
+	)
+	return func(models []cschema.Model) {
+		if len(models) == 0 {
+			// Never clear the registry on an empty read: an empty catalog would
+			// un-route every model, and "we could not see the catalog" is far
+			// more likely than "Codex serves nothing".
+			return
+		}
+		fp := catalogFingerprint(models)
+		mu.Lock()
+		defer mu.Unlock()
+		if fp == last {
+			return
+		}
+		catalog.PopulateRegistry(reg, models)
+		last = fp
+		log.Info("router aliases republished from the live codex catalog",
+			slog.Int("models", len(models)),
+			slog.Any("families", reg.Families()))
+	}
+}
+
+// catalogFingerprint identifies a model list by exactly the data the alias
+// tiers are derived from — the listed slugs and their priorities — so a catalog
+// that only changed a display name does not churn the registry.
+func catalogFingerprint(models []cschema.Model) string {
+	entries := catalog.ListedEntries(models)
+	parts := make([]string, 0, len(entries))
+	for _, e := range entries {
+		parts = append(parts, e.Slug+"#"+strconv.Itoa(e.Priority))
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, ",")
+}
+
+// codexObserver holds the non-secret operational state /healthz reports about
+// the Codex leg: the quota windows the backend last named, and the running
+// count of stream event types the translator did not recognise.
+//
+// Both are hooks off paths that already run, so observing costs nothing when
+// nothing is happening. No token, account id or request body is ever held here.
+type codexObserver struct {
+	mu       sync.Mutex
+	rl       responses.RateLimits
+	seenRL   bool
+	unknown  map[string]int
+	streams  int64
+	nowFn    func() time.Time
+	observed time.Time
+}
+
+func newCodexObserver() *codexObserver {
+	return &codexObserver{unknown: map[string]int{}, nowFn: time.Now}
+}
+
+// observeRateLimits records the quota headers of an upstream answer. It is
+// called from the responses client on every response, success or failure.
+func (o *codexObserver) observeRateLimits(rl responses.RateLimits) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.rl, o.seenRL, o.observed = rl, true, o.nowFn()
+}
+
+// observeUnknownEvents accumulates the per-type counts of unrecognised Codex
+// stream events. A non-zero count here is the early warning that the upstream
+// protocol has drifted and the translator is silently dropping something.
+func (o *codexObserver) observeUnknownEvents(counts map[string]int) {
+	if len(counts) == 0 {
+		return
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.streams++
+	for typ, n := range counts {
+		o.unknown[typ] += n
+	}
+}
+
+// quota renders the last-seen usage windows, or nil when the backend has not
+// reported any yet.
+func (o *codexObserver) quota() map[string]any {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if !o.seenRL {
+		return nil
+	}
+	out := map[string]any{"age_s": roundSeconds(o.nowFn().Sub(o.observed).Seconds())}
+	if w := windowFields(o.rl.Primary); w != nil {
+		out["primary"] = w
+	}
+	if w := windowFields(o.rl.Secondary); w != nil {
+		out["secondary"] = w
+	}
+	if o.rl.HasRetryAfter {
+		out["retry_after_s"] = roundSeconds(o.rl.RetryAfter.Seconds())
+	}
+	return out
+}
+
+func windowFields(w responses.Window) map[string]any {
+	if !w.Reported() {
+		return nil
+	}
+	out := map[string]any{}
+	if w.HasUsedPercent {
+		out["used_percent"] = w.UsedPercent
+	}
+	if w.HasWindowMinutes {
+		out["window_minutes"] = w.WindowMinutes
+	}
+	if w.HasResetAfter {
+		out["reset_after_s"] = roundSeconds(w.ResetAfter.Seconds())
+	}
+	return out
+}
+
+// unknownEvents renders the drift counters. Always present, so "zero" is a
+// reported fact rather than an absence a reader has to interpret.
+func (o *codexObserver) unknownEvents() map[string]any {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	byType := make(map[string]int, len(o.unknown))
+	total := 0
+	for typ, n := range o.unknown {
+		byType[typ] = n
+		total += n
+	}
+	return map[string]any{
+		"unknown_events":        total,
+		"unknown_event_types":   byType,
+		"streams_with_unknowns": o.streams,
+	}
 }
 
 // healthReporter contributes the codex auth and catalog fields to /healthz. It
@@ -244,6 +430,7 @@ func newDiscovery(cfg config.Config, tr transport.Transport, cat *catalog.Client
 type healthReporter struct {
 	auth *auth.Source    // nil when no credential file is configured
 	cat  *catalog.Client // always set
+	obs  *codexObserver  // always set
 }
 
 func (h *healthReporter) extra(context.Context) map[string]any {
@@ -267,10 +454,21 @@ func (h *healthReporter) extra(context.Context) map[string]any {
 		}
 	}
 
-	return map[string]any{
+	out := map[string]any{
 		"codex_auth":    codex,
 		"codex_catalog": catInfo,
 	}
+	if h.obs != nil {
+		out["codex_stream"] = h.obs.unknownEvents()
+		if q := h.obs.quota(); q != nil {
+			out["codex_quota"] = q
+		}
+	}
+	// The alias families the router currently routes. It is the quickest way to
+	// see whether the live catalog has been loaded or the static seed is still
+	// in force.
+	out["codex_routing"] = map[string]any{"families": router.DefaultRegistry.Families()}
+	return out
 }
 
 // roundSeconds keeps a duration-in-seconds to millisecond precision so the

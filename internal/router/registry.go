@@ -171,15 +171,30 @@ var staticOverrides = map[string]slugOverride{
 // swaps the source by calling LoadCatalog on it with live catalog entries.
 func NewStaticRegistry() *Registry {
 	r := NewRegistry()
+	r.LoadStatic()
+	return r
+}
+
+// LoadStatic restores the compiled-in seed IN PLACE: the static overrides, the
+// static slug tiers, and an empty picker tier.
+//
+// It exists so a caller can undo a live-catalog load without assigning over a
+// *Registry — that would copy the value, and with it the sync.RWMutex, which is
+// never safe. Tests are the only expected caller.
+func (r *Registry) LoadStatic() {
+	r.mu.Lock()
+	r.overrides = make(map[string]slugOverride, len(staticOverrides))
 	for slug, ov := range staticOverrides {
 		r.overrides[slug] = ov
 	}
+	r.picker = map[string]PickerRoute{}
+	r.mu.Unlock()
+
 	entries := make([]CatalogEntry, len(staticSlugs))
 	for i, s := range staticSlugs {
 		entries[i] = CatalogEntry{Slug: s}
 	}
 	r.LoadCatalog(entries)
-	return r
 }
 
 // SetOverride registers (or replaces) a config-driven alias override for a

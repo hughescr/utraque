@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"log/slog"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -410,5 +411,40 @@ func TestValidateDoesNotLeakUserinfoInErrors(t *testing.T) {
 		if strings.Contains(err.Error(), "hunter2") {
 			t.Errorf("Validate(%q) leaked the credential: %v", raw, err)
 		}
+	}
+}
+
+// TestAliasOverridesParse covers routing.alias_overrides, the escape hatch for a
+// slug the alias grammar cannot place. A malformed entry fails at startup rather
+// than being dropped: a silent skip hides the problem until someone picks the
+// model and gets a 404.
+func TestAliasOverridesParse(t *testing.T) {
+	t.Run("accepted", func(t *testing.T) {
+		c, err := config.LoadFrom(envFrom(map[string]string{
+			config.EnvRoutingAliasOverrides: "gpt-5.3-codex-spark=spark:5.3, GPT-5.4-Turbo-Mini=:5.4:mini",
+		}))
+		if err != nil {
+			t.Fatalf("LoadFrom: %v", err)
+		}
+		want := []config.AliasOverride{
+			{Slug: "gpt-5.3-codex-spark", Codename: "spark", Version: "5.3"},
+			{Slug: "gpt-5.4-turbo-mini", Version: "5.4", Modifier: "mini"},
+		}
+		if !reflect.DeepEqual(c.Routing.AliasOverrides, want) {
+			t.Errorf("overrides = %+v, want %+v", c.Routing.AliasOverrides, want)
+		}
+		if s := c.String(); !strings.Contains(s, "gpt-5.3-codex-spark=spark:5.3") {
+			t.Errorf("String() = %s, want it to name the override", s)
+		}
+	})
+
+	for _, bad := range []string{"nosep", "=spark:5.3", "gpt-5.9-x=", "gpt-5.9-x=a:b:c:d"} {
+		t.Run("rejected "+bad, func(t *testing.T) {
+			if _, err := config.LoadFrom(envFrom(map[string]string{
+				config.EnvRoutingAliasOverrides: bad,
+			})); err == nil {
+				t.Errorf("LoadFrom accepted the malformed override %q", bad)
+			}
+		})
 	}
 }

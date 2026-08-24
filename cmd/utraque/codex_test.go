@@ -92,6 +92,10 @@ type fakeCodex struct {
 	calls   atomic.Int64
 	catalog atomic.Int64
 
+	// catalogBody overrides the models list the fake backend serves. Empty means
+	// fakeCatalogBody. Set it before the first catalog read.
+	catalogBody string
+
 	// respond serves one /responses call. n is the 1-based attempt number, so a
 	// test can fail the first attempt and succeed on the retry.
 	respond func(t *testing.T, w http.ResponseWriter, r *http.Request, n int64)
@@ -104,7 +108,11 @@ func newFakeCodex(t *testing.T) *fakeCodex {
 	mux.HandleFunc(codexBasePath+"/models", func(w http.ResponseWriter, r *http.Request) {
 		f.catalog.Add(1)
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, fakeCatalogBody)
+		body := f.catalogBody
+		if body == "" {
+			body = fakeCatalogBody
+		}
+		_, _ = io.WriteString(w, body)
 	})
 	mux.HandleFunc(codexBasePath+"/responses", func(w http.ResponseWriter, r *http.Request) {
 		n := f.calls.Add(1)
@@ -1023,4 +1031,195 @@ func equalStrings(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// restoreRegistry snapshots the process-wide alias registry and puts the static
+// seed back afterwards, so a test that loads a live catalog into it cannot leak
+// that state into the next one.
+func restoreRegistry(t *testing.T) {
+	t.Helper()
+	t.Cleanup(router.DefaultRegistry.LoadStatic)
+}
+
+// TestLiveCatalogRepublishesTheRouterAliases is the wiring the alias contract
+// rests on. Without it the registry stays on the compiled-in static seed for
+// the life of the process: a retired slug keeps resolving to a model the
+// backend no longer serves, and a codename OpenAI shipped this morning never
+// resolves at all — while /healthz and the leg's own effort clamping, which do
+// read the live catalog, show the new one.
+func TestLiveCatalogRepublishesTheRouterAliases(t *testing.T) {
+	restoreRegistry(t)
+
+	// The static seed says sol is gpt-5.6-sol. This backend has retired that and
+	// serves gpt-5.7-sol instead.
+	const rolled = `{"models":[
+	  {"slug":"gpt-5.7-sol","display_name":"GPT-5.7-Sol","visibility":"list","priority":10,
+	   "default_reasoning_level":"low",
+	   "supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"high"}]}
+	]}`
+
+	env := newCodexEnv(t, nil)
+	env.codex.catalogBody = rolled
+
+	if dec, err := router.Resolve("sol", ""); err != nil || dec.UpstreamModel != "gpt-5.6-sol" {
+		t.Fatalf("precondition: sol = %+v/%v, want the static seed gpt-5.6-sol", dec, err)
+	}
+
+	// A picker open is one of the two paths that hold a live catalog.
+	resp, err := noRedirectClient().Get(env.front.URL + "/v1/models?limit=1000")
+	if err != nil {
+		t.Fatalf("get /v1/models: %v", err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
+
+	dec, err := router.Resolve("sol", "")
+	if err != nil {
+		t.Fatalf(`Resolve("sol") after the catalog read: %v`, err)
+	}
+	if dec.UpstreamModel != "gpt-5.7-sol" {
+		t.Errorf("sol = %q, want the live catalog's gpt-5.7-sol", dec.UpstreamModel)
+	}
+	// The retired slug is no longer a routable alias, so nothing silently sends
+	// a request to a model the backend has dropped.
+	if _, err := router.Resolve("sol-5.6", ""); err == nil {
+		t.Error(`"sol-5.6" still resolves after the catalog retired gpt-5.6-sol`)
+	}
+
+	// And an inference request goes to the slug the live catalog named.
+	post(t, env.front.URL+"/v1/messages",
+		`{"model":"sol","max_tokens":8,"stream":true,"messages":[{"role":"user","content":"hi"}]}`, nil)
+	var sent struct {
+		Model string `json:"model"`
+	}
+	if err := json.Unmarshal([]byte(env.codex.lastBody(t)), &sent); err != nil {
+		t.Fatalf("decode upstream request: %v", err)
+	}
+	if sent.Model != "gpt-5.7-sol" {
+		t.Errorf("upstream model = %q, want gpt-5.7-sol", sent.Model)
+	}
+}
+
+// TestAliasOverrideFromConfigMakesAnIrregularSlugRoutable exercises the
+// routing.alias_overrides escape hatch: a slug the grammar cannot parse becomes
+// routable from configuration alone, with no new build.
+func TestAliasOverrideFromConfigMakesAnIrregularSlugRoutable(t *testing.T) {
+	restoreRegistry(t)
+
+	const irregular = `{"models":[
+	  {"slug":"gpt-5.8-codex-ember","display_name":"Ember","visibility":"list","priority":9,
+	   "supported_reasoning_levels":[{"effort":"low"},{"effort":"high"}]}
+	]}`
+
+	env := newCodexEnv(t, func(c *config.Config) {
+		c.Routing.AliasOverrides = []config.AliasOverride{
+			{Slug: "gpt-5.8-codex-ember", Codename: "ember", Version: "5.8"},
+		}
+	})
+	env.codex.catalogBody = irregular
+
+	resp, err := noRedirectClient().Get(env.front.URL + "/v1/models?limit=1000")
+	if err != nil {
+		t.Fatalf("get /v1/models: %v", err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
+
+	for _, name := range []string{"ember", "ember-5.8", "ember-high"} {
+		dec, err := router.Resolve(name, "")
+		if err != nil {
+			t.Errorf("Resolve(%q): %v", name, err)
+			continue
+		}
+		if dec.UpstreamModel != "gpt-5.8-codex-ember" {
+			t.Errorf("Resolve(%q) upstream = %q, want gpt-5.8-codex-ember", name, dec.UpstreamModel)
+		}
+	}
+}
+
+// TestHealthzReportsQuotaAndProtocolDrift covers the two reporting gaps: the
+// usage-window headers the backend sends on EVERY answer (previously visible
+// only on a failure), and the unknown-event counters that are the early warning
+// for upstream protocol drift.
+func TestHealthzReportsQuotaAndProtocolDrift(t *testing.T) {
+	restoreRegistry(t)
+	env := newCodexEnv(t, nil)
+	env.codex.respond = func(t *testing.T, w http.ResponseWriter, r *http.Request, n int64) {
+		h := w.Header()
+		h.Set("x-codex-primary-used-percent", "42.5")
+		h.Set("x-codex-primary-window-minutes", "300")
+		h.Set("x-codex-primary-reset-after-seconds", "900")
+		writeSSE(w, `event: response.created
+data: {"type":"response.created","response":{"id":"resp_drift"}}
+
+event: response.something_new
+data: {"type":"response.something_new"}
+
+event: response.content_part.added
+data: {"type":"response.content_part.added","output_index":0,"part":{"type":"output_text"}}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","output_index":0,"delta":"ok"}
+
+event: response.output_text.done
+data: {"type":"response.output_text.done","output_index":0,"text":"ok"}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_drift","status":"completed","usage":{"input_tokens":3,"output_tokens":1}}}
+
+`)
+	}
+
+	resp := post(t, env.front.URL+"/v1/messages",
+		`{"model":"sol","max_tokens":8,"stream":true,"messages":[{"role":"user","content":"hi"}]}`, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
+
+	hresp, err := noRedirectClient().Get(env.front.URL + "/healthz")
+	if err != nil {
+		t.Fatalf("get healthz: %v", err)
+	}
+	defer hresp.Body.Close()
+
+	var health struct {
+		CodexQuota struct {
+			Primary struct {
+				UsedPercent   float64 `json:"used_percent"`
+				WindowMinutes int     `json:"window_minutes"`
+				ResetAfterS   float64 `json:"reset_after_s"`
+			} `json:"primary"`
+		} `json:"codex_quota"`
+		CodexStream struct {
+			UnknownEvents     int            `json:"unknown_events"`
+			UnknownEventTypes map[string]int `json:"unknown_event_types"`
+		} `json:"codex_stream"`
+		CodexRouting struct {
+			Families []string `json:"families"`
+		} `json:"codex_routing"`
+	}
+	if err := json.NewDecoder(hresp.Body).Decode(&health); err != nil {
+		t.Fatalf("decode healthz: %v", err)
+	}
+
+	if health.CodexQuota.Primary.UsedPercent != 42.5 {
+		t.Errorf("codex_quota.primary.used_percent = %v, want 42.5", health.CodexQuota.Primary.UsedPercent)
+	}
+	if health.CodexQuota.Primary.WindowMinutes != 300 {
+		t.Errorf("codex_quota.primary.window_minutes = %d, want 300", health.CodexQuota.Primary.WindowMinutes)
+	}
+	if health.CodexQuota.Primary.ResetAfterS != 900 {
+		t.Errorf("codex_quota.primary.reset_after_s = %v, want 900", health.CodexQuota.Primary.ResetAfterS)
+	}
+	if health.CodexStream.UnknownEvents != 1 {
+		t.Errorf("codex_stream.unknown_events = %d, want 1", health.CodexStream.UnknownEvents)
+	}
+	if n := health.CodexStream.UnknownEventTypes["response.something_new"]; n != 1 {
+		t.Errorf("unknown_event_types[response.something_new] = %d, want 1", n)
+	}
+	if len(health.CodexRouting.Families) == 0 {
+		t.Error("codex_routing.families is empty; the router advertises no route families")
+	}
 }

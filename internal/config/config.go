@@ -84,6 +84,10 @@ const (
 	EnvCodexRefreshSkew = EnvPrefix + "CODEX_REFRESH_SKEW"
 	EnvCodexLockTimeout = EnvPrefix + "CODEX_LOCK_TIMEOUT"
 
+	// EnvRoutingAliasOverrides pins how irregular Codex slugs decompose into
+	// aliases. See Routing.AliasOverrides for the format.
+	EnvRoutingAliasOverrides = EnvPrefix + "ROUTING_ALIAS_OVERRIDES"
+
 	// EnvCodexHome is the Codex CLI's own variable and is deliberately not
 	// UTRAQUE_-prefixed: pointing utraque at the same CODEX_HOME the CLI uses
 	// keeps both reading the one auth.json.
@@ -137,6 +141,47 @@ type Codex struct {
 	LockTimeout time.Duration
 }
 
+// AliasOverride pins how one Codex slug decomposes into router aliases, for a
+// slug the alias grammar parses wrongly or not at all. "gpt-5.3-codex-spark" is
+// the shipped example: it has two trailing tokens, and the codename is "spark",
+// not "codex".
+//
+// Nothing here is a secret; it is a routing table, and it is logged in full.
+type AliasOverride struct {
+	// Slug is the upstream model slug the override applies to.
+	Slug string
+	// Codename is the rolling alias the slug should answer to ("spark").
+	Codename string
+	// Version is the version used to build the pinned alias ("5.3" gives
+	// "spark-5.3") and to rank the slug for the rolling name.
+	Version string
+	// Modifier is a size/variant token ("mini") for a codename-less slug. It
+	// never wins a bare codename alias.
+	Modifier string
+}
+
+// String renders the override in the same syntax the environment accepts.
+func (a AliasOverride) String() string {
+	out := a.Slug + "=" + a.Codename + ":" + a.Version
+	if a.Modifier != "" {
+		out += ":" + a.Modifier
+	}
+	return out
+}
+
+// Routing configures how model names map onto upstream slugs.
+type Routing struct {
+	// AliasOverrides is the routing.alias_overrides escape hatch, read from
+	// UTRAQUE_ROUTING_ALIAS_OVERRIDES as a comma-separated list of
+	//
+	//	<slug>=<codename>:<version>[:<modifier>]
+	//
+	// e.g. "gpt-5.3-codex-spark=spark:5.3". An override is consulted before the
+	// grammar, so it is the way to make a newly-shipped irregular slug routable
+	// without a new build.
+	AliasOverrides []AliasOverride
+}
+
 // Log configures the slog handler.
 type Log struct {
 	Level  string // UTRAQUE_LOG_LEVEL:  debug|info|warn|error
@@ -151,6 +196,7 @@ type Config struct {
 	Limits     Limits
 	Anthropic  Anthropic
 	Codex      Codex
+	Routing    Routing
 	Idle       Idle
 	Log        Log
 }
@@ -210,6 +256,14 @@ func LoadFrom(getenv func(string) string) (Config, error) {
 
 	c.Codex.AuthFile = resolveCodexAuthFile(getenv)
 	c.Codex.CachePath = resolveCodexCacheFile(getenv)
+
+	if v, ok := lookup(getenv, EnvRoutingAliasOverrides); ok {
+		overrides, err := parseAliasOverrides(v)
+		if err != nil {
+			return Config{}, fmt.Errorf("config: %s: %w", EnvRoutingAliasOverrides, err)
+		}
+		c.Routing.AliasOverrides = overrides
+	}
 
 	if v, ok := lookup(getenv, EnvMaxBodyBytes); ok {
 		n, err := strconv.ParseInt(v, 10, 64)
@@ -293,6 +347,42 @@ func resolveCodexCacheFile(getenv func(string) string) string {
 		return ""
 	}
 	return filepath.Join(dir, CodexCacheDirName, CodexCacheFileName)
+}
+
+// parseAliasOverrides reads the comma-separated
+// "<slug>=<codename>:<version>[:<modifier>]" list. It rejects anything it
+// cannot place rather than silently dropping it: a typo here means a model that
+// does not route, and a startup failure names the problem while a silent skip
+// hides it until someone picks the model.
+func parseAliasOverrides(raw string) ([]AliasOverride, error) {
+	var out []AliasOverride
+	for _, entry := range strings.Split(raw, ",") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		slug, spec, ok := strings.Cut(entry, "=")
+		slug = strings.ToLower(strings.TrimSpace(slug))
+		if !ok || slug == "" {
+			return nil, fmt.Errorf("override %q: want <slug>=<codename>:<version>[:<modifier>]", entry)
+		}
+		parts := strings.Split(spec, ":")
+		if len(parts) > 3 {
+			return nil, fmt.Errorf("override %q: too many \":\"-separated fields", entry)
+		}
+		ov := AliasOverride{Slug: slug, Codename: strings.ToLower(strings.TrimSpace(parts[0]))}
+		if len(parts) > 1 {
+			ov.Version = strings.TrimSpace(parts[1])
+		}
+		if len(parts) > 2 {
+			ov.Modifier = strings.ToLower(strings.TrimSpace(parts[2]))
+		}
+		if ov.Codename == "" && ov.Version == "" {
+			return nil, fmt.Errorf("override %q: needs at least a codename or a version", entry)
+		}
+		out = append(out, ov)
+	}
+	return out, nil
 }
 
 // homeDir resolves the user's home directory, preferring an explicit HOME so
@@ -483,6 +573,7 @@ func (c Config) String() string {
 	fmt.Fprintf(&b, " codex.client_id=%s", c.Codex.ClientID)
 	fmt.Fprintf(&b, " codex.refresh_skew=%s", c.Codex.RefreshSkew)
 	fmt.Fprintf(&b, " codex.lock_timeout=%s", c.Codex.LockTimeout)
+	fmt.Fprintf(&b, " routing.alias_overrides=[%s]", joinOverrides(c.Routing.AliasOverrides))
 	fmt.Fprintf(&b, " idle_timeout=%s", c.Idle.Timeout)
 	fmt.Fprintf(&b, " log.level=%s", c.Log.Level)
 	fmt.Fprintf(&b, " log.format=%s", c.Log.Format)
@@ -505,10 +596,24 @@ func (c Config) LogValue() slog.Value {
 		slog.String("codex.client_id", c.Codex.ClientID),
 		slog.Duration("codex.refresh_skew", c.Codex.RefreshSkew),
 		slog.Duration("codex.lock_timeout", c.Codex.LockTimeout),
+		slog.String("routing.alias_overrides", joinOverrides(c.Routing.AliasOverrides)),
 		slog.Duration("idle_timeout", c.Idle.Timeout),
 		slog.String("log.level", c.Log.Level),
 		slog.String("log.format", c.Log.Format),
 	)
+}
+
+// joinOverrides renders the override table for a log line. It carries no
+// secret — it is a slug-to-alias mapping.
+func joinOverrides(in []AliasOverride) string {
+	if len(in) == 0 {
+		return ""
+	}
+	parts := make([]string, len(in))
+	for i, o := range in {
+		parts[i] = o.String()
+	}
+	return strings.Join(parts, " ")
 }
 
 func tokenField(tok string) string {

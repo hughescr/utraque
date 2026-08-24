@@ -89,10 +89,43 @@ is also planned). Knobs that exist today:
 - **Codex auth file** (`UTRAQUE_CODEX_AUTH_FILE`) — where the Codex login
   token lives. Defaults to `$CODEX_HOME/auth.json`, else `~/.codex/auth.json`,
   which is the same file the Codex CLI reads and writes.
+- **Alias overrides** (`UTRAQUE_ROUTING_ALIAS_OVERRIDES`) — a comma-separated
+  list of `<slug>=<codename>:<version>[:<modifier>]` entries, e.g.
+  `gpt-5.3-codex-spark=spark:5.3`. The short-name grammar assumes a slug looks
+  like `gpt-<version>[-<one tail token>]`; anything else needs an override to
+  be reachable by a short name. It is the escape hatch for a newly-shipped
+  irregular slug, so a model becomes routable without a new build.
 - **Limits** — request body size and similar guardrails enforced by the
   server middleware.
 - **Idle timeout** — how long the process may sit idle before self-exiting
   (relevant once launchd socket activation lands).
+
+## Short model names
+
+Short names (`sol`, `sol-5.6`, `sol-high`) are derived from the model list the
+Codex backend itself serves, not from a table compiled into the binary. Every
+successful catalog read — the per-request lookup that clamps reasoning effort,
+and a picker open — republishes them, so a codename OpenAI ships today starts
+resolving as soon as anything reads the catalog, and a retired slug stops.
+Until the first read succeeds, a compiled-in seed applies. Raw `gpt-*` slugs
+always route regardless.
+
+## Health
+
+`GET /healthz` is answered locally and never contacts either upstream. It
+reports process status, version and uptime, plus, for the Codex leg:
+
+- `codex_auth` — the credential state (`ok` / `stale` / `missing`) and the
+  seconds until the access token expires. The token value never appears.
+- `codex_catalog` — how many models the held snapshot holds and how old it is.
+- `codex_routing` — the short-name route families the router currently
+  resolves: the quickest way to see whether the live catalog has been loaded or
+  the compiled-in seed is still in force.
+- `codex_quota` — the rolling usage windows the backend reports on its own
+  response headers, with the age of that reading.
+- `codex_stream` — how many Codex stream events the translator did not
+  recognise, by type. A non-zero count is the early warning that the upstream
+  protocol has drifted.
 
 ## The model picker (merged `/v1/models`)
 

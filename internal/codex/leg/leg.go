@@ -101,6 +101,20 @@ type Options struct {
 	// CatalogTimeout bounds the lookup. Zero uses DefaultCatalogTimeout.
 	CatalogTimeout time.Duration
 
+	// OnCatalog, when set, receives every model list the leg successfully reads
+	// from the catalog. It is how the router's alias registry is kept in step
+	// with what Codex actually serves, without this package taking a dependency
+	// on the registry. It runs inline on the request path, so it must be cheap
+	// and must not block; the caller is expected to no-op on an unchanged list.
+	// The slice is the leg's own copy and is not retained.
+	OnCatalog func([]cschema.Model)
+
+	// OnUnknownEvents, when set, receives the per-type counts of Codex stream
+	// events the Translator did not recognise, once per completed stream. It is
+	// the early warning for upstream protocol drift, surfaced on /healthz. It
+	// must not block.
+	OnUnknownEvents func(map[string]int)
+
 	// Estimator counts input tokens for the message_start seed and for
 	// count_tokens. Nil uses tokens.Default().
 	Estimator tokens.Estimator
@@ -134,6 +148,8 @@ type Leg struct {
 	creds          auth.CredentialSource
 	cat            Catalog
 	catalogTimeout time.Duration
+	onCatalog      func([]cschema.Model)
+	onUnknown      func(map[string]int)
 	est            tokens.Estimator
 	emitReasoning  string
 	onTruncate     string
@@ -155,6 +171,8 @@ func New(opts Options) (*Leg, error) {
 		creds:          opts.Credentials,
 		cat:            opts.Catalog,
 		catalogTimeout: opts.CatalogTimeout,
+		onCatalog:      opts.OnCatalog,
+		onUnknown:      opts.OnUnknownEvents,
 		est:            opts.Estimator,
 		emitReasoning:  opts.EmitReasoning,
 		onTruncate:     opts.OnTruncate,
@@ -433,6 +451,12 @@ func (l *Leg) catalogModel(ctx context.Context, cred auth.Credential, slug strin
 			slog.String("slug", slug), slog.String("err", err.Error()))
 		return cschema.Model{}
 	}
+	// The same read that clamps effort is also the freshest view of what Codex
+	// serves, so it is what keeps the router's aliases current. Doing it here
+	// rather than on a timer means no extra request and no extra goroutine.
+	if l.onCatalog != nil && len(models) > 0 {
+		l.onCatalog(models)
+	}
 	for i := range models {
 		if strings.EqualFold(models[i].Slug, slug) {
 			return models[i]
@@ -460,6 +484,9 @@ func (l *Leg) logResult(ctx context.Context, log *slog.Logger, rq *router.Reques
 		slog.Bool("errored", res.Errored),
 	}
 	if len(res.UnknownEvents) > 0 {
+		if l.onUnknown != nil {
+			l.onUnknown(res.UnknownEvents)
+		}
 		attrs = append(attrs, slog.Any("unknown_events", res.UnknownEvents))
 		log.LogAttrs(ctx, slog.LevelInfo, "codex stream carried unrecognised event types", attrs...)
 		return

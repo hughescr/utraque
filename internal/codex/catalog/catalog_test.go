@@ -4,11 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -675,4 +678,36 @@ func containsStr(list []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// TestCatalogNeverFollowsRedirects: this request carries the Codex bearer
+// token, the account id, and the CLI's originator headers. Following a redirect
+// would replay all of them at whatever host the response named. The inference
+// client and the OAuth refresh client already refuse; the catalog must too.
+func TestCatalogNeverFollowsRedirects(t *testing.T) {
+	var elsewhere atomic.Int64
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		elsewhere.Add(1)
+		if r.Header.Get("Authorization") != "" {
+			t.Errorf("the redirect target received an Authorization header")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"models":[]}`)
+	}))
+	defer target.Close()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+"/models", http.StatusFound)
+	}))
+	defer srv.Close()
+
+	c := catalog.New(catalog.Options{BaseURL: srv.URL, HTTPClient: srv.Client(), Now: newClock().now})
+	if _, err := c.Models(context.Background(), fakeCred()); err == nil {
+		t.Fatal("a redirected catalog fetch reported success")
+	} else if !strings.Contains(err.Error(), "redirect") {
+		t.Errorf("error = %v, want it to name the redirect", err)
+	}
+	if n := elsewhere.Load(); n != 0 {
+		t.Errorf("the redirect target was contacted %d times; the credential must never be replayed", n)
+	}
 }

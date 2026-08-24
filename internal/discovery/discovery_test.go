@@ -77,9 +77,7 @@ func loadRegistry(t *testing.T) *router.Registry {
 		entries = append(entries, router.CatalogEntry{Slug: m.Slug, Priority: m.Priority})
 	}
 	reg.LoadCatalog(entries)
-	t.Cleanup(func() {
-		*reg = *router.NewStaticRegistry()
-	})
+	t.Cleanup(reg.LoadStatic)
 	return reg
 }
 

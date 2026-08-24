@@ -151,8 +151,22 @@ func New(opts Options) *Client {
 	if c.ttl <= 0 {
 		c.ttl = DefaultTTL
 	}
+	// A redirect is NEVER followed. This request carries the Codex bearer token,
+	// the account id, and the CLI's beta/originator headers; Go would replay all
+	// of them at whatever host the response named, and keep the Authorization
+	// header for any same-site hop. The inference client and the OAuth refresh
+	// client already forbid it; the catalog must not be the one door left open.
+	//
+	// A caller-supplied client is COPIED rather than mutated, so the invariant
+	// holds without reaching into something the caller still owns.
 	if c.http == nil {
 		c.http = &http.Client{Timeout: defaultHTTPTimeout}
+	} else {
+		cp := *c.http
+		c.http = &cp
+	}
+	c.http.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
 	}
 	if c.now == nil {
 		c.now = time.Now
@@ -317,6 +331,13 @@ func (c *Client) fetch(ctx context.Context, cred auth.Credential) (state, error)
 		return state{}, apierr.Authentication("codex catalog rejected the credential (HTTP 401); the access token may need refreshing")
 
 	default:
+		if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+			// Reached here because CheckRedirect refused to follow it. Say so,
+			// rather than letting it read as an ordinary upstream failure.
+			return state{}, apierr.WithStatus(http.StatusBadGateway, apierr.TypeAPI,
+				"codex catalog returned an unexpected redirect (HTTP %d to %q); redirects are never followed",
+				resp.StatusCode, resp.Header.Get("Location"))
+		}
 		kind := apierr.TypeForStatus(resp.StatusCode)
 		return state{}, apierr.WithStatus(resp.StatusCode, kind,
 			"codex catalog request failed (HTTP %d)", resp.StatusCode)
