@@ -1088,3 +1088,119 @@ func equalStrings(a, b []string) bool {
 	}
 	return true
 }
+
+// TestStream200NonSSEIsClassifiedNotStreamed pins the content-type gate on a
+// 200. The backend occasionally answers a failure with the WRONG status: HTTP
+// 200 carrying a JSON error body. Handing that to the SSE translator would lose
+// the upstream's own message and surface as a generic "no events" 502, so a 200
+// that is not an event stream is classified like any other failure.
+func TestStream200NonSSEIsClassifiedNotStreamed(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{"error":{"message":"maintenance in progress","type":"server_error"}}`)
+	}))
+	defer srv.Close()
+
+	body, err := newClient(t, srv.URL).Stream(context.Background(), testCred(), testRequest())
+	if err == nil {
+		_ = body.Close()
+		t.Fatal("a 200 application/json body was accepted as an SSE stream")
+	}
+	ue, ok := AsUpstream(err)
+	if !ok {
+		t.Fatalf("error %v is not an *UpstreamError", err)
+	}
+	if ue.Status != http.StatusOK {
+		t.Errorf("upstream status = %d, want the 200 recorded verbatim", ue.Status)
+	}
+	if ue.HTTPStatus() != http.StatusBadGateway {
+		t.Errorf("rendered status = %d, want 502", ue.HTTPStatus())
+	}
+	if ue.UpstreamMessage != "maintenance in progress" {
+		t.Errorf("upstream message = %q, want the backend's own diagnostic", ue.UpstreamMessage)
+	}
+	if !strings.Contains(apierr.From(err).Message, "maintenance in progress") {
+		t.Errorf("rendered message = %q, want it to carry the upstream diagnostic",
+			apierr.From(err).Message)
+	}
+}
+
+// TestStream200WithoutContentTypeIsStreamed guards the other side of the gate: a
+// content type is legal to omit on a chunked response, and refusing one would
+// turn a working stream into a 502.
+func TestStream200WithoutContentTypeIsStreamed(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := w.Header()
+		h["Content-Type"] = nil // suppress net/http's sniffing default
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "event: response.created\ndata: {}\n\n")
+	}))
+	defer srv.Close()
+
+	body, err := newClient(t, srv.URL).Stream(context.Background(), testCred(), testRequest())
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	defer func() { _ = body.Close() }()
+	got, err := io.ReadAll(body)
+	if err != nil {
+		t.Fatalf("read stream: %v", err)
+	}
+	if !strings.Contains(string(got), "response.created") {
+		t.Errorf("stream body = %q, want the upstream frames", got)
+	}
+}
+
+// TestRefreshRetriesWhenOnlyTheAccountChanged: the request is signed by the
+// token AND the account id, so a refresh that corrects only the account id still
+// makes the retry a different call.
+func TestRefreshRetriesWhenOnlyTheAccountChanged(t *testing.T) {
+	var attempts atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if attempts.Add(1) == 1 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = io.WriteString(w, `{"error":{"message":"wrong account"}}`)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "event: response.created\ndata: {}\n\n")
+	}))
+	defer srv.Close()
+
+	src := &accountRotatingSource{token: fakeToken, first: "acct_wrong", second: "acct_right"}
+	body, err := newClient(t, srv.URL).StreamWithRefresh(context.Background(), src, testRequest())
+	if err != nil {
+		t.Fatalf("StreamWithRefresh: %v", err)
+	}
+	defer func() { _ = body.Close() }()
+
+	if n := attempts.Load(); n != 2 {
+		t.Errorf("upstream attempts = %d, want exactly 2 (original + one retry)", n)
+	}
+	if !src.invalidated {
+		t.Error("the rejected credential was never invalidated")
+	}
+}
+
+// accountRotatingSource hands out the same access token twice but a corrected
+// account id the second time.
+type accountRotatingSource struct {
+	token         string
+	first, second string
+	gets          int
+	invalidated   bool
+}
+
+func (s *accountRotatingSource) Get(context.Context) (auth.Credential, error) {
+	s.gets++
+	account := s.first
+	if s.gets > 1 {
+		account = s.second
+	}
+	return auth.Credential{AccessToken: s.token, AccountID: account, Exp: time.Now().Add(time.Hour)}, nil
+}
+
+func (s *accountRotatingSource) Invalidate(auth.Credential) { s.invalidated = true }

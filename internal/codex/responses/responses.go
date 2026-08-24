@@ -219,9 +219,13 @@ func (c *Client) StreamResponse(ctx context.Context, cred auth.Credential, req *
 	rl := ParseRateLimits(resp.Header, c.now())
 	c.observe(rl)
 
-	// A 200 that is HTML is not a stream — it is an interstitial. Fall through
-	// to classification, which recognises the challenge markers.
-	if resp.StatusCode == http.StatusOK && !isHTMLContentType(resp.Header.Get(headerContentType)) {
+	// A 200 whose body is not an event stream is not a stream at all: it is a
+	// Cloudflare interstitial, or a JSON error the backend served with the wrong
+	// status. Handing either to the SSE translator would lose the upstream's own
+	// diagnostic and surface as a bare "no events" 502, so fall through to
+	// classification, which recognises the challenge markers AND parses the
+	// structured error body.
+	if resp.StatusCode == http.StatusOK && isStreamContentType(resp.Header.Get(headerContentType)) {
 		return &Response{
 			Status:     resp.StatusCode,
 			Header:     resp.Header.Clone(),
@@ -277,7 +281,10 @@ func (c *Client) StreamResponseWithRefresh(ctx context.Context, src auth.Credent
 		// A refresh failure is more actionable than the 401 that provoked it.
 		return nil, gerr
 	}
-	if fresh.AccessToken == cred.AccessToken {
+	// The request is signed by BOTH the token and the account id, so either one
+	// changing makes the retry a different call. Comparing only the token would
+	// decline a retry that a corrected or rotated account id would have fixed.
+	if fresh.AccessToken == cred.AccessToken && fresh.AccountID == cred.AccountID {
 		// Nothing changed, so the same call would fail the same way. Report the
 		// original rejection rather than spending a second upstream request.
 		c.log.Warn("codex rejected the credential and no refreshed token was available; not retrying")

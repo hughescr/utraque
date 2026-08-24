@@ -378,6 +378,22 @@ func isHTMLContentType(ct string) bool {
 	return strings.Contains(strings.ToLower(ct), "text/html")
 }
 
+// isStreamContentType reports whether a 200 may be handed to the SSE translator.
+//
+// We asked for text/event-stream, so that is what an answer looks like. An
+// ABSENT content type is also accepted: it is legal on a chunked response and
+// some intermediaries drop it, and refusing one would turn a working stream into
+// a 502. Anything else — application/json, text/html — is an error body or an
+// interstitial wearing a 200, and belongs in classifyResponse where its message
+// can be read.
+func isStreamContentType(ct string) bool {
+	ct = strings.ToLower(strings.TrimSpace(ct))
+	if ct == "" {
+		return true
+	}
+	return strings.HasPrefix(ct, acceptSSE)
+}
+
 // errorBody covers the shapes the Codex backend and its edge return: OpenAI's
 // {"error":{...}}, FastAPI's {"detail":...} (string or object), and a bare
 // {"message":...}.

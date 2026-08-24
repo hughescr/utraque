@@ -198,21 +198,49 @@ func New(opts Options) (*Source, error) {
 	return s, nil
 }
 
+// getAttempts bounds how many times Get will re-run the loader to escape a
+// shared load that began before the caller's Invalidate. Two is enough: the
+// second attempt starts after the first has completed, so it can only join a
+// load that itself started after the Invalidate landed.
+const getAttempts = 2
+
 // Get returns a valid credential, refreshing if necessary.
 func (s *Source) Get(ctx context.Context) (Credential, error) {
-	if cred, ok := s.fastPath(); ok {
-		return cred, nil
+	var cred Credential
+	for attempt := 0; attempt < getAttempts; attempt++ {
+		if c, ok := s.fastPath(); ok {
+			return c, nil
+		}
+		// singleflight ensures N concurrent Gets for this file drive at most one
+		// disk read + refresh; the rest share its result.
+		v, err, _ := s.group.Do(s.path, func() (any, error) {
+			return s.load(ctx)
+		})
+		if err != nil {
+			return Credential{}, err
+		}
+		cred = v.(Credential)
+		// A shared load may have STARTED before this caller's Invalidate landed,
+		// in which case its result is the very token we just reported rejected.
+		// Serving it would hand the caller a known-dead credential and cost them
+		// a 401 that one more load would have fixed, so drive the loader again.
+		if !s.isInvalidated(cred.AccessToken) {
+			return cred, nil
+		}
 	}
-	// singleflight ensures N concurrent Gets for this file drive at most one
-	// disk read + refresh; the rest share its result.
-	v, err, _ := s.group.Do(s.path, func() (any, error) {
-		return s.load(ctx)
-	})
-	if err != nil {
-		return Credential{}, err
-	}
-	return v.(Credential), nil
+	// Every attempt came back invalidated (e.g. a refresh that cannot rotate the
+	// token). Return it anyway rather than failing: the caller's own retry
+	// policy — which can see the whole request — decides what to do with a 401.
+	return cred, nil
 }
+
+// maxInvalidated bounds how many rejected access tokens are remembered. The set
+// is only ever a hint ("do not serve this one from cache"), and every entry is a
+// plaintext token held for the life of the process, so it must not grow without
+// limit. Past the bound the whole set is dropped and rebuilt from the newest
+// entry: the worst case is one extra upstream 401, which immediately re-marks
+// the token.
+const maxInvalidated = 32
 
 // Invalidate marks cred stale. The next Get refreshes even if cred has not yet
 // expired. A blank token is ignored.
@@ -222,6 +250,9 @@ func (s *Source) Invalidate(cred Credential) {
 	}
 	s.mu.Lock()
 	s.invalGen++
+	if _, known := s.invalidated[cred.AccessToken]; !known && len(s.invalidated) >= maxInvalidated {
+		s.invalidated = make(map[string]struct{}, 1)
+	}
 	s.invalidated[cred.AccessToken] = struct{}{}
 	if s.cached != nil && s.cached.cred.AccessToken == cred.AccessToken {
 		s.cached = nil

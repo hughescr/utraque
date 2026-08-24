@@ -830,3 +830,29 @@ func TestRefreshDoesNotLogTokenValues(t *testing.T) {
 		t.Errorf("log output leaked the account id in the clear: %q", out)
 	}
 }
+
+// TestInvalidatedSetIsBounded: every entry in the stale-marker set is a
+// plaintext access token held for the life of the process, so the set must not
+// grow without limit when tokens rotate repeatedly.
+func TestInvalidatedSetIsBounded(t *testing.T) {
+	f := newFakeOAuth(t)
+	s, _ := newTestSource(t, f, authJSON{
+		access:    makeJWT(time.Now().Add(time.Hour)),
+		refresh:   "refresh-1",
+		accountID: "acct-fake",
+	}.bytes())
+
+	for i := 0; i < maxInvalidated*4; i++ {
+		s.Invalidate(Credential{AccessToken: fmt.Sprintf("rejected-token-%d", i)})
+	}
+
+	s.mu.Lock()
+	n := len(s.invalidated)
+	s.mu.Unlock()
+	if n > maxInvalidated {
+		t.Errorf("invalidated set holds %d tokens, want at most %d", n, maxInvalidated)
+	}
+	if n == 0 {
+		t.Error("invalidated set was emptied entirely; the newest rejection must survive")
+	}
+}
