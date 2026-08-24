@@ -63,6 +63,15 @@ const (
 	DefaultCodexRefreshSkew = 120 * time.Second
 	DefaultCodexLockTimeout = 10 * time.Second
 
+	// DefaultCodexClientVersion is sent as the client_version query parameter
+	// on every GET {base}/models request. Verified live: the real endpoint
+	// answers HTTP 400 ("client_version" reported as a missing required query
+	// field) without it, so this must never be empty — Validate rejects an
+	// empty value rather than letting the daemon start and fail every catalog
+	// fetch. "0.148.0" is a confirmed-accepted Codex CLI version; bump it via
+	// UTRAQUE_CODEX_CLIENT_VERSION if the endpoint ever starts rejecting it.
+	DefaultCodexClientVersion = "0.148.0"
+
 	// Transport* are the accepted values of UTRAQUE_CODEX_TRANSPORT: which TLS
 	// stack the Codex leg dials chatgpt.com with. They mirror the transport
 	// package's Mode* constants, which config deliberately does not import —
@@ -113,13 +122,14 @@ const (
 	EnvLogLevel            = EnvPrefix + "LOG_LEVEL"
 	EnvLogFormat           = EnvPrefix + "LOG_FORMAT"
 
-	EnvCodexBaseURL     = EnvPrefix + "CODEX_BASE_URL"
-	EnvCodexAuthFile    = EnvPrefix + "CODEX_AUTH_FILE"
-	EnvCodexCacheFile   = EnvPrefix + "CODEX_CACHE_FILE"
-	EnvCodexTokenURL    = EnvPrefix + "CODEX_TOKEN_URL"
-	EnvCodexRefreshSkew = EnvPrefix + "CODEX_REFRESH_SKEW"
-	EnvCodexLockTimeout = EnvPrefix + "CODEX_LOCK_TIMEOUT"
-	EnvCodexTransport   = EnvPrefix + "CODEX_TRANSPORT"
+	EnvCodexBaseURL       = EnvPrefix + "CODEX_BASE_URL"
+	EnvCodexAuthFile      = EnvPrefix + "CODEX_AUTH_FILE"
+	EnvCodexCacheFile     = EnvPrefix + "CODEX_CACHE_FILE"
+	EnvCodexTokenURL      = EnvPrefix + "CODEX_TOKEN_URL"
+	EnvCodexRefreshSkew   = EnvPrefix + "CODEX_REFRESH_SKEW"
+	EnvCodexLockTimeout   = EnvPrefix + "CODEX_LOCK_TIMEOUT"
+	EnvCodexTransport     = EnvPrefix + "CODEX_TRANSPORT"
+	EnvCodexClientVersion = EnvPrefix + "CODEX_CLIENT_VERSION"
 
 	// EnvRoutingAliasOverrides pins how irregular Codex slugs decompose into
 	// aliases. See Routing.AliasOverrides for the format.
@@ -192,6 +202,13 @@ type Codex struct {
 	// TransportAuto (default), TransportStd, or TransportUTLS.
 	// UTRAQUE_CODEX_TRANSPORT.
 	Transport string
+	// ClientVersion is sent as the client_version query parameter on every
+	// GET {base}/models request (see catalog.Options.ClientVersion) and is
+	// also recorded in utraque's own on-disk catalog cache. Not a secret — it
+	// is a Codex CLI version string. UTRAQUE_CODEX_CLIENT_VERSION. Validate
+	// rejects an empty value: the real endpoint 400s every catalog fetch
+	// without it.
+	ClientVersion string
 }
 
 // AliasOverride pins how one Codex slug decomposes into router aliases, for a
@@ -272,12 +289,13 @@ func Default() Config {
 		Codex: Codex{
 			// AuthFile is intentionally empty here: a bare Default() performs no
 			// environment or filesystem lookups. LoadFrom resolves it.
-			BaseURL:     DefaultCodexBaseURL,
-			TokenURL:    DefaultCodexTokenURL,
-			ClientID:    DefaultCodexClientID,
-			RefreshSkew: DefaultCodexRefreshSkew,
-			LockTimeout: DefaultCodexLockTimeout,
-			Transport:   DefaultCodexTransport,
+			BaseURL:       DefaultCodexBaseURL,
+			TokenURL:      DefaultCodexTokenURL,
+			ClientID:      DefaultCodexClientID,
+			RefreshSkew:   DefaultCodexRefreshSkew,
+			LockTimeout:   DefaultCodexLockTimeout,
+			Transport:     DefaultCodexTransport,
+			ClientVersion: DefaultCodexClientVersion,
 		},
 		Idle:    Idle{Timeout: DefaultIdleTimeout},
 		Launchd: Launchd{SocketName: DefaultLaunchdSocketName},
@@ -308,6 +326,7 @@ func LoadFrom(getenv func(string) string) (Config, error) {
 	setString(EnvCodexBaseURL, &c.Codex.BaseURL)
 	setString(EnvCodexTokenURL, &c.Codex.TokenURL)
 	setString(EnvCodexTransport, &c.Codex.Transport)
+	setString(EnvCodexClientVersion, &c.Codex.ClientVersion)
 	setString(EnvLaunchdSocketName, &c.Launchd.SocketName)
 	setString(EnvLogLevel, &c.Log.Level)
 	setString(EnvLogFormat, &c.Log.Format)
@@ -365,6 +384,7 @@ func LoadFrom(getenv func(string) string) (Config, error) {
 	c.Codex.BaseURL = strings.TrimRight(strings.TrimSpace(c.Codex.BaseURL), "/")
 	c.Codex.TokenURL = strings.TrimRight(strings.TrimSpace(c.Codex.TokenURL), "/")
 	c.Codex.Transport = strings.ToLower(strings.TrimSpace(c.Codex.Transport))
+	c.Codex.ClientVersion = strings.TrimSpace(c.Codex.ClientVersion)
 	c.Listen = strings.TrimSpace(c.Listen)
 	c.Launchd.SocketName = strings.TrimSpace(c.Launchd.SocketName)
 	c.Log.Level = strings.ToLower(strings.TrimSpace(c.Log.Level))
@@ -550,6 +570,13 @@ func (c Config) Validate() error {
 	if c.Codex.ClientID == "" {
 		return fmt.Errorf("config: codex client id must not be empty")
 	}
+	// An empty client_version reproduces a live-observed failure mode: the
+	// real endpoint 400s every GET {base}/models request outright ("field
+	// required" at query.client_version). Reject it here rather than let the
+	// daemon start and fail every catalog fetch from the first request on.
+	if c.Codex.ClientVersion == "" {
+		return fmt.Errorf("config: %s must not be empty", EnvCodexClientVersion)
+	}
 	// Both Codex endpoints must be plain https/http URLs with no embedded
 	// credentials — the same rule as the Anthropic base URL, since a
 	// misconfigured value is printed to stderr on failure.
@@ -652,6 +679,7 @@ func (c Config) String() string {
 	fmt.Fprintf(&b, " codex.refresh_skew=%s", c.Codex.RefreshSkew)
 	fmt.Fprintf(&b, " codex.lock_timeout=%s", c.Codex.LockTimeout)
 	fmt.Fprintf(&b, " codex.transport=%s", c.Codex.Transport)
+	fmt.Fprintf(&b, " codex.client_version=%s", c.Codex.ClientVersion)
 	fmt.Fprintf(&b, " routing.alias_overrides=[%s]", joinOverrides(c.Routing.AliasOverrides))
 	fmt.Fprintf(&b, " idle_timeout=%s", c.Idle.Timeout)
 	fmt.Fprintf(&b, " launchd.socket=%s", c.Launchd.SocketName)
@@ -677,6 +705,7 @@ func (c Config) LogValue() slog.Value {
 		slog.Duration("codex.refresh_skew", c.Codex.RefreshSkew),
 		slog.Duration("codex.lock_timeout", c.Codex.LockTimeout),
 		slog.String("codex.transport", c.Codex.Transport),
+		slog.String("codex.client_version", c.Codex.ClientVersion),
 		slog.String("routing.alias_overrides", joinOverrides(c.Routing.AliasOverrides)),
 		slog.Duration("idle_timeout", c.Idle.Timeout),
 		slog.String("launchd.socket", c.Launchd.SocketName),

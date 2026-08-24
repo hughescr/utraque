@@ -345,10 +345,11 @@ func TestCodexAuthFileResolution(t *testing.T) {
 
 func TestCodexEnvOverrides(t *testing.T) {
 	c, err := config.LoadFrom(envFrom(map[string]string{
-		"HOME":                     "/home/tester",
-		config.EnvCodexTokenURL:    "https://auth.example.test/oauth/token/",
-		config.EnvCodexRefreshSkew: "30s",
-		config.EnvCodexLockTimeout: "3s",
+		"HOME":                       "/home/tester",
+		config.EnvCodexTokenURL:      "https://auth.example.test/oauth/token/",
+		config.EnvCodexRefreshSkew:   "30s",
+		config.EnvCodexLockTimeout:   "3s",
+		config.EnvCodexClientVersion: "0.999.0",
 	}))
 	if err != nil {
 		t.Fatalf("LoadFrom: %v", err)
@@ -362,6 +363,37 @@ func TestCodexEnvOverrides(t *testing.T) {
 	if c.Codex.LockTimeout != 3*time.Second {
 		t.Errorf("LockTimeout = %s", c.Codex.LockTimeout)
 	}
+	if c.Codex.ClientVersion != "0.999.0" {
+		t.Errorf("ClientVersion = %q, want the env override", c.Codex.ClientVersion)
+	}
+}
+
+// TestCodexClientVersionDefaultsAndIsRendered proves the client_version query
+// parameter's value has a known-good default (so a daemon started with no
+// override still sends a value the real endpoint accepts) and that the
+// default is visible in both the redacted String() and LogValue() renderings
+// — it is a Codex CLI version string, not a secret, so it is never redacted.
+func TestCodexClientVersionDefaultsAndIsRendered(t *testing.T) {
+	c := config.Default()
+	if c.Codex.ClientVersion != config.DefaultCodexClientVersion {
+		t.Errorf("Codex.ClientVersion = %q, want default %q", c.Codex.ClientVersion, config.DefaultCodexClientVersion)
+	}
+	if c.Codex.ClientVersion == "" {
+		t.Fatal("default client version must not be empty")
+	}
+	if err := c.Validate(); err != nil {
+		t.Errorf("Default().Validate() = %v, want nil", err)
+	}
+
+	s := c.String()
+	if !strings.Contains(s, "codex.client_version="+config.DefaultCodexClientVersion) {
+		t.Errorf("String() = %s, want it to show codex.client_version=%s", s, config.DefaultCodexClientVersion)
+	}
+	var buf bytes.Buffer
+	slog.New(slog.NewJSONHandler(&buf, nil)).Info("cfg", "config", c)
+	if !strings.Contains(buf.String(), config.DefaultCodexClientVersion) {
+		t.Errorf("LogValue = %s, want it to show %s", buf.String(), config.DefaultCodexClientVersion)
+	}
 }
 
 func TestCodexValidateRejects(t *testing.T) {
@@ -370,6 +402,7 @@ func TestCodexValidateRejects(t *testing.T) {
 		"zero lock timeout":     func(c *config.Config) { c.Codex.LockTimeout = 0 },
 		"negative lock timeout": func(c *config.Config) { c.Codex.LockTimeout = -time.Second },
 		"empty client id":       func(c *config.Config) { c.Codex.ClientID = "" },
+		"empty client version":  func(c *config.Config) { c.Codex.ClientVersion = "" },
 		"empty token url":       func(c *config.Config) { c.Codex.TokenURL = "" },
 		"token url bad scheme":  func(c *config.Config) { c.Codex.TokenURL = "ftp://auth.openai.com/x" },
 		"token url userinfo":    func(c *config.Config) { c.Codex.TokenURL = "https://u:p@auth.openai.com/x" },

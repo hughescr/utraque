@@ -251,7 +251,7 @@ func newApp(cfg config.Config, log *slog.Logger, activity server.ActivityTracker
 	cat := catalog.New(catalog.Options{
 		BaseURL:       cfg.Codex.BaseURL,
 		CachePath:     cfg.Codex.CachePath,
-		ClientVersion: version,
+		ClientVersion: cfg.Codex.ClientVersion,
 		HTTPClient:    codexTr.Client(),
 		Logger:        log,
 	})

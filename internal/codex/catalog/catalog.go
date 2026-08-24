@@ -28,8 +28,10 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -59,6 +61,7 @@ const (
 	maxClockSkew = 5 * time.Minute
 
 	modelsPath        = "/models"
+	queryClientVer    = "client_version"
 	headerAccountID   = "chatgpt-account-id"
 	headerOpenAIBeta  = "OpenAI-Beta"
 	openAIBetaValue   = "responses=experimental"
@@ -90,7 +93,14 @@ type Options struct {
 	// TTL is the fresh window. Defaults to DefaultTTL. A negative value is
 	// treated as the default.
 	TTL time.Duration
-	// ClientVersion is recorded in the on-disk cache for interop/debugging.
+	// ClientVersion is sent as the client_version query parameter on every
+	// models request — the real endpoint 400s the request outright without it
+	// ("client_version" reported as a missing required query field) — and is
+	// also recorded in the on-disk cache for interop/debugging. It is NOT
+	// defaulted here: a caller wired to config.Config gets
+	// config.DefaultCodexClientVersion (config.Codex.ClientVersion, validated
+	// non-empty at startup); a caller that builds Options directly (tests)
+	// must set it if the query parameter matters to what it is asserting.
 	ClientVersion string
 	// HTTPClient performs the fetch. Defaults to a client with a modest
 	// timeout. Tests inject one aimed at a fake server.
@@ -277,7 +287,21 @@ func (c *Client) fetch(ctx context.Context, cred auth.Credential) (state, error)
 	hadPrev := c.st.loaded
 	c.mu.RUnlock()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+modelsPath, nil)
+	// client_version is a REQUIRED query parameter, not a header: the real
+	// endpoint 400s the request outright without it (observed live: "field
+	// required" at ('query', 'client_version')). It is parsed and re-encoded
+	// through url.URL/url.Values rather than string-concatenated, so a future
+	// BaseURL carrying its own query string (or a value needing escaping) is
+	// handled correctly rather than silently producing a malformed request.
+	reqURL, err := url.Parse(c.baseURL + modelsPath)
+	if err != nil {
+		return state{}, apierr.Wrap(err, apierr.TypeAPI, "codex catalog: parse request URL")
+	}
+	q := reqURL.Query()
+	q.Set(queryClientVer, c.clientVersion)
+	reqURL.RawQuery = q.Encode()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL.String(), nil)
 	if err != nil {
 		return state{}, apierr.Wrap(err, apierr.TypeAPI, "codex catalog: build request")
 	}
@@ -337,6 +361,21 @@ func (c *Client) fetch(ctx context.Context, cred auth.Credential) (state, error)
 		// Signal to the caller that the credential needs refreshing; carry no
 		// token material, only the status.
 		return state{}, apierr.Authentication("codex catalog rejected the credential (HTTP 401); the access token may need refreshing")
+
+	case http.StatusBadRequest:
+		// Observed live: a missing/empty client_version query parameter gets
+		// this exact status, with the upstream body naming the field
+		// (`"loc": ("query", "client_version")`). That is the one known cause
+		// of a 400 here, so name it explicitly rather than making a future
+		// recurrence rediscover it by re-diagnosing against the live endpoint.
+		body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxBody))
+		detail := strings.TrimSpace(string(body))
+		if readErr != nil || detail == "" {
+			detail = "(no response body)"
+		}
+		return state{}, apierr.WithStatus(http.StatusBadRequest, apierr.TypeInvalidRequest,
+			"codex catalog request failed (HTTP 400): %s — this endpoint requires a non-empty client_version query parameter; check Options.ClientVersion / UTRAQUE_CODEX_CLIENT_VERSION",
+			detail)
 
 	default:
 		if resp.StatusCode >= 300 && resp.StatusCode < 400 {

@@ -174,6 +174,7 @@ This is the whole surface.
 | `UTRAQUE_CODEX_REFRESH_SKEW` | `2m` | Refresh pre-emptively once the access token is this close to expiry. |
 | `UTRAQUE_CODEX_LOCK_TIMEOUT` | `10s` | How long a refresh waits for the cross-process advisory lock on `auth.json` before giving up, so `utraque` and the Codex CLI never clobber each other. |
 | `UTRAQUE_CODEX_TRANSPORT` | `auto` | `auto` \| `std` \| `utls`. See *Transport* below. A typo is a startup error, never a silent fallback. |
+| `UTRAQUE_CODEX_CLIENT_VERSION` | `0.148.0` | Sent as the `client_version` query parameter on every model-catalog request. The real endpoint rejects the request outright (HTTP 400) without it, so an empty value is a startup error rather than a silent, permanently-failing catalog fetch. |
 
 ### Routing
 

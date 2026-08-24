@@ -59,17 +59,18 @@ func (c *clock) advance(d time.Duration) {
 type fakeCatalog struct {
 	t *testing.T
 
-	mu            sync.Mutex
-	models        []schema.Model
-	etag          string
-	status304     bool // when true and If-None-Match matches, answer 304
-	calls         int
-	lastINM       string
-	gotAuth       string
-	gotAccount    string
-	gotBeta       string
-	gotOrigin     string
-	requestSignal chan struct{}
+	mu               sync.Mutex
+	models           []schema.Model
+	etag             string
+	status304        bool // when true and If-None-Match matches, answer 304
+	calls            int
+	lastINM          string
+	gotAuth          string
+	gotAccount       string
+	gotBeta          string
+	gotOrigin        string
+	gotClientVersion string
+	requestSignal    chan struct{}
 }
 
 func newFakeCatalog(t *testing.T, models []schema.Model, etag string) *fakeCatalog {
@@ -96,6 +97,7 @@ func (f *fakeCatalog) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	f.gotAccount = r.Header.Get("chatgpt-account-id")
 	f.gotBeta = r.Header.Get("OpenAI-Beta")
 	f.gotOrigin = r.Header.Get("originator")
+	f.gotClientVersion = r.URL.Query().Get("client_version")
 	models, etag, want304 := f.models, f.etag, f.status304
 	inm := f.lastINM
 	f.mu.Unlock()
@@ -177,6 +179,65 @@ func TestFetchSendsRequiredHeadersAndParses(t *testing.T) {
 	}
 	if fake.gotOrigin != "codex_cli_rs" {
 		t.Errorf("originator = %q", fake.gotOrigin)
+	}
+}
+
+// TestFetchSendsClientVersionQueryParam proves client_version travels as a
+// QUERY PARAMETER, not a header: the real endpoint was observed live to 400
+// the request outright ("field required" at query.client_version) when it is
+// absent, so a regression here would silently reproduce that outage.
+func TestFetchSendsClientVersionQueryParam(t *testing.T) {
+	fake := newFakeCatalog(t, []schema.Model{solModel()}, `W/"v1"`)
+	srv := httptest.NewServer(fake)
+	t.Cleanup(srv.Close)
+
+	c := catalog.New(catalog.Options{
+		BaseURL: srv.URL, HTTPClient: srv.Client(), Now: newClock().now,
+		ClientVersion: "0.148.0",
+	})
+
+	if _, err := c.Models(context.Background(), fakeCred()); err != nil {
+		t.Fatalf("Models: %v", err)
+	}
+
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if fake.gotClientVersion == "" {
+		t.Error("client_version query parameter was empty or absent")
+	}
+	if fake.gotClientVersion != "0.148.0" {
+		t.Errorf("client_version = %q, want %q", fake.gotClientVersion, "0.148.0")
+	}
+}
+
+// TestBadRequestNamesClientVersionInError proves a 400 of the exact shape
+// observed live against the real endpoint (a missing/empty client_version)
+// surfaces an error that names client_version explicitly, so a future
+// recurrence is diagnosable from the error text alone rather than requiring a
+// fresh live re-diagnosis against the real endpoint.
+func TestBadRequestNamesClientVersionInError(t *testing.T) {
+	const body = `{"error":{"message":"[{'type': 'missing', 'loc': ('query', 'client_version'), 'msg': 'Field required', ...}]","type":"invalid_request_error"}}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, body)
+	}))
+	t.Cleanup(srv.Close)
+
+	// Deliberately do NOT set ClientVersion, mirroring the misconfiguration
+	// that would reproduce this failure against the real endpoint.
+	c := catalog.New(catalog.Options{BaseURL: srv.URL, HTTPClient: srv.Client(), Now: newClock().now})
+
+	_, err := c.Models(context.Background(), fakeCred())
+	if err == nil {
+		t.Fatal("want error on HTTP 400")
+	}
+	got := err.Error()
+	if !contains(got, "client_version") {
+		t.Errorf("error = %q, want it to name client_version so the cause is diagnosable from the error text alone", got)
+	}
+	if !contains(got, "400") {
+		t.Errorf("error = %q, want it to mention the 400 status", got)
 	}
 }
 
