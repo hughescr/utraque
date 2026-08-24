@@ -4,8 +4,11 @@
 // upstream event as it arrives rather than buffering the whole response.
 //
 // The state machine, its invariants, and the three failure modes are documented
-// on Translator in translator.go. The Aggregator sink (non-streaming) is a later
-// phase; the Sink interface is the seam it will plug into.
+// on Translator in translator.go. Two sinks share that one implementation
+// through the Sink seam: SSEWriter for stream:true, and Aggregator (in
+// aggregator.go) which folds the identical calls into a single MessagesResponse
+// for stream:false. Neither sink interprets the Codex protocol, so the two
+// request modes cannot drift apart.
 package stream
 
 import (

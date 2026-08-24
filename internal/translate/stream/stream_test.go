@@ -420,6 +420,66 @@ func TestPendingBoundsAbort(t *testing.T) {
 	}
 }
 
+// TestPendingBytesBoundAbort covers the OTHER half of enforceBounds: a single
+// buffered item whose accumulated deltas exceed max_pending_bytes. The item
+// count stays comfortably inside max_pending_items, so only the byte branch can
+// trip — and it must reach the same honest terminus as the item-count branch:
+// an error event, no message_stop, even though the upstream then completes
+// cleanly. Force-closing the oversized block instead would strand its
+// half-streamed tool arguments under a fabricated clean stop.
+func TestPendingBytesBoundAbort(t *testing.T) {
+	var b strings.Builder
+	b.WriteString(sseFrame("response.created", `{"type":"response.created","response":{"id":"resp_test"}}`))
+	// Output 0 opens as a text block and stays active, so everything after it
+	// buffers rather than opening.
+	b.WriteString(sseFrame("response.content_part.added", `{"type":"response.content_part.added","output_index":0,"content_index":0,"part":{"type":"output_text","text":""}}`))
+	b.WriteString(sseFrame("response.output_text.delta", `{"type":"response.output_text.delta","output_index":0,"delta":"hello"}`))
+	// One parallel tool call whose arguments are far larger than the byte bound.
+	b.WriteString(sseFrame("response.output_item.added", `{"type":"response.output_item.added","output_index":1,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"f"}}`))
+	big := strings.Repeat("x", 4096)
+	args := `{\"a\":\"` + big + `\"}`
+	b.WriteString(sseFrame("response.function_call_arguments.delta", `{"type":"response.function_call_arguments.delta","output_index":1,"delta":"`+args+`"}`))
+	b.WriteString(sseFrame("response.function_call_arguments.done", `{"type":"response.function_call_arguments.done","output_index":1,"arguments":"`+args+`"}`))
+	b.WriteString(sseFrame("response.completed", `{"type":"response.completed","response":{"id":"resp_test","status":"completed","usage":{"input_tokens":7,"output_tokens":1}}}`))
+
+	opts := goldenOptions()
+	opts.MaxPendingBytes = 64 // one item, way over the byte bound
+	opts.MaxPendingItems = 16 // default headroom: the count branch must NOT trip
+	got, res, err := runToBytes(t, []byte(b.String()), opts)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	checkGrammar(t, got)
+	s := string(got)
+	if strings.Contains(s, "message_stop") {
+		t.Errorf("byte-bound overflow produced a clean terminus:\n%s", s)
+	}
+	if !strings.Contains(s, "event: error") || !res.Errored {
+		t.Errorf("byte-bound overflow should abort with an error terminus, got %+v:\n%s", res, s)
+	}
+	if !strings.Contains(s, "pending-buffer bounds") {
+		t.Errorf("error frame should name the bounds abort:\n%s", s)
+	}
+	// The oversized arguments must not have leaked onto the wire under a
+	// content_block_start that was never opened.
+	if strings.Contains(s, big) {
+		t.Errorf("buffered oversized arguments were flushed to the client:\n%s", s)
+	}
+
+	// Control: the same stream inside the byte bound completes cleanly, proving
+	// the abort above is the bound and not the fixture shape.
+	ok := opts
+	ok.MaxPendingBytes = 1 << 20
+	got2, res2, err := runToBytes(t, []byte(b.String()), ok)
+	if err != nil {
+		t.Fatalf("control run: %v", err)
+	}
+	checkGrammar(t, got2)
+	if res2.Errored || !strings.Contains(string(got2), "message_stop") {
+		t.Errorf("control run should complete cleanly, got %+v:\n%s", res2, got2)
+	}
+}
+
 // TestErrorFrameBeforeStartIsMode1 confirms an error frame arriving before any
 // output is failure mode 1: nothing emitted, Started false, error propagated for
 // the caller to render an HTTP envelope.
