@@ -18,9 +18,11 @@
 // StreamWithRefresh invalidates the credential and retries EXACTLY once on an
 // upstream 401, because only this package can tell a 401 from any other 4xx.
 //
-// A bot/TLS gate (a Cloudflare challenge rather than an API answer) is detected
-// and typed as ClassGate with an actionable message. Switching to a browser TLS
-// fingerprint is phase 8; this package only names the problem.
+// A bot/TLS gate (a Cloudflare challenge rather than an API answer) is detected,
+// typed as ClassGate with an actionable message, and reported to the transport.
+// In the default auto mode that report is what switches the process onto the
+// uTLS (Chrome TLS fingerprint) transport, once. This package decides only that
+// a gate happened; the transport decides what to do about it.
 //
 // No token or account id is ever logged, returned in an error, or otherwise
 // disclosed: the credential is used solely to sign the request.
@@ -98,9 +100,12 @@ type Options struct {
 
 // Client posts to the Codex responses endpoint. It is safe for concurrent use.
 type Client struct {
-	baseURL      string
-	http         *http.Client
-	transportKnd string
+	baseURL string
+	http    *http.Client
+	// tr is held, not just its Kind() snapshot: the auto transport can switch
+	// stacks mid-process, and a kind captured at construction would keep
+	// logging "std" after every request had moved to uTLS.
+	tr           transport.Transport
 	maxErrorBody int64
 	onRateLimits func(RateLimits)
 	now          func() time.Time
@@ -142,8 +147,8 @@ func New(opts Options) *Client {
 	if tr == nil {
 		tr = transport.NewStd(transport.DefaultOptions())
 	}
+	c.tr = tr
 	c.http = tr.Client()
-	c.transportKnd = tr.Kind()
 	return c
 }
 
@@ -213,11 +218,22 @@ func (c *Client) StreamResponse(ctx context.Context, cred auth.Credential, req *
 
 	resp, err := c.http.Do(httpReq)
 	if err != nil {
-		return nil, classifyTransport(ctx, err)
+		// A refused TLS handshake is what a fingerprint gate looks like when
+		// the peer never answers at all, so this path reports gates too.
+		ue := classifyTransport(ctx, err)
+		c.noteGate(ue)
+		return nil, ue
 	}
 
 	rl := ParseRateLimits(resp.Header, c.now())
 	c.observe(rl)
+
+	// The status the BACKEND gave, which is not always the status utraque
+	// answers with: an upstream 200 whose body carries no events becomes a 502
+	// downstream, and an upstream 401 becomes a refresh and a retry. Recording
+	// it here — the only layer that sees it — is what makes that difference
+	// legible on the one request line.
+	obs.SummaryFrom(ctx).SetUpstreamStatus(resp.StatusCode)
 
 	// A 200 whose body is not an event stream is not a stream at all: it is a
 	// Cloudflare interstitial, or a JSON error the backend served with the wrong
@@ -239,7 +255,22 @@ func (c *Client) StreamResponse(ctx context.Context, cred auth.Credential, req *
 
 	ue := classifyResponse(resp.StatusCode, resp.Header, rl, raw)
 	c.logFailure(ue, cred)
+	c.noteGate(ue)
 	return nil, ue
+}
+
+// noteGate tells the transport that the upstream answered a bot/TLS challenge
+// rather than the API. Only a gate is reported: an auth failure, a rate limit
+// or a 5xx says nothing about our TLS fingerprint, and switching stacks on one
+// of those would trade a clear error for a confusing one.
+//
+// What the transport does with the report is its business — std and utls do
+// nothing, auto switches to uTLS exactly once.
+func (c *Client) noteGate(ue *UpstreamError) {
+	if !ue.IsGate() || c.tr == nil {
+		return
+	}
+	transport.ReportGate(c.tr)
 }
 
 // StreamWithRefresh resolves a credential from src, opens the stream, and — on
@@ -310,7 +341,7 @@ func (c *Client) logFailure(ue *UpstreamError, cred auth.Credential) {
 		slog.String("class", string(ue.Class)),
 		slog.Int("upstream_status", ue.Status),
 		slog.Int("status", ue.HTTPStatus()),
-		slog.String("transport", c.transportKnd),
+		slog.String("transport", c.tr.Kind()),
 		obs.HashAttr("account", cred.AccountID),
 	}
 	if !ue.RateLimits.Empty() {

@@ -47,27 +47,70 @@ func sanitizeRequestID(id string) string {
 func newRequestID() string { return strings.ToLower(rand.Text()) }
 
 // withObserve wraps the ResponseWriter to capture status, bytes and TTFB, and
-// emits exactly one access-log line per request.
+// emits EXACTLY ONE structured access-log line per request.
+//
+// One line, not several, is the point. This middleware can see the request
+// line, the sizes and the timings; only the layers below know the route, the
+// models, the effort, the upstream status and how the answer ended. They
+// contribute through the obs.Summary carried in the context, so a reader gets a
+// single record per request rather than a scattering of half-lines to correlate
+// by hand. Every Summary method is nil-safe, so a leg driven without a server
+// around it still works and simply contributes nothing.
+//
+// This is also where a trace dump is opened when tracing is on: the request id
+// already exists (withRequestID is outermost) and the deferred Close runs after
+// every layer below has finished writing.
 func (s *Server) withObserve(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := s.now()
 		rec := newRecorder(w, s.now, start)
-		r = r.WithContext(withInfo(r.Context(), &rec.info))
-		ctx := r.Context()
+
+		sum := obs.NewSummary()
+		if s.transportKind != nil {
+			sum.SetTransport(s.transportKind())
+		}
+		// A declared Content-Length is the honest byte count even for a body
+		// the handler streams rather than buffers. A leg that reads the body
+		// itself overrides this with what it actually read.
+		sum.SetReqBytes(r.ContentLength)
+
+		ctx := withInfo(r.Context(), &rec.info)
+		ctx = obs.WithSummary(ctx, sum)
+
+		trace := s.tracer.Begin(obs.RequestIDFrom(ctx))
+		if trace != nil {
+			defer trace.Close()
+			trace.SetRequest(r.Method, obs.SafePath(r.URL), r.Header)
+			ctx = obs.WithTrace(ctx, trace)
+		}
+
+		r = r.WithContext(ctx)
 
 		defer func() {
-			attrs := []slog.Attr{
+			total := s.now().Sub(start)
+			// A context already cancelled when the handler returns means the
+			// client hung up. Legs mark deliberate interrupts too; the flag
+			// only ever latches on.
+			if r.Context().Err() != nil {
+				sum.SetInterrupted(true)
+			}
+			status := rec.info.Status()
+
+			attrs := make([]slog.Attr, 0, 24)
+			attrs = append(attrs,
 				slog.String("method", r.Method),
 				slog.String("path", obs.SafePath(r.URL)),
-				slog.Int("status", rec.info.Status()),
-				slog.Int64("bytes", rec.info.Bytes()),
-				slog.Duration("duration", s.now().Sub(start)),
-			}
-			if ttfb := rec.info.TTFB(); ttfb > 0 {
-				attrs = append(attrs, slog.Duration("ttfb", ttfb))
-			}
+				slog.Int("status", status),
+				slog.Int64("resp_bytes", rec.info.Bytes()),
+				slog.Float64("ttfb_ms", obs.Millis(rec.info.TTFB())),
+				slog.Float64("total_ms", obs.Millis(total)),
+			)
+			attrs = append(attrs, sum.Attrs()...)
 			attrs = append(attrs, slog.Attr{Key: "headers", Value: s.red.Header(r.Header)})
 			obs.LoggerFrom(ctx).LogAttrs(context.WithoutCancel(ctx), slog.LevelInfo, "request", attrs...)
+
+			trace.SetStatus(status)
+			trace.SetSummary(sum)
 		}()
 
 		next.ServeHTTP(rec, r)

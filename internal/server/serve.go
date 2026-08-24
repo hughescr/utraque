@@ -39,16 +39,36 @@ func (s *Server) HTTPServer(ctx context.Context) *http.Server {
 
 // Serve runs on ln until ctx is cancelled, then drains gracefully.
 func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
+	return s.ServeAll(ctx, ln)
+}
+
+// ServeAll runs on every listener until ctx is cancelled, then drains them all
+// through one shutdown.
+//
+// It takes a slice because launchd hands over one descriptor per address family
+// it bound for a Sockets entry: an entry with no SockNodeName produces both an
+// IPv4 and an IPv6 socket, and accepting on only one of them would leave
+// connections to the other hanging with nothing to answer them.
+func (s *Server) ServeAll(ctx context.Context, lns ...net.Listener) error {
+	if len(lns) == 0 {
+		return errors.New("server: ServeAll needs at least one listener")
+	}
 	hs := s.HTTPServer(ctx)
 	s.mu.Lock()
 	s.hs = hs
 	s.mu.Unlock()
+
+	addrs := make([]string, len(lns))
+	for i, ln := range lns {
+		addrs[i] = ln.Addr().String()
+	}
 	s.log.Info("listening",
-		slog.String("addr", ln.Addr().String()),
+		slog.String("addr", addrs[0]),
+		slog.Any("addrs", addrs),
 		slog.String("version", s.version),
 		slog.Any("config", s.cfg),
 	)
-	return Drain(ctx, hs, ln, s.grace)
+	return DrainAll(ctx, hs, lns, s.grace)
 }
 
 // ListenAndServe binds config.Listen and serves until ctx is cancelled.
@@ -71,22 +91,44 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	return hs.Shutdown(ctx)
 }
 
-// Drain is the graceful-shutdown helper: serve ln, and when ctx is cancelled
-// stop accepting, wait up to grace for in-flight requests, then force-close.
-// A clean shutdown returns nil rather than http.ErrServerClosed.
+// Drain is the graceful-shutdown helper for a single listener.
 func Drain(ctx context.Context, hs *http.Server, ln net.Listener, grace time.Duration) error {
+	return DrainAll(ctx, hs, []net.Listener{ln}, grace)
+}
+
+// DrainAll serves every listener, and when ctx is cancelled stops accepting,
+// waits up to grace for in-flight requests, then force-closes. A clean shutdown
+// returns nil rather than http.ErrServerClosed.
+//
+// The idle timeout arrives here as a cancelled ctx, which is precisely why the
+// wait exists: a streaming answer that is mid-flight when the daemon decides to
+// exit finishes writing before the process goes away. (internal/idle will not
+// fire at all while a request is in flight, so this is the second line of
+// defence, covering a SIGTERM from launchd or an operator.)
+func DrainAll(ctx context.Context, hs *http.Server, lns []net.Listener, grace time.Duration) error {
+	if len(lns) == 0 {
+		return errors.New("server: DrainAll needs at least one listener")
+	}
 	if grace <= 0 {
 		grace = DefaultShutdownGrace
 	}
-	errc := make(chan error, 1)
-	go func() { errc <- hs.Serve(ln) }()
+	errc := make(chan error, len(lns))
+	for _, ln := range lns {
+		go func() { errc <- hs.Serve(ln) }()
+	}
 
+	outstanding := len(lns)
+	var serveErr error
 	select {
 	case err := <-errc:
-		if errors.Is(err, http.ErrServerClosed) {
-			return nil
+		outstanding--
+		// One listener stopped on its own. Even a clean stop is fatal to the
+		// daemon: the address it held is no longer served, and under socket
+		// activation launchd would keep handing connections to a socket nobody
+		// accepts on. Shut the rest down and report.
+		if !errors.Is(err, http.ErrServerClosed) {
+			serveErr = err
 		}
-		return err
 	case <-ctx.Done():
 	}
 
@@ -94,10 +136,14 @@ func Drain(ctx context.Context, hs *http.Server, ln net.Listener, grace time.Dur
 	defer cancel()
 
 	err := hs.Shutdown(sctx)
-	<-errc // Serve always returns once Shutdown or Close has run.
+	// Shutdown (or Close) closes every listener registered with hs, so each
+	// remaining Serve returns.
+	for range outstanding {
+		<-errc
+	}
 	if err != nil {
 		_ = hs.Close()
 		return err
 	}
-	return nil
+	return serveErr
 }

@@ -35,13 +35,19 @@ const RequestIDHeader = "X-Request-Id"
 const MaxValueLen = 512
 
 // NewHandler builds the slog handler for the given level and format.
+//
+// The chosen handler is always wrapped in the scrubbing handler (scrub.go), so
+// credential-shaped material cannot reach the log even from a call site that
+// never thought about redaction. That wrapping is the "by construction" half of
+// the redaction rule: the Redactor decides which HEADERS may be logged at all,
+// and the scrubber is the backstop for every other attr.
 func NewHandler(w io.Writer, level slog.Level, format string) (slog.Handler, error) {
 	opts := &slog.HandlerOptions{Level: level}
 	switch strings.ToLower(strings.TrimSpace(format)) {
 	case "", FormatJSON:
-		return slog.NewJSONHandler(w, opts), nil
+		return NewScrubHandler(slog.NewJSONHandler(w, opts)), nil
 	case FormatText:
-		return slog.NewTextHandler(w, opts), nil
+		return NewScrubHandler(slog.NewTextHandler(w, opts)), nil
 	default:
 		return nil, fmt.Errorf("obs: unknown log format %q", format)
 	}
@@ -99,54 +105,57 @@ func RequestIDFrom(ctx context.Context) string {
 }
 
 // defaultAllow is the fixed set of header names whose values may be logged.
+//
+// It is deliberately tiny, and deliberately an allowlist rather than a
+// denylist: a denylist is a promise to have thought of every secret-carrying
+// header name in advance, including the ones an upstream has not invented yet.
+// These four are the ones that actually explain a request — the protocol
+// version, the capability flags, the media type and who called — and nothing
+// else is worth the risk of being wrong about.
+//
+// Everything withheld is still NAMED in the log (see Redactor.Header), so the
+// shape of a request stays debuggable without its contents being disclosed.
 var defaultAllow = []string{
-	"accept",
-	"accept-encoding",
-	"accept-language",
 	"anthropic-beta",
 	"anthropic-version",
-	"cache-control",
-	"connection",
-	"content-encoding",
-	"content-length",
 	"content-type",
-	"te",
 	"user-agent",
-	"x-request-id",
 }
 
-// defaultAllowPrefixes matches families of harmless client-telemetry headers.
-var defaultAllowPrefixes = []string{"x-stainless-"}
-
 // alwaysDeny can never be allowlisted, whatever a caller passes to NewRedactor.
-// This is belt-and-braces against a future edit to defaultAllow.
+// This is belt-and-braces against a future edit to defaultAllow: the names here
+// are unloggable by construction.
 var alwaysDeny = []string{
 	"authorization",
 	"proxy-authorization",
 	"cookie",
 	"set-cookie",
 	"x-api-key",
+	"api-key",
 	"anthropic-auth-token",
 	"openai-api-key",
 	"x-utraque-token",
+	"chatgpt-account-id",
+	"access-token",
+	"refresh-token",
+	"id-token",
 }
 
 // Redactor decides which request headers may be logged. It is immutable after
 // construction and safe for concurrent use.
 type Redactor struct {
-	allow    map[string]struct{}
-	prefixes []string
-	deny     map[string]struct{}
+	allow map[string]struct{}
+	deny  map[string]struct{}
 }
 
 // NewRedactor builds a Redactor allowing exactly the named headers (case
-// insensitive) plus the default safe prefixes. Names on the always-deny list
-// are dropped even when passed in.
+// insensitive). There is no prefix or wildcard form on purpose: an allowlist
+// that can match a family it has not seen is a denylist wearing a disguise.
+// Names on the always-deny list are dropped even when passed in.
 func NewRedactor(allow ...string) *Redactor {
 	r := &Redactor{
-		allow:    make(map[string]struct{}, len(allow)),
-		prefixes: slices.Clone(defaultAllowPrefixes),
-		deny:     make(map[string]struct{}, len(alwaysDeny)),
+		allow: make(map[string]struct{}, len(allow)),
+		deny:  make(map[string]struct{}, len(alwaysDeny)),
 	}
 	for _, n := range alwaysDeny {
 		r.deny[n] = struct{}{}
@@ -176,15 +185,8 @@ func (r *Redactor) Allowed(name string) bool {
 	if _, bad := r.deny[n]; bad {
 		return false
 	}
-	if _, ok := r.allow[n]; ok {
-		return true
-	}
-	for _, p := range r.prefixes {
-		if strings.HasPrefix(n, p) {
-			return true
-		}
-	}
-	return false
+	_, ok := r.allow[n]
+	return ok
 }
 
 // Header renders h as a slog group holding the allowlisted headers plus a
@@ -236,6 +238,10 @@ func truncate(s string) string {
 	return s[:MaxValueLen] + "...(truncated)"
 }
 
+// hashPrefix tags a value that has already been fingerprinted, so the scrubbing
+// handler does not hash a hash.
+const hashPrefix = "sha256:"
+
 // Hash fingerprints a value so it can be correlated in logs without being
 // disclosed. The empty string maps to the empty string.
 func Hash(s string) string {
@@ -243,7 +249,7 @@ func Hash(s string) string {
 		return ""
 	}
 	sum := sha256.Sum256([]byte(s))
-	return "sha256:" + hex.EncodeToString(sum[:4])
+	return hashPrefix + hex.EncodeToString(sum[:4])
 }
 
 // HashAttr is Hash as a slog.Attr, empty when s is empty.

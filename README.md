@@ -31,10 +31,12 @@ Under active development. Honestly, right now:
 - A GPT request answers `503` only when there is no Codex credential to spend.
   Run `codex login`, or point `UTRAQUE_CODEX_AUTH_FILE` at a file that holds
   one.
+- **It runs unattended.** launchd holds the listening socket and starts
+  `utraque` on the first connection; it exits after an idle hour and launchd
+  re-activates it on the next request. See *Unattended, on demand* below.
 
-Still outstanding: observability polish, the uTLS transport for a possible
-Cloudflare fingerprint gate, and unattended operation via launchd socket
-activation with idle self-exit. See the project's internal plan for the full
+Still outstanding: observability polish and the uTLS transport for a possible
+Cloudflare fingerprint gate. See the project's internal plan for the full
 phased roadmap; each phase is independently useful.
 
 ## How it works / credentials
@@ -66,11 +68,28 @@ Run the resulting `utraque` binary, then point Claude Code at it by setting
 set in the environment, Claude Code's own Max subscription OAuth credential
 remains the active credential and is forwarded as described above.
 
-Unattended operation — installing `utraque` as a macOS launchd service with
-socket activation and idle self-exit, so it starts on first connection and
-shuts itself down after a period of inactivity — is planned but not yet
-implemented. For now, run the binary directly in a terminal or your own
-process supervisor.
+### Unattended, on demand (macOS)
+
+`utraque` does not need to be a resident daemon. launchd can hold the listening
+socket and start the process only when a connection actually arrives; after an
+idle hour `utraque` exits and launchd starts it again on the next request, which
+the client never notices.
+
+```sh
+go build -o bin/utraque ./cmd/utraque
+deploy/install.sh --local-token "$(openssl rand -hex 16)"
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.hughescr.utraque.plist
+```
+
+`deploy/install.sh` only writes `~/Library/LaunchAgents/com.hughescr.utraque.plist`
+and prints the commands; it never runs `launchctl` unless you pass `--load`.
+Remove it again with `deploy/uninstall.sh --unload`. See
+[`deploy/README.md`](deploy/README.md) for the options, how to verify it, and
+what to check when it misbehaves.
+
+Started any other way — `go run ./cmd/utraque`, a terminal, your own supervisor —
+`utraque` binds `UTRAQUE_LISTEN` itself and never self-exits, because nothing
+would be there to bring it back.
 
 ## Configuration
 
@@ -97,8 +116,52 @@ is also planned). Knobs that exist today:
   irregular slug, so a model becomes routable without a new build.
 - **Limits** — request body size and similar guardrails enforced by the
   server middleware.
-- **Idle timeout** — how long the process may sit idle before self-exiting
-  (relevant once launchd socket activation lands).
+- **Idle timeout** (`UTRAQUE_IDLE_TIMEOUT`) — how long the process may sit idle
+  before self-exiting, as a Go duration. Under launchd socket activation this
+  defaults to `1h`; started by hand it defaults to off, since nothing would
+  bring it back. Setting it wins in both directions, and `0` means never exit.
+  A request that is still running holds the timer open, so a long streamed
+  answer can never be cut off by an idle exit.
+- **launchd socket** (`UTRAQUE_LAUNCHD_SOCKET`) — the `Sockets` key in the plist
+  whose descriptors `utraque` adopts. Default `Listener`; it must match the
+  plist.
+- **Trace directory** (`UTRAQUE_TRACE_DIR`) — off unless set. See
+  [Logging and traces](#logging-and-traces): a trace holds the conversation, so
+  it has its own switch rather than being reachable by raising the log level.
+
+## Logging and traces
+
+One structured line per request, on stderr (launchd captures it), carrying
+`request_id`, `method`, `path`, `status`, `req_bytes`, `resp_bytes`, `ttfb_ms`,
+`total_ms`, `route`, `client_model`, `upstream_model`, `effort`, `stream`,
+`upstream_status`, `output_tokens`, `stop_reason`, `interrupted`, `transport`,
+and `err` when there was one.
+
+Two of those fields earn their place by being *differences*. `upstream_status`
+is the status the BACKEND gave, which is not always the one you were answered
+with — an upstream 200 whose body carried no events becomes a 502 downstream,
+and an upstream 401 becomes a refresh and a retry. `interrupted` separates "you
+hung up" from "it broke", so a cancelled turn never reads as an incident.
+
+**Redaction is by allowlist.** Exactly four request headers may be logged with
+their values — `anthropic-version`, `anthropic-beta`, `content-type`,
+`user-agent`. Every other header is named but never valued, so the shape of a
+request stays debuggable without its contents being disclosed. `Authorization`,
+`x-api-key`, `access_token`, `refresh_token` and `id_token` are unloggable *by
+construction*: the slog handler is wrapped in a scrubber that blanks any
+attribute whose key names a credential and rewrites any credential-shaped value
+(a bearer token, a JWT, an `sk-` key, a token field in a JSON body or query
+string) before it can reach the output. The Codex `account_id` appears only as
+a hash prefix. Request and response bodies are never logged, at any level.
+
+**Trace dumps** are the one exception, and they are behind their own switch.
+Setting `UTRAQUE_TRACE_DIR` writes three files per request —
+`<id>.request.json`, `<id>.upstream.sse` and `<id>.downstream.sse` (a
+non-streaming answer lands in `<id>.downstream.json`) — with the same redaction
+applied. They double as test fixtures: the bytes received and the bytes sent,
+side by side, turn a translation bug into a reproducible case. **A trace holds
+the prompt text and the model's output in the clear**, which is why enabling it
+logs a loud `WARN` at startup.
 
 ## Short model names
 
@@ -117,15 +180,28 @@ reports process status, version and uptime, plus, for the Codex leg:
 
 - `codex_auth` — the credential state (`ok` / `stale` / `missing`) and the
   seconds until the access token expires. The token value never appears.
-- `codex_catalog` — how many models the held snapshot holds and how old it is.
+- `codex_catalog` — how many models the held snapshot holds, how old it is, and
+  `state`: **why** it looks like that. A bare `models: 0` is several different
+  situations wearing one face, so they are named — `loaded`, `empty` (a fetch
+  succeeded and the backend really listed nothing), `failed` (with
+  `last_error`), `unavailable` (no `codex login` here), `warming`, or `cold`.
+  The catalog is also warmed in the background at startup, so the count is a
+  fact about the backend rather than a fact about whether anyone has used the
+  proxy yet.
 - `codex_routing` — the short-name route families the router currently
   resolves: the quickest way to see whether the live catalog has been loaded or
   the compiled-in seed is still in force.
 - `codex_quota` — the rolling usage windows the backend reports on its own
-  response headers, with the age of that reading.
+  response headers, with the age of that reading, so subscription burn-down is
+  visible. Always present, carrying `reported: false` until the backend has
+  said anything: an absent quota block reads as "quota is fine".
 - `codex_stream` — how many Codex stream events the translator did not
   recognise, by type. A non-zero count is the early warning that the upstream
   protocol has drifted.
+- `transport` — which HTTP transport is in force (`std` or `utls`), read live,
+  since the auto transport can switch stacks mid-process.
+- `trace` — whether per-request trace dumps are being written, and where. A
+  directory of conversations accumulating on disk should never be a surprise.
 
 ## The model picker (merged `/v1/models`)
 

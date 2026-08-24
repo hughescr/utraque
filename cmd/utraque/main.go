@@ -32,6 +32,7 @@ import (
 	"github.com/hughescr/utraque/internal/config"
 	"github.com/hughescr/utraque/internal/discovery"
 	"github.com/hughescr/utraque/internal/idle"
+	"github.com/hughescr/utraque/internal/launchd"
 	"github.com/hughescr/utraque/internal/obs"
 	"github.com/hughescr/utraque/internal/router"
 	"github.com/hughescr/utraque/internal/server"
@@ -77,34 +78,132 @@ func run(ctx context.Context, getenv func(string) string, stderr io.Writer) erro
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
+	// Acquire the listening socket first: either the one launchd already holds
+	// or a fresh bind of cfg.Listen. Doing it before anything else means a port
+	// clash is reported before we have touched a credential file.
+	lns, src, err := launchd.Listen(launchd.Options{
+		SocketName: cfg.Launchd.SocketName,
+		Addr:       cfg.Listen,
+		Logger:     log,
+	})
+	if err != nil {
+		return err
+	}
+
+	cfg.Idle = idlePolicy(cfg.Idle, src)
+
 	timer := idle.New(cfg.Idle.Timeout, func() {
 		log.Info("idle timeout reached; exiting so launchd can re-activate on the next request",
 			slog.Duration("idle_timeout", cfg.Idle.Timeout))
 		cancel()
 	})
 
-	srv, err := newServer(cfg, log, timer)
+	// Trace dumps are off unless UTRAQUE_TRACE_DIR names a directory, and
+	// turning them on prints a loud warning: a trace holds the conversation, not
+	// just its shape.
+	tracer, err := obs.TracerFromEnv(getenv, log)
 	if err != nil {
+		_ = launchd.CloseAll(lns)
 		return err
 	}
+
+	a, err := newApp(cfg, log, timer, tracer)
+	if err != nil {
+		_ = launchd.CloseAll(lns)
+		return err
+	}
+
+	// Fill the Codex catalog in the background so /healthz reports a real model
+	// count on a daemon nobody has sent a request to yet. Nothing waits on it.
+	a.warmCatalog(ctx)
 
 	timer.Start()
 	defer timer.Stop()
 
-	return srv.ListenAndServe(ctx)
+	return a.srv.ServeAll(ctx, lns...)
 }
 
-// newServer assembles the whole HTTP surface. It is separate from run so tests
-// can drive the exact handler wiring production uses, against a fake upstream.
+// idlePolicy decides the effective idle timeout from the configured one and how
+// we got our socket.
+//
+// Self-exit is only safe when something can bring the daemon back, so it stays
+// off by default on a manual start and turns on by default under launchd socket
+// activation. An explicit UTRAQUE_IDLE_TIMEOUT always wins, in both directions:
+// an operator can ask a hand-started proxy to exit when idle, and can ask a
+// launchd-activated one never to.
+func idlePolicy(in config.Idle, src launchd.Source) config.Idle {
+	if in.Explicit || src != launchd.SourceLaunchd {
+		return in
+	}
+	in.Timeout = config.DefaultLaunchdIdleTimeout
+	return in
+}
+
+// app is the assembled process: the HTTP surface, plus the background work that
+// belongs to a running daemon rather than to the handler wiring.
+//
+// The split exists so a test can build the exact production handler graph
+// without also starting a goroutine that reaches for an upstream. warmCatalog
+// is called by run and by nothing else, which is what keeps the test suite
+// incapable of making a network request it did not ask for.
+type app struct {
+	srv  *server.Server
+	warm func(context.Context)
+}
+
+// warmCatalog kicks off the startup catalog fetch. It returns immediately.
+func (a *app) warmCatalog(ctx context.Context) {
+	if a == nil || a.warm == nil {
+		return
+	}
+	a.warm(ctx)
+}
+
+// newServer assembles the whole HTTP surface. It is the handler-only entry
+// point tests use; run builds the full app.
 //
 // activity may be nil, which disables idle accounting.
 func newServer(cfg config.Config, log *slog.Logger, activity server.ActivityTracker) (*server.Server, error) {
-	tr := transport.NewStd(transport.Options{
+	a, err := newApp(cfg, log, activity, nil)
+	if err != nil {
+		return nil, err
+	}
+	return a.srv, nil
+}
+
+// newApp assembles the HTTP surface and the background work behind it. It is
+// separate from run so tests can drive the exact wiring production uses against
+// a fake upstream.
+//
+// tracer may be nil, which disables per-request trace dumps.
+func newApp(cfg config.Config, log *slog.Logger, activity server.ActivityTracker, tracer *obs.Tracer) (*app, error) {
+	trOpts := transport.Options{
 		// Bound only the pre-first-byte wait. There is deliberately no overall
 		// client timeout: an SSE stream may legitimately run for many minutes.
 		ResponseHeaderTimeout: cfg.Limits.UpstreamIdleTimeout,
 		DisableCompression:    true,
-	})
+	}
+
+	// The Anthropic leg always uses the standard library. It is the sanctioned
+	// half — a transparent pass-through of the client's own credential to
+	// api.anthropic.com — and nothing there fingerprint-gates anyone. Dressing
+	// it up as Chrome would be dishonest for no benefit.
+	tr := transport.NewStd(trOpts)
+
+	// The Codex leg gets its own transport, because chatgpt.com is the only
+	// endpoint that might ever fingerprint-gate us. Default auto: std now, uTLS
+	// from the first gate onward. Separate transports also mean separate
+	// connection pools, so a switch on the Codex leg cannot disturb an
+	// in-flight Anthropic stream.
+	codexTr, err := transport.New(cfg.Codex.Transport, trOpts, log)
+	if err != nil {
+		return nil, err
+	}
+	if codexTr.Kind() != transport.KindStd {
+		log.Warn("the codex leg is starting on a non-standard TLS transport",
+			slog.String("codex.transport", cfg.Codex.Transport),
+			slog.String("kind", codexTr.Kind()))
+	}
 
 	passthrough, err := anthropic.New(cfg.Anthropic.BaseURL, tr,
 		anthropic.WithLogger(log),
@@ -169,6 +268,12 @@ func newServer(cfg config.Config, log *slog.Logger, activity server.ActivityTrac
 
 	obsv := newCodexObserver()
 
+	// Why a catalog read succeeded, failed, or was never attempted. The catalog
+	// client itself only remembers what it HOLDS, so "models: 0" read the same
+	// whether the backend served an empty list, the fetch failed, or nothing had
+	// ever asked. That ambiguity was observed live and is what this records.
+	catState := newCatalogState()
+
 	// The Codex inference leg. It is built even without a credential source:
 	// "no `codex login` here" is a state it reports per request, with an
 	// actionable message, rather than a construction failure that would take
@@ -180,7 +285,7 @@ func newServer(cfg config.Config, log *slog.Logger, activity server.ActivityTrac
 	legOpts := leg.Options{
 		Client: responses.New(responses.Options{
 			BaseURL:   cfg.Codex.BaseURL,
-			Transport: tr,
+			Transport: codexTr,
 			Logger:    log,
 			// The quota windows the backend reports on every answer, success or
 			// failure. Without this hook they were only ever seen on a failure.
@@ -201,24 +306,26 @@ func newServer(cfg config.Config, log *slog.Logger, activity server.ActivityTrac
 		return nil, err
 	}
 
-	models, err := newDiscovery(cfg, tr, cat, credSource, loadAliases, log)
+	models, err := newDiscovery(cfg, tr, cat, credSource, loadAliases, catState, log)
 	if err != nil {
 		return nil, err
 	}
 
 	d := &dispatcher{anthropic: passthrough, codex: codexLeg}
 
-	hr := &healthReporter{cat: cat, obs: obsv}
+	hr := &healthReporter{cat: cat, catState: catState, obs: obsv, transport: tr, tracer: tracer}
 	if credSource != nil {
 		hr.auth = credSource
 	}
 
-	return server.New(server.Options{
-		Config:      cfg,
-		Logger:      log,
-		Version:     version,
-		Activity:    activity,
-		HealthExtra: hr.extra,
+	srv, err := server.New(server.Options{
+		Config:        cfg,
+		Logger:        log,
+		Version:       version,
+		Activity:      activity,
+		HealthExtra:   hr.extra,
+		TransportKind: tr.Kind,
+		Tracer:        tracer,
 		Routes: server.Routes{
 			Messages:    http.HandlerFunc(d.messages),
 			CountTokens: http.HandlerFunc(d.countTokens),
@@ -229,6 +336,77 @@ func newServer(cfg config.Config, log *slog.Logger, activity server.ActivityTrac
 			Passthrough: passthrough,
 		},
 	})
+	if err != nil {
+		return nil, err
+	}
+
+	return &app{
+		srv:  srv,
+		warm: newCatalogWarmer(cat, credSource, loadAliases, catState, log),
+	}, nil
+}
+
+// catalogWarmTimeout bounds the startup catalog fetch. It is generous, because
+// nothing waits on it, and finite, because a hung fetch must not leave
+// /healthz reporting "warming" forever.
+const catalogWarmTimeout = 30 * time.Second
+
+// newCatalogWarmer returns the startup catalog warm.
+//
+// This closes a real gap: the catalog is fetched lazily, so on a freshly
+// started daemon /healthz reported "codex_catalog: models 0" — indistinguishable
+// from a broken credential — until the first inference request or picker open
+// happened to populate it. Warming on startup makes the model count a fact
+// about the backend rather than a fact about whether anyone has used the proxy
+// yet.
+//
+// Three properties are load-bearing:
+//
+//   - NON-BLOCKING. It returns immediately and the daemon serves regardless.
+//     The Anthropic leg must never wait on the Codex catalog.
+//   - FAILURE-TOLERANT. A failure is recorded and reported on /healthz; it is
+//     never fatal, and the ordinary lazy paths still work afterwards.
+//   - CREDENTIAL-SAFE. Like a picker open, it goes through the Peek gate: a
+//     startup fetch is not a good enough reason to rotate the refresh token
+//     that the user's own Codex CLI shares.
+//
+// It also detaches from the caller's context for cancellation while keeping its
+// values, so a warm in flight does not hold up shutdown and does not die the
+// instant run's context is replaced.
+func newCatalogWarmer(cat *catalog.Client, credSource *auth.Source, loadAliases func([]cschema.Model), st *catalogState, log *slog.Logger) func(context.Context) {
+	return func(ctx context.Context) {
+		if credSource == nil {
+			st.unavailable("no codex credential is configured")
+			return
+		}
+		if peek := credSource.Peek(); peek.State != auth.StateOK {
+			st.unavailable(fmt.Sprintf("codex credential is %q", peek.State))
+			return
+		}
+		st.begin()
+		go func() {
+			wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), catalogWarmTimeout)
+			defer cancel()
+
+			cred, err := credSource.Get(wctx)
+			if err != nil {
+				st.fail(err)
+				log.Warn("codex catalog warm skipped: no usable credential",
+					slog.String("err", err.Error()))
+				return
+			}
+			models, err := cat.Models(wctx, cred)
+			if err != nil {
+				st.fail(err)
+				log.Warn("codex catalog warm failed; the catalog will be fetched on first use",
+					slog.String("err", err.Error()))
+				return
+			}
+			loadAliases(models)
+			st.succeed(len(models))
+			log.Info("codex catalog warmed at startup", slog.Int("models", len(models)))
+		}()
+	}
 }
 
 // newDiscovery builds the merged GET /v1/models handler that populates Claude
@@ -239,7 +417,7 @@ func newServer(cfg config.Config, log *slog.Logger, activity server.ActivityTrac
 // auth.Source.Get can trigger a refresh and an auth.json write-back shared with
 // the Codex CLI. A live token serves real rows; anything else serves none,
 // which the handler already degrades to gracefully.
-func newDiscovery(cfg config.Config, tr transport.Transport, cat *catalog.Client, credSource *auth.Source, loadAliases func([]cschema.Model), log *slog.Logger) (http.Handler, error) {
+func newDiscovery(cfg config.Config, tr transport.Transport, cat *catalog.Client, credSource *auth.Source, loadAliases func([]cschema.Model), catState *catalogState, log *slog.Logger) (http.Handler, error) {
 	anthCat, err := anthropic.NewCatalog(cfg.Anthropic.BaseURL, tr, anthropic.WithCatalogLogger(log))
 	if err != nil {
 		return nil, err
@@ -247,19 +425,30 @@ func newDiscovery(cfg config.Config, tr transport.Transport, cat *catalog.Client
 
 	codexCat := discovery.CodexCatalogFunc(func(ctx context.Context) ([]cschema.Model, error) {
 		if credSource == nil {
-			return nil, errors.New("no codex credential is configured")
+			err := errors.New("no codex credential is configured")
+			catState.unavailable(err.Error())
+			return nil, err
 		}
 		if st := credSource.Peek(); st.State != auth.StateOK {
-			return nil, fmt.Errorf("codex credential is %q; not refreshing it just to open the model picker", st.State)
+			err := fmt.Errorf("codex credential is %q; not refreshing it just to open the model picker", st.State)
+			catState.unavailable(err.Error())
+			return nil, err
 		}
 		cred, err := credSource.Get(ctx)
 		if err != nil {
+			catState.fail(err)
 			return nil, err
 		}
 		models, err := cat.Models(ctx, cred)
 		if err != nil {
+			// A picker open is the other place a catalog read happens, so it is
+			// the other place a failure can be OBSERVED. Recording it here means
+			// /healthz explains a stubbornly empty catalog even on a daemon whose
+			// startup warm was never run.
+			catState.fail(err)
 			return nil, err
 		}
+		catState.succeed(len(models))
 		// A picker open is the other place a live catalog is already in hand, so
 		// it republishes the router's aliases too. Discovery derives the names it
 		// advertises FROM the registry, so loading first is what stops a picker
@@ -388,6 +577,19 @@ func (o *codexObserver) quota() map[string]any {
 	return out
 }
 
+// quotaHealth is quota with a "reported" flag, so codex_quota is ALWAYS present
+// on /healthz. An absent block is easy to read as "quota is fine"; an explicit
+// reported:false says the backend has not told us anything yet, which is a
+// different and much less reassuring statement.
+func (o *codexObserver) quotaHealth() map[string]any {
+	q := o.quota()
+	if q == nil {
+		return map[string]any{"reported": false}
+	}
+	q["reported"] = true
+	return q
+}
+
 func windowFields(w responses.Window) map[string]any {
 	if !w.Reported() {
 		return nil
@@ -423,14 +625,95 @@ func (o *codexObserver) unknownEvents() map[string]any {
 	}
 }
 
-// healthReporter contributes the codex auth and catalog fields to /healthz. It
-// reads only cached/local state — a token-expiry decode from a file stat and
-// the catalog's held snapshot — so a health poll never contacts the network and
-// never reveals a token value.
+// Values of /healthz's codex_catalog.state. They exist because "models: 0" on
+// its own is several different situations wearing one face, and only some of
+// them are worth acting on.
+const (
+	// catalogCold: nothing has tried to read the catalog yet.
+	catalogCold = "cold"
+	// catalogWarming: the startup fetch is in flight.
+	catalogWarming = "warming"
+	// catalogLoaded: a catalog is held and it names models.
+	catalogLoaded = "loaded"
+	// catalogEmpty: a fetch SUCCEEDED and the backend listed nothing. This is
+	// the one that must never be confused with a failure.
+	catalogEmpty = "empty"
+	// catalogFailed: the last attempt errored; last_error says how.
+	catalogFailed = "failed"
+	// catalogUnavailable: no attempt is possible — no `codex login` on this
+	// machine, or a credential not in a state worth spending a refresh on.
+	catalogUnavailable = "unavailable"
+)
+
+// catalogState records WHY the catalog looks the way it does. The catalog
+// client itself only knows what it HOLDS; this knows what happened when
+// something last tried to fill it.
+type catalogState struct {
+	mu      sync.Mutex
+	state   string
+	err     string
+	at      time.Time
+	nowFn   func() time.Time
+	attempt bool
+}
+
+func newCatalogState() *catalogState {
+	return &catalogState{state: catalogCold, nowFn: time.Now}
+}
+
+func (s *catalogState) mark(state, err string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.state, s.err, s.at, s.attempt = state, err, s.nowFn(), true
+}
+
+func (s *catalogState) begin() { s.mark(catalogWarming, "") }
+
+func (s *catalogState) succeed(models int) {
+	if models == 0 {
+		s.mark(catalogEmpty, "")
+		return
+	}
+	s.mark(catalogLoaded, "")
+}
+
+func (s *catalogState) fail(err error) {
+	if err == nil {
+		return
+	}
+	s.mark(catalogFailed, err.Error())
+}
+
+func (s *catalogState) unavailable(reason string) { s.mark(catalogUnavailable, reason) }
+
+// read returns the recorded state, the last error message, and how long ago the
+// last attempt was (negative when there has been none).
+func (s *catalogState) read() (state, err string, age time.Duration) {
+	if s == nil {
+		return catalogCold, "", -1
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.attempt {
+		return s.state, s.err, -1
+	}
+	return s.state, s.err, s.nowFn().Sub(s.at)
+}
+
+// healthReporter contributes the codex auth, catalog, quota, drift, transport
+// and tracing fields to /healthz. It reads only cached/local state — a
+// token-expiry decode from a file stat and the catalog's held snapshot — so a
+// health poll never contacts the network and never reveals a token value.
 type healthReporter struct {
-	auth *auth.Source    // nil when no credential file is configured
-	cat  *catalog.Client // always set
-	obs  *codexObserver  // always set
+	auth      *auth.Source        // nil when no credential file is configured
+	cat       *catalog.Client     // always set
+	catState  *catalogState       // always set
+	obs       *codexObserver      // always set
+	transport transport.Transport // always set
+	tracer    *obs.Tracer         // nil unless tracing is on
 }
 
 func (h *healthReporter) extra(context.Context) map[string]any {
@@ -445,30 +728,78 @@ func (h *healthReporter) extra(context.Context) map[string]any {
 		}
 	}
 
-	catInfo := map[string]any{"models": 0}
-	if h.cat != nil {
-		n, age, loaded := h.cat.Snapshot()
-		catInfo["models"] = n
-		if loaded {
-			catInfo["age_s"] = roundSeconds(age.Seconds())
-		}
-	}
-
 	out := map[string]any{
 		"codex_auth":    codex,
-		"codex_catalog": catInfo,
+		"codex_catalog": h.catalogHealth(),
 	}
 	if h.obs != nil {
 		out["codex_stream"] = h.obs.unknownEvents()
-		if q := h.obs.quota(); q != nil {
-			out["codex_quota"] = q
-		}
+		// Always present, carrying reported:false until the backend has said
+		// anything. An ABSENT quota block reads as "no quota problem", and the
+		// whole point of reporting burn-down is to see it before it is one.
+		out["codex_quota"] = h.obs.quotaHealth()
 	}
+	if h.transport != nil {
+		// Which TLS stack is in force. Under the auto transport this can change
+		// mid-process, so it is read live rather than captured at startup.
+		out["transport"] = map[string]any{"kind": h.transport.Kind()}
+	}
+	// Tracing state is reported because a directory of prompts accumulating on
+	// disk should never be a surprise. The path is not a secret; the contents
+	// are, which is what the startup warning is about.
+	trace := map[string]any{"enabled": h.tracer.Enabled()}
+	if dir := h.tracer.Dir(); dir != "" {
+		trace["dir"] = dir
+	}
+	out["trace"] = trace
 	// The alias families the router currently routes. It is the quickest way to
 	// see whether the live catalog has been loaded or the static seed is still
 	// in force.
 	out["codex_routing"] = map[string]any{"families": router.DefaultRegistry.Families()}
 	return out
+}
+
+// catalogHealth renders codex_catalog: how many models are held, how old the
+// snapshot is, and — the part that was missing — WHY it looks like that.
+//
+// The snapshot wins when it holds something, because a held catalog is a fact
+// and a recorded attempt is only a memory of one. When it holds nothing, the
+// recorded state is the whole answer: "empty" (the backend really listed
+// nothing), "failed" (with last_error), "unavailable" (no credential to try
+// with), "warming" (the startup fetch is in flight), or "cold" (nothing has
+// tried yet).
+func (h *healthReporter) catalogHealth() map[string]any {
+	info := map[string]any{"models": 0, "loaded": false}
+
+	var (
+		n      int
+		age    time.Duration
+		loaded bool
+	)
+	if h.cat != nil {
+		n, age, loaded = h.cat.Snapshot()
+		info["models"] = n
+		info["loaded"] = loaded
+		if loaded {
+			info["age_s"] = roundSeconds(age.Seconds())
+		}
+	}
+
+	state, lastErr, sinceAttempt := h.catState.read()
+	switch {
+	case loaded && n > 0:
+		state = catalogLoaded
+	case loaded && n == 0:
+		state = catalogEmpty
+	}
+	info["state"] = state
+	if lastErr != "" {
+		info["last_error"] = lastErr
+	}
+	if sinceAttempt >= 0 {
+		info["last_attempt_age_s"] = roundSeconds(sinceAttempt.Seconds())
+	}
+	return info
 }
 
 // roundSeconds keeps a duration-in-seconds to millisecond precision so the
@@ -535,6 +866,20 @@ func (d *dispatcher) dispatch(w http.ResponseWriter, r *http.Request, call legCa
 		return
 	}
 
+	// The routing decision is the half of the request line only the dispatcher
+	// knows. It goes onto the shared summary rather than a log line of its own,
+	// so one request stays one record; the DEBUG line below carries the extra
+	// detail (where the effort came from) that only matters when something has
+	// already surprised you.
+	sum := obs.SummaryFrom(ctx)
+	sum.SetRoute(dec.Backend.String())
+	sum.SetModels(dec.ClientModel, dec.UpstreamModel)
+	sum.SetEffort(dec.Effort)
+	sum.SetStream(p.Stream)
+	// The dispatcher read the body, so it knows its real size — better than the
+	// declared Content-Length the middleware had to settle for.
+	sum.SetReqBytes(int64(len(raw)))
+
 	log.LogAttrs(ctx, slog.LevelDebug, "routed",
 		slog.String("backend", dec.Backend.String()),
 		slog.String("client_model", dec.ClientModel),
@@ -572,6 +917,14 @@ func (d *dispatcher) dispatch(w http.ResponseWriter, r *http.Request, call legCa
 func (d *dispatcher) fail(w http.ResponseWriter, r *http.Request, err error) {
 	ctx := r.Context()
 	log := obs.LoggerFrom(ctx)
+	sum := obs.SummaryFrom(ctx)
+	if errors.Is(err, router.ErrClientGone) {
+		// The caller hung up. Not a failure of ours, and it must not be counted
+		// as one on the request line.
+		sum.SetInterrupted(true)
+	} else {
+		sum.SetErr(err)
+	}
 	if errors.Is(err, router.ErrResponseStarted) || errors.Is(err, router.ErrClientGone) {
 		log.LogAttrs(context.WithoutCancel(ctx), slog.LevelWarn,
 			"leg failed after the response started", slog.String("err", err.Error()))

@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/hughescr/utraque/internal/apierr"
+	"github.com/hughescr/utraque/internal/obs"
 	"github.com/hughescr/utraque/internal/router"
 	"github.com/hughescr/utraque/internal/transport"
 )
@@ -285,6 +286,12 @@ func (l *Leg) forward(w http.ResponseWriter, r *http.Request, rq *router.Request
 		return l.upstreamError(err, idle.fired())
 	}
 	defer resp.Body.Close()
+
+	// A byte-faithful passthrough answers with the upstream's own status, so
+	// upstream_status and status will normally agree here. Recording it anyway
+	// keeps the field's meaning the same on both legs, where "absent" reliably
+	// means "never reached an upstream".
+	obs.SummaryFrom(r.Context()).SetUpstreamStatus(resp.StatusCode)
 
 	copyResponseHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)

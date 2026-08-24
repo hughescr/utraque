@@ -109,12 +109,18 @@ func TestRedactorHidesSecrets(t *testing.T) {
 			t.Fatalf("redactor leaked %q: %s", leak, out)
 		}
 	}
-	for _, keep := range []string{"application/json", "claude-cli/2.1.0", "oauth-2025-04-20", "context-1m-2025-08-07", `"js"`} {
+	for _, keep := range []string{"application/json", "claude-cli/2.1.0", "oauth-2025-04-20", "context-1m-2025-08-07"} {
 		if !strings.Contains(out, keep) {
 			t.Errorf("redactor dropped the allowlisted value %q: %s", keep, out)
 		}
 	}
-	for _, named := range []string{"authorization", "x-api-key", "cookie", "x-utraque-token"} {
+	// Not on the four-name allowlist, so its VALUE must not appear even though
+	// it is harmless. An allowlist that grows to cover harmless things is how
+	// it stops being an allowlist.
+	if strings.Contains(out, `"js"`) {
+		t.Errorf("a non-allowlisted header value was logged: %s", out)
+	}
+	for _, named := range []string{"authorization", "x-api-key", "cookie", "x-utraque-token", "x-stainless-lang"} {
 		if !strings.Contains(out, named) {
 			t.Errorf("withheld header %q should still be named: %s", named, out)
 		}
@@ -123,12 +129,18 @@ func TestRedactorHidesSecrets(t *testing.T) {
 
 func TestRedactorAllowed(t *testing.T) {
 	r := obs.DefaultRedactor()
-	for _, ok := range []string{"content-type", "Content-Type", " anthropic-beta ", "x-stainless-anything"} {
+	for _, ok := range []string{"content-type", "Content-Type", " anthropic-beta ", "anthropic-version", "user-agent"} {
 		if !r.Allowed(ok) {
 			t.Errorf("Allowed(%q) = false", ok)
 		}
 	}
-	for _, no := range []string{"authorization", "x-api-key", "cookie", "x-utraque-token", "x-secret"} {
+	// The allowlist is exactly four names: no prefixes, no families, no
+	// "obviously harmless" extras.
+	for _, no := range []string{
+		"authorization", "x-api-key", "cookie", "x-utraque-token", "x-secret",
+		"x-stainless-anything", "accept", "accept-encoding", "content-length",
+		"x-request-id", "chatgpt-account-id",
+	} {
 		if r.Allowed(no) {
 			t.Errorf("Allowed(%q) = true", no)
 		}

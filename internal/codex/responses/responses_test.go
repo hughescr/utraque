@@ -578,7 +578,7 @@ func TestStreamDetectsCloudflareGate(t *testing.T) {
 				if ue.Retryable() {
 					t.Error("a gate must not be marked retryable")
 				}
-				for _, want := range []string{"bot/TLS challenge", "uTLS", "phase 8"} {
+				for _, want := range []string{"bot/TLS challenge", "uTLS", "UTRAQUE_CODEX_TRANSPORT"} {
 					if !strings.Contains(msg, want) {
 						t.Errorf("gate message %q lacks %q", msg, want)
 					}

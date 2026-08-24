@@ -49,6 +49,7 @@ import (
 
 	"github.com/hughescr/utraque/internal/anthropic"
 	"github.com/hughescr/utraque/internal/codex/schema"
+	"github.com/hughescr/utraque/internal/obs"
 	"github.com/hughescr/utraque/internal/router"
 )
 
@@ -73,6 +74,10 @@ type Response struct {
 // emptyBody is what we serve when even encoding fails. It is a literal so that
 // the last-resort path cannot itself fail.
 const emptyBody = `{"data":[],"has_more":false}` + "\n"
+
+// RouteName is what a model-picker request is called on the request line,
+// alongside the "anthropic" and "codex" inference legs.
+const RouteName = "discovery"
 
 // Handler serves the merged catalog. It is safe for concurrent use.
 type Handler struct {
@@ -119,6 +124,17 @@ func New(opts Options) (*Handler, error) {
 	return h, nil
 }
 
+// logger prefers the request-scoped logger, which carries the request id, and
+// falls back to the handler's own. Without this a picker open that quietly
+// served no GPT rows logged a warning that could not be tied to the request
+// that provoked it.
+func (h *Handler) logger(ctx context.Context) *slog.Logger {
+	if l := obs.LoggerFrom(ctx); l != nil && l != slog.Default() {
+		return l
+	}
+	return h.log
+}
+
 // ServeHTTP answers GET (and HEAD) /v1/models. It always writes HTTP 200 with a
 // well-formed JSON body and never sets a Location header: the client treats any
 // redirect as a hard failure, and an error body is worth less to it than an
@@ -136,6 +152,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Discovery is not an inference leg, but it is a route, and naming it keeps
+	// a picker open distinguishable from a request that failed to route at all.
+	obs.SummaryFrom(r.Context()).SetRoute(RouteName)
+
 	resp := h.Models(r.Context(), anthropic.CredentialFromRequest(r))
 	resp = applyLimit(resp, parseLimit(r.URL.Query().Get("limit")))
 
@@ -143,7 +163,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		// Unreachable with these types, but the contract is "always well-formed
 		// JSON", and a contract with an exception is not a contract.
-		h.log.WarnContext(r.Context(), "discovery: encoding the catalog failed; serving an empty list",
+		h.logger(r.Context()).WarnContext(r.Context(), "discovery: encoding the catalog failed; serving an empty list",
 			slog.String("err", err.Error()))
 		body = []byte(strings.TrimSuffix(emptyBody, "\n"))
 	}
@@ -262,9 +282,9 @@ func (h *Handler) anthropicModels(ctx context.Context, cred anthropic.Credential
 		switch {
 		case errors.Is(err, anthropic.ErrNoCredential):
 			// The ordinary case for a subscription session. Debug, not warn.
-			h.log.DebugContext(ctx, "discovery: no client credential for the anthropic catalog; using the static list")
+			h.logger(ctx).DebugContext(ctx, "discovery: no client credential for the anthropic catalog; using the static list")
 		default:
-			h.log.WarnContext(ctx, "discovery: anthropic catalog read failed; using the static list",
+			h.logger(ctx).WarnContext(ctx, "discovery: anthropic catalog read failed; using the static list",
 				slog.String("err", err.Error()))
 		}
 		if h.mode == CatalogModeUpstream {
@@ -304,7 +324,7 @@ func (h *Handler) codexModels(ctx context.Context) []schema.Model {
 	}
 	models, err := h.codex.Models(ctx)
 	if err != nil {
-		h.log.WarnContext(ctx, "discovery: codex catalog read failed; offering no GPT rows",
+		h.logger(ctx).WarnContext(ctx, "discovery: codex catalog read failed; offering no GPT rows",
 			slog.String("err", err.Error()))
 		return nil
 	}

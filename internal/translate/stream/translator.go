@@ -77,12 +77,23 @@ type Options struct {
 }
 
 // Result summarises a Run: whether anything was emitted, whether a terminus was
-// reached, whether that terminus was an error frame, and the unknown-event
-// counts (keyed by type) for /healthz.
+// reached, whether that terminus was an error frame, how the answer ended, and
+// the unknown-event counts (keyed by type) for /healthz.
+//
+// StopReason and OutputTokens are reported for the SAME reason the two sinks
+// share one state machine: the caller's request log must say how the answer
+// ended without re-deriving it from the sink, which only the non-streaming
+// Aggregator could answer at all.
 type Result struct {
-	Started       bool
-	Terminated    bool
-	Errored       bool
+	Started    bool
+	Terminated bool
+	Errored    bool
+	// StopReason is the Anthropic stop_reason emitted on a clean terminus, and
+	// empty when the stream never reached one.
+	StopReason string
+	// OutputTokens is the completion token count reported on that terminus.
+	OutputTokens int
+
 	UnknownEvents map[string]int
 }
 
@@ -135,6 +146,8 @@ type Translator struct {
 	incompleteMaxTokens bool
 	usage               schema.Usage
 	unknown             map[string]int
+	finalStop           string
+	finalOutputTokens   int
 }
 
 // New builds a Translator from opts, filling defaults.
@@ -188,10 +201,19 @@ func (t *Translator) reset() {
 	t.incompleteMaxTokens = false
 	t.usage = schema.Usage{}
 	t.unknown = make(map[string]int)
+	t.finalStop = ""
+	t.finalOutputTokens = 0
 }
 
 func (t *Translator) result() Result {
-	return Result{Started: t.started, Terminated: t.terminated, Errored: t.errored, UnknownEvents: t.unknown}
+	return Result{
+		Started:       t.started,
+		Terminated:    t.terminated,
+		Errored:       t.errored,
+		StopReason:    t.finalStop,
+		OutputTokens:  t.finalOutputTokens,
+		UnknownEvents: t.unknown,
+	}
 }
 
 // Run drives the translation of r into sink until a terminus, an error, or ctx
@@ -598,9 +620,13 @@ func (t *Translator) finalizeClean(sink Sink) error {
 	if err := t.finalizeAllBlocks(sink); err != nil {
 		return err
 	}
-	if err := sink.MessageDelta(MessageDelta{StopReason: t.stopReason(), Usage: t.terminalUsage()}); err != nil {
+	stop, usage := t.stopReason(), t.terminalUsage()
+	if err := sink.MessageDelta(MessageDelta{StopReason: stop, Usage: usage}); err != nil {
 		return err
 	}
+	// Recorded from the same values the sink saw, so the request log cannot
+	// disagree with what the client was told.
+	t.finalStop, t.finalOutputTokens = stop, usage.OutputTokens
 	if err := sink.MessageStop(); err != nil {
 		return err
 	}

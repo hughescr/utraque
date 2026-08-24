@@ -32,8 +32,21 @@ const (
 	// period and leave the next request with a connection refused. Set
 	// UTRAQUE_IDLE_TIMEOUT explicitly to opt in.
 	DefaultIdleTimeout = time.Duration(0)
-	DefaultLogLevel    = "info"
-	DefaultLogFormat   = "json"
+
+	// DefaultLaunchdIdleTimeout is what the idle timeout becomes when launchd
+	// handed us the listening socket and nothing set UTRAQUE_IDLE_TIMEOUT.
+	// Under socket activation self-exit is free — launchd keeps the socket and
+	// re-launches on the next connection — so an hour of quiet is a good
+	// default there while remaining off for a manual start.
+	DefaultLaunchdIdleTimeout = time.Hour
+
+	// DefaultLaunchdSocketName is the key the plist's Sockets dictionary uses.
+	// launchd addresses inherited sockets by that key, so the plist and the
+	// binary have to agree on it.
+	DefaultLaunchdSocketName = "Listener"
+
+	DefaultLogLevel  = "info"
+	DefaultLogFormat = "json"
 
 	// Codex auth-leg defaults. The auth file is resolved from the environment
 	// (see resolveCodexAuthFile) rather than being a fixed string, so it has no
@@ -49,6 +62,28 @@ const (
 	DefaultCodexClientID    = "app_EMoamEEZ73f0CkXaXp7hrann"
 	DefaultCodexRefreshSkew = 120 * time.Second
 	DefaultCodexLockTimeout = 10 * time.Second
+
+	// Transport* are the accepted values of UTRAQUE_CODEX_TRANSPORT: which TLS
+	// stack the Codex leg dials chatgpt.com with. They mirror the transport
+	// package's Mode* constants, which config deliberately does not import —
+	// this enum is validated here the same way log.level and log.format are.
+	//
+	// TransportStd is the standard library, the stack the whole proxy was built
+	// and live-verified against. TransportUTLS presents a Chrome-shaped TLS
+	// ClientHello instead, for the day Cloudflare fingerprint-gates a plain Go
+	// client. Only the handshake differs — no forged browser headers — and a
+	// hand-rolled TLS stack is a strictly larger attack surface, so it is never
+	// the default.
+	TransportStd  = "std"
+	TransportUTLS = "utls"
+	// TransportAuto starts on std and switches to uTLS, once and permanently,
+	// the first time the upstream answers with a bot/TLS gate.
+	TransportAuto = "auto"
+
+	// DefaultCodexTransport is auto: no cost while no gate exists, no outage if
+	// one appears. It is deliberately not utls — as of the live end-to-end
+	// verification no gate has ever been observed on chatgpt.com.
+	DefaultCodexTransport = TransportAuto
 
 	// CodexDirName / CodexAuthFileName build the default {~/.codex}/auth.json
 	// path. CODEX_HOME (the Codex CLI's own variable, unprefixed) overrides the
@@ -74,6 +109,7 @@ const (
 	EnvUpstreamIdleTimeout = EnvPrefix + "UPSTREAM_IDLE_TIMEOUT"
 	EnvAnthropicBaseURL    = EnvPrefix + "ANTHROPIC_BASE_URL"
 	EnvIdleTimeout         = EnvPrefix + "IDLE_TIMEOUT"
+	EnvLaunchdSocketName   = EnvPrefix + "LAUNCHD_SOCKET"
 	EnvLogLevel            = EnvPrefix + "LOG_LEVEL"
 	EnvLogFormat           = EnvPrefix + "LOG_FORMAT"
 
@@ -83,6 +119,7 @@ const (
 	EnvCodexTokenURL    = EnvPrefix + "CODEX_TOKEN_URL"
 	EnvCodexRefreshSkew = EnvPrefix + "CODEX_REFRESH_SKEW"
 	EnvCodexLockTimeout = EnvPrefix + "CODEX_LOCK_TIMEOUT"
+	EnvCodexTransport   = EnvPrefix + "CODEX_TRANSPORT"
 
 	// EnvRoutingAliasOverrides pins how irregular Codex slugs decompose into
 	// aliases. See Routing.AliasOverrides for the format.
@@ -108,6 +145,18 @@ type Anthropic struct {
 // Idle configures launchd-friendly self-exit. A Timeout of 0 disables it.
 type Idle struct {
 	Timeout time.Duration // UTRAQUE_IDLE_TIMEOUT
+
+	// Explicit records that UTRAQUE_IDLE_TIMEOUT was actually set. It is what
+	// lets socket activation supply DefaultLaunchdIdleTimeout without
+	// overriding an operator who deliberately asked for 0 (never exit).
+	Explicit bool
+}
+
+// Launchd configures macOS socket activation.
+type Launchd struct {
+	// SocketName is the plist Sockets key whose descriptors we adopt.
+	// UTRAQUE_LAUNCHD_SOCKET. Irrelevant when not started by launchd.
+	SocketName string
 }
 
 // Codex configures the Codex (OpenAI) auth leg: where the credential file
@@ -139,6 +188,10 @@ type Codex struct {
 	// LockTimeout bounds how long a refresh waits for the cross-process
 	// advisory file lock before giving up.
 	LockTimeout time.Duration
+	// Transport selects the TLS stack the leg dials the Codex backend with:
+	// TransportAuto (default), TransportStd, or TransportUTLS.
+	// UTRAQUE_CODEX_TRANSPORT.
+	Transport string
 }
 
 // AliasOverride pins how one Codex slug decomposes into router aliases, for a
@@ -198,6 +251,7 @@ type Config struct {
 	Codex      Codex
 	Routing    Routing
 	Idle       Idle
+	Launchd    Launchd
 	Log        Log
 }
 
@@ -223,9 +277,11 @@ func Default() Config {
 			ClientID:    DefaultCodexClientID,
 			RefreshSkew: DefaultCodexRefreshSkew,
 			LockTimeout: DefaultCodexLockTimeout,
+			Transport:   DefaultCodexTransport,
 		},
-		Idle: Idle{Timeout: DefaultIdleTimeout},
-		Log:  Log{Level: DefaultLogLevel, Format: DefaultLogFormat},
+		Idle:    Idle{Timeout: DefaultIdleTimeout},
+		Launchd: Launchd{SocketName: DefaultLaunchdSocketName},
+		Log:     Log{Level: DefaultLogLevel, Format: DefaultLogFormat},
 	}
 }
 
@@ -251,6 +307,8 @@ func LoadFrom(getenv func(string) string) (Config, error) {
 	setString(EnvAnthropicBaseURL, &c.Anthropic.BaseURL)
 	setString(EnvCodexBaseURL, &c.Codex.BaseURL)
 	setString(EnvCodexTokenURL, &c.Codex.TokenURL)
+	setString(EnvCodexTransport, &c.Codex.Transport)
+	setString(EnvLaunchdSocketName, &c.Launchd.SocketName)
 	setString(EnvLogLevel, &c.Log.Level)
 	setString(EnvLogFormat, &c.Log.Format)
 
@@ -288,8 +346,14 @@ func LoadFrom(getenv func(string) string) (Config, error) {
 	if err := setDuration(EnvUpstreamIdleTimeout, &c.Limits.UpstreamIdleTimeout); err != nil {
 		return Config{}, err
 	}
+	// The idle timeout tracks whether it was set as well as what it is: an
+	// explicit 0 means "never self-exit" and must survive socket activation
+	// substituting DefaultLaunchdIdleTimeout for an unset value.
 	if err := setDuration(EnvIdleTimeout, &c.Idle.Timeout); err != nil {
 		return Config{}, err
+	}
+	if _, ok := lookup(getenv, EnvIdleTimeout); ok {
+		c.Idle.Explicit = true
 	}
 	if err := setDuration(EnvCodexRefreshSkew, &c.Codex.RefreshSkew); err != nil {
 		return Config{}, err
@@ -300,7 +364,9 @@ func LoadFrom(getenv func(string) string) (Config, error) {
 
 	c.Codex.BaseURL = strings.TrimRight(strings.TrimSpace(c.Codex.BaseURL), "/")
 	c.Codex.TokenURL = strings.TrimRight(strings.TrimSpace(c.Codex.TokenURL), "/")
+	c.Codex.Transport = strings.ToLower(strings.TrimSpace(c.Codex.Transport))
 	c.Listen = strings.TrimSpace(c.Listen)
+	c.Launchd.SocketName = strings.TrimSpace(c.Launchd.SocketName)
 	c.Log.Level = strings.ToLower(strings.TrimSpace(c.Log.Level))
 	c.Log.Format = strings.ToLower(strings.TrimSpace(c.Log.Format))
 	c.Anthropic.BaseURL = strings.TrimRight(strings.TrimSpace(c.Anthropic.BaseURL), "/")
@@ -438,6 +504,9 @@ func (c Config) Validate() error {
 	if c.Idle.Timeout < 0 {
 		return fmt.Errorf("config: %s must not be negative, got %s", EnvIdleTimeout, c.Idle.Timeout)
 	}
+	if c.Launchd.SocketName == "" {
+		return fmt.Errorf("config: %s must not be empty", EnvLaunchdSocketName)
+	}
 
 	if c.Anthropic.BaseURL == "" {
 		return fmt.Errorf("config: %s must not be empty", EnvAnthropicBaseURL)
@@ -489,6 +558,15 @@ func (c Config) Validate() error {
 	}
 	if err := validateEndpoint(EnvCodexTokenURL, c.Codex.TokenURL); err != nil {
 		return err
+	}
+	// A typo here must not silently fall back to a transport the operator did
+	// not ask for: "utsl" quietly meaning "std" would look identical to a
+	// working uTLS switch right up until the gate it was set for.
+	switch c.Codex.Transport {
+	case TransportAuto, TransportStd, TransportUTLS:
+	default:
+		return fmt.Errorf("config: %s %q: want %s|%s|%s",
+			EnvCodexTransport, c.Codex.Transport, TransportAuto, TransportStd, TransportUTLS)
 	}
 
 	switch c.Log.Level {
@@ -573,8 +651,10 @@ func (c Config) String() string {
 	fmt.Fprintf(&b, " codex.client_id=%s", c.Codex.ClientID)
 	fmt.Fprintf(&b, " codex.refresh_skew=%s", c.Codex.RefreshSkew)
 	fmt.Fprintf(&b, " codex.lock_timeout=%s", c.Codex.LockTimeout)
+	fmt.Fprintf(&b, " codex.transport=%s", c.Codex.Transport)
 	fmt.Fprintf(&b, " routing.alias_overrides=[%s]", joinOverrides(c.Routing.AliasOverrides))
 	fmt.Fprintf(&b, " idle_timeout=%s", c.Idle.Timeout)
+	fmt.Fprintf(&b, " launchd.socket=%s", c.Launchd.SocketName)
 	fmt.Fprintf(&b, " log.level=%s", c.Log.Level)
 	fmt.Fprintf(&b, " log.format=%s", c.Log.Format)
 	b.WriteString("}")
@@ -596,8 +676,10 @@ func (c Config) LogValue() slog.Value {
 		slog.String("codex.client_id", c.Codex.ClientID),
 		slog.Duration("codex.refresh_skew", c.Codex.RefreshSkew),
 		slog.Duration("codex.lock_timeout", c.Codex.LockTimeout),
+		slog.String("codex.transport", c.Codex.Transport),
 		slog.String("routing.alias_overrides", joinOverrides(c.Routing.AliasOverrides)),
 		slog.Duration("idle_timeout", c.Idle.Timeout),
+		slog.String("launchd.socket", c.Launchd.SocketName),
 		slog.String("log.level", c.Log.Level),
 		slog.String("log.format", c.Log.Format),
 	)

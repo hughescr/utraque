@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -19,6 +20,7 @@ import (
 	"github.com/hughescr/utraque/internal/apierr"
 	"github.com/hughescr/utraque/internal/codex/leg"
 	"github.com/hughescr/utraque/internal/config"
+	"github.com/hughescr/utraque/internal/obs"
 	"github.com/hughescr/utraque/internal/router"
 	"github.com/hughescr/utraque/internal/sse"
 )
@@ -96,6 +98,10 @@ type fakeCodex struct {
 	// fakeCatalogBody. Set it before the first catalog read.
 	catalogBody string
 
+	// catalogFail, when non-zero, makes the catalog endpoint answer with that
+	// status instead of a model list.
+	catalogFail int
+
 	// respond serves one /responses call. n is the 1-based attempt number, so a
 	// test can fail the first attempt and succeed on the retry.
 	respond func(t *testing.T, w http.ResponseWriter, r *http.Request, n int64)
@@ -107,6 +113,11 @@ func newFakeCodex(t *testing.T) *fakeCodex {
 	mux := http.NewServeMux()
 	mux.HandleFunc(codexBasePath+"/models", func(w http.ResponseWriter, r *http.Request) {
 		f.catalog.Add(1)
+		if f.catalogFail != 0 {
+			w.WriteHeader(f.catalogFail)
+			_, _ = io.WriteString(w, `{"error":{"message":"catalog unavailable"}}`)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		body := f.catalogBody
 		if body == "" {
@@ -190,8 +201,15 @@ func writeSSE(w http.ResponseWriter, body string) {
 // OAuth token endpoint, a throwaway auth.json, and the front door built over
 // them by main's own newServer.
 type codexEnv struct {
-	front     *httptest.Server
-	codex     *fakeCodex
+	front *httptest.Server
+	codex *fakeCodex
+	// app is the assembled process behind front. Tests reach for it only when
+	// they need the background work — the startup catalog warm — that an
+	// ordinary handler test must never trigger.
+	app *app
+	// logs holds everything the proxy logged, for the tests that assert on what
+	// did (and did not) reach the log.
+	logs      *syncBuffer
 	authPath  string
 	refreshes atomic.Int64
 	// anthropicHits counts any request that reached the Anthropic upstream. A
@@ -200,9 +218,48 @@ type codexEnv struct {
 	anthropicHits atomic.Int64
 }
 
+// syncBuffer is a bytes.Buffer a test can read while the server is still
+// writing to it. A plain buffer races: the log is written on the request
+// goroutine and read on the test's, which is exactly the pattern -race exists
+// to catch.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// codexEnvOptions tunes the environment beyond the config.
+type codexEnvOptions struct {
+	// Level is the log level captured into env.logs. Zero means "capture
+	// nothing", which is what almost every test wants.
+	Level slog.Level
+	// CaptureLogs turns on log capture through the production obs handler —
+	// including its scrubbing wrapper, which is the point.
+	CaptureLogs bool
+	// TraceDir, when set, turns on per-request trace dumps.
+	TraceDir string
+}
+
 // newCodexEnv stands up the whole thing. mutate, when non-nil, adjusts the
 // config just before the server is built.
 func newCodexEnv(t *testing.T, mutate func(*config.Config)) *codexEnv {
+	t.Helper()
+	return newCodexEnvOpts(t, mutate, codexEnvOptions{})
+}
+
+// newCodexEnvOpts is newCodexEnv with the observability knobs exposed.
+func newCodexEnvOpts(t *testing.T, mutate func(*config.Config), opts codexEnvOptions) *codexEnv {
 	t.Helper()
 	env := &codexEnv{codex: newFakeCodex(t)}
 
@@ -239,20 +296,52 @@ func newCodexEnv(t *testing.T, mutate func(*config.Config)) *codexEnv {
 		mutate(&cfg)
 	}
 
-	srv, err := newServer(cfg, slog.New(slog.DiscardHandler), nil)
-	if err != nil {
-		t.Fatalf("newServer: %v", err)
+	log := slog.New(slog.DiscardHandler)
+	if opts.CaptureLogs {
+		// The production handler, scrubbing wrapper included — an assertion
+		// against a hand-rolled handler would prove nothing about what the
+		// daemon actually writes.
+		env.logs = &syncBuffer{}
+		var err error
+		log, err = obs.NewLogger(env.logs, opts.Level, "json")
+		if err != nil {
+			t.Fatalf("obs.NewLogger: %v", err)
+		}
 	}
-	env.front = httptest.NewServer(srv)
+
+	var tracer *obs.Tracer
+	if opts.TraceDir != "" {
+		var err error
+		tracer, err = obs.NewTracer(opts.TraceDir, log)
+		if err != nil {
+			t.Fatalf("obs.NewTracer: %v", err)
+		}
+	}
+
+	// newApp, not newServer: the app carries the startup catalog warm, which no
+	// test runs unless it asks for it by name.
+	a, err := newApp(cfg, log, nil, tracer)
+	if err != nil {
+		t.Fatalf("newApp: %v", err)
+	}
+	env.app = a
+	env.front = httptest.NewServer(a.srv)
 	t.Cleanup(env.front.Close)
 	return env
 }
 
 func writeAuthJSON(t *testing.T, path, accessToken, refreshToken string) {
 	t.Helper()
+	writeAuthJSONWithAccount(t, path, accessToken, refreshToken, "acct-fake")
+}
+
+// writeAuthJSONWithAccount is writeAuthJSON with the account id chosen, for the
+// tests that assert it never reaches a log in the clear.
+func writeAuthJSONWithAccount(t *testing.T, path, accessToken, refreshToken, accountID string) {
+	t.Helper()
 	body := fmt.Sprintf(
-		`{"tokens":{"account_id":"acct-fake","access_token":%q,"refresh_token":%q},"codex_cli_only":"preserve me"}`,
-		accessToken, refreshToken)
+		`{"tokens":{"account_id":%q,"access_token":%q,"refresh_token":%q},"codex_cli_only":"preserve me"}`,
+		accountID, accessToken, refreshToken)
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatalf("write auth.json: %v", err)
 	}

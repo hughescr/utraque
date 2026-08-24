@@ -69,6 +69,20 @@ type Options struct {
 	// Default obs.DefaultRedactor().
 	Redactor *obs.Redactor
 
+	// TransportKind reports which HTTP transport the upstream legs are using
+	// ("std" or "utls"). It appears on every request line, because "which TLS
+	// stack answered" is the first question once the Cloudflare fallback is in
+	// play and a useful constant when it is not.
+	//
+	// It is a func rather than a string because the auto transport can switch
+	// stacks mid-process: a kind captured at construction would keep claiming
+	// "std" long after every request had moved to uTLS.
+	TransportKind func() string
+
+	// Tracer, when enabled, dumps a per-request trace. Nil — the default, and
+	// the default in production — writes nothing.
+	Tracer *obs.Tracer
+
 	// Activity, when set, is held for the duration of every non-exempt
 	// request so the idle timer never fires mid-stream.
 	Activity ActivityTracker
@@ -95,6 +109,8 @@ type Server struct {
 	version        string
 	now            func() time.Time
 	red            *obs.Redactor
+	transportKind  func() string
+	tracer         *obs.Tracer
 	activity       ActivityTracker
 	activityExempt func(*http.Request) bool
 	authExempt     func(*http.Request) bool
@@ -124,6 +140,8 @@ func New(opts Options) (*Server, error) {
 		version:        opts.Version,
 		now:            opts.Now,
 		red:            opts.Redactor,
+		transportKind:  opts.TransportKind,
+		tracer:         opts.Tracer,
 		activity:       opts.Activity,
 		activityExempt: opts.ActivityExempt,
 		authExempt:     opts.AuthExempt,

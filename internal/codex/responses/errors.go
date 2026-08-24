@@ -35,7 +35,7 @@ const (
 	ClassTerminal Class = "terminal"
 	// ClassGate is a bot/TLS challenge (Cloudflare) rather than an API answer.
 	// Retrying with the same TLS fingerprint cannot help; the fix is the uTLS
-	// transport (phase 8).
+	// transport, which codex.transport=auto switches to on this class.
 	ClassGate Class = "gate"
 	// ClassNetwork is a transport-level failure with no HTTP response at all.
 	ClassNetwork Class = "network"
@@ -283,12 +283,16 @@ func gateMessage(status int) string {
 	return fmt.Sprintf("codex upstream answered with a bot/TLS challenge instead of the API (HTTP %d, Cloudflare): "+
 		"the request never reached the Codex backend, so retrying it unchanged cannot help. "+
 		"The account itself is probably fine — confirm with the Codex CLI. "+
-		"The fix is to present a browser TLS fingerprint via the uTLS transport (not implemented yet; planned for phase 8)", status)
+		"The fix is to present a browser TLS fingerprint via the uTLS transport; "+
+		"in the default codex.transport=auto mode this failure has already switched the process onto it, so the next request uses it "+
+		"(force it from the start with UTRAQUE_CODEX_TRANSPORT=utls)", status)
 }
 
 func tlsGateMessage(err error) string {
 	return fmt.Sprintf("codex upstream refused the TLS connection, which is how a fingerprint-based bot gate looks from the client side: %s. "+
-		"Retrying unchanged cannot help; the fix is the uTLS (browser-fingerprint) transport, planned for phase 8", oneLine(err.Error(), maxErrorMessage))
+		"Retrying unchanged cannot help; the fix is the uTLS (browser-fingerprint) transport, "+
+		"which codex.transport=auto has already switched to for the rest of this process "+
+		"(force it from the start with UTRAQUE_CODEX_TRANSPORT=utls)", oneLine(err.Error(), maxErrorMessage))
 }
 
 // tlsGateMarkers are handshake failures that indicate the peer refused us

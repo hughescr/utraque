@@ -53,6 +53,7 @@ import (
 	"github.com/hughescr/utraque/internal/codex/auth"
 	"github.com/hughescr/utraque/internal/codex/responses"
 	cschema "github.com/hughescr/utraque/internal/codex/schema"
+	"github.com/hughescr/utraque/internal/obs"
 	"github.com/hughescr/utraque/internal/router"
 	"github.com/hughescr/utraque/internal/tokens"
 	"github.com/hughescr/utraque/internal/translate/request"
@@ -229,6 +230,15 @@ func (l *Leg) Messages(w http.ResponseWriter, r *http.Request, rq *router.Reques
 
 	inputTokens := l.est.EstimatePrompt(tokens.PromptFromMessages(&req))
 
+	// The resolved effort belongs on the request line: "why did this answer
+	// take so long" is usually answered by the effort, not the model.
+	obs.SummaryFrom(ctx).SetEffort(meta.Effort.Applied)
+
+	// The request body as it was received. This is prompt text, which is why
+	// tracing is behind its own env var and prints a warning at startup.
+	trace := obs.TraceFrom(ctx)
+	trace.SetBody(rq.Raw)
+
 	// StreamWithRefresh owns the one sanctioned retry: on an upstream 401 it
 	// invalidates the credential, refreshes, and retries exactly once.
 	upstream, err := l.client.StreamWithRefresh(ctx, l.creds, creq)
@@ -238,6 +248,11 @@ func (l *Leg) Messages(w http.ResponseWriter, r *http.Request, rq *router.Reques
 		return l.renderUpstreamFailure(ctx, w, log, err)
 	}
 	defer func() { _ = upstream.Close() }()
+
+	// Tee the raw upstream stream to <id>.upstream.sse when tracing. A trace of
+	// the bytes we RECEIVED, alongside the bytes we SENT, is what makes a
+	// translation bug reproducible as a fixture instead of a bug report.
+	upstream = trace.TeeUpstream(upstream)
 
 	if rq.Stream {
 		return l.serveStream(ctx, w, rq, upstream, inputTokens, log)
@@ -296,8 +311,12 @@ func (l *Leg) serveStream(ctx context.Context, w http.ResponseWriter, rq *router
 		h.Set("X-Accel-Buffering", "no")
 	})
 
+	// The downstream tee sits between the translator and the client, so the
+	// trace records exactly the bytes the client received — including the
+	// heartbeat pings and the frame boundaries, which is where an SSE bug
+	// usually is.
 	tr := stream.New(l.translatorOptions(rq, inputTokens, l.heartbeat, log))
-	res, err := tr.Run(ctx, upstream, stream.NewSSEWriter(lw))
+	res, err := tr.Run(ctx, upstream, stream.NewSSEWriter(obs.TraceFrom(ctx).TeeDownstream(lw)))
 	l.logResult(ctx, log, rq, res)
 
 	if err == nil {
@@ -306,6 +325,7 @@ func (l *Leg) serveStream(ctx context.Context, w http.ResponseWriter, rq *router
 	if lw.Started() {
 		// Bytes are committed: failure mode 3 (or a write failure onto a dead
 		// connection). Report it for the log; the dispatcher must not answer.
+		markInterrupted(ctx, err)
 		return fmt.Errorf("%w: %w", router.ErrResponseStarted, err)
 	}
 	return l.renderStartFailure(ctx, w, log, err)
@@ -331,6 +351,9 @@ func (l *Leg) serveAggregate(ctx context.Context, w http.ResponseWriter, rq *rou
 		return l.renderStartFailure(ctx, w, log, err)
 	}
 	body = append(body, '\n')
+	// A non-streaming answer is a body, not a stream, so it is traced as one
+	// rather than dressed up in SSE frames it never had.
+	obs.TraceFrom(ctx).WriteDownstream(body)
 
 	h := w.Header()
 	h.Set("Content-Type", "application/json")
@@ -365,8 +388,10 @@ func (l *Leg) renderUpstreamFailure(ctx context.Context, w http.ResponseWriter, 
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		// The caller hung up while we were opening the stream. There is nobody
 		// left to render an envelope for.
+		obs.SummaryFrom(ctx).SetInterrupted(true)
 		return fmt.Errorf("%w: %w", router.ErrClientGone, ctxErr)
 	}
+	obs.SummaryFrom(ctx).SetErr(err)
 
 	ue, ok := responses.AsUpstream(err)
 	if !ok {
@@ -392,13 +417,28 @@ func (l *Leg) renderUpstreamFailure(ctx context.Context, w http.ResponseWriter, 
 // that refused to present a partial message.
 func (l *Leg) renderStartFailure(ctx context.Context, w http.ResponseWriter, log *slog.Logger, err error) error {
 	if ctxErr := ctx.Err(); ctxErr != nil {
+		obs.SummaryFrom(ctx).SetInterrupted(true)
 		return fmt.Errorf("%w: %w", router.ErrClientGone, ctxErr)
 	}
+	obs.SummaryFrom(ctx).SetErr(err)
 	ae := classifyStreamFailure(err)
 	log.LogAttrs(ctx, slog.LevelWarn, "codex leg failed before any output reached the client",
 		slog.Int("status", ae.HTTPStatus()), slog.String("err", err.Error()))
 	_ = ae.Render(w, 0)
 	return nil
+}
+
+// markInterrupted records a mid-stream failure that was the client hanging up
+// rather than the upstream failing. The distinction is the whole reason
+// "interrupted" is its own field: an abandoned request is not an error worth
+// paging over, and it must not be counted as one.
+func markInterrupted(ctx context.Context, err error) {
+	sum := obs.SummaryFrom(ctx)
+	if ctx.Err() != nil || errors.Is(err, context.Canceled) {
+		sum.SetInterrupted(true)
+		return
+	}
+	sum.SetErr(err)
 }
 
 // classifyStreamFailure maps a Translator/Aggregator failure onto the status the
@@ -476,7 +516,18 @@ func (l *Leg) logger(rq *router.Request) *slog.Logger {
 
 // logResult records the translation outcome, including the unknown-event counts
 // that are the early warning for upstream protocol drift.
+//
+// How the answer ended — the stop reason and the completion size — goes on the
+// request line rather than a second log line of its own, so one request stays
+// one record.
 func (l *Leg) logResult(ctx context.Context, log *slog.Logger, rq *router.Request, res stream.Result) {
+	if sum := obs.SummaryFrom(ctx); sum != nil {
+		sum.SetStopReason(res.StopReason)
+		if res.Terminated && !res.Errored {
+			sum.SetOutputTokens(res.OutputTokens)
+		}
+	}
+
 	attrs := []slog.Attr{
 		slog.String("upstream_model", rq.Dec.UpstreamModel),
 		slog.Bool("started", res.Started),

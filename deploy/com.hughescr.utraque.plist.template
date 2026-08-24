@@ -1,0 +1,110 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  utraque, run on demand by launchd.
+
+  This is a template. deploy/install.sh substitutes the @NAME@ placeholders and
+  writes the result to ~/Library/LaunchAgents/@LABEL@.plist. Editing the
+  installed copy directly works too; re-running install.sh overwrites it.
+
+  The shape is socket activation, not a resident daemon:
+
+    * launchd binds and owns the listening socket, from load until unload. The
+      port answers whether or not utraque is running.
+    * The first connection starts utraque, which adopts the socket launchd
+      already holds (Sockets -> @SOCKET_NAME@) instead of binding its own.
+    * After @IDLE_TIMEOUT@ with no request in flight and nothing on the wire,
+      utraque exits. launchd keeps the socket and starts it again on the next
+      connection, so the exit is invisible to the client.
+
+  There is deliberately no RunAtLoad and no KeepAlive: either one would defeat
+  the whole arrangement by keeping the process resident.
+-->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>@LABEL@</string>
+
+	<key>ProgramArguments</key>
+	<array>
+		<string>@PROGRAM@</string>
+	</array>
+
+	<!--
+	  The socket launchd binds on utraque's behalf. The key name here
+	  (@SOCKET_NAME@) is how the process asks for it, so it must match
+	  UTRAQUE_LAUNCHD_SOCKET below.
+
+	  SockNodeName "localhost" resolves to both loopback families, so launchd
+	  hands over two descriptors (127.0.0.1 and [::1]) and utraque serves both —
+	  which is why it accepts a set of listeners rather than one. Set it to
+	  127.0.0.1 with <key>SockFamily</key><string>IPv4</string> to bind IPv4
+	  only. Do not remove SockNodeName: without it launchd binds every
+	  interface, exposing both of your subscriptions to the local network.
+	-->
+	<key>Sockets</key>
+	<dict>
+		<key>@SOCKET_NAME@</key>
+		<dict>
+			<key>SockNodeName</key>
+			<string>@SOCK_NODE@</string>
+			<key>SockServiceName</key>
+			<string>@SOCK_PORT@</string>
+			<key>SockType</key>
+			<string>stream</string>
+			<key>SockProtocol</key>
+			<string>TCP</string>
+		</dict>
+	</dict>
+
+	<key>EnvironmentVariables</key>
+	<dict>
+		<!-- Must match the Sockets key above. -->
+		<key>UTRAQUE_LAUNCHD_SOCKET</key>
+		<string>@SOCKET_NAME@</string>
+
+		<!--
+		  Self-exit after this long idle. Under socket activation utraque
+		  defaults to 1h on its own; stating it here makes the policy visible
+		  where someone will look for it. "0" means never exit.
+		-->
+		<key>UTRAQUE_IDLE_TIMEOUT</key>
+		<string>@IDLE_TIMEOUT@</string>
+
+		<!--
+		  The address utraque binds itself when it is NOT socket activated —
+		  running it by hand for debugging. launchd-started runs ignore it.
+		-->
+		<key>UTRAQUE_LISTEN</key>
+		<string>@LISTEN@</string>
+
+		<key>UTRAQUE_LOG_LEVEL</key>
+		<string>@LOG_LEVEL@</string>
+		<key>UTRAQUE_LOG_FORMAT</key>
+		<string>@LOG_FORMAT@</string>
+@EXTRA_ENVIRONMENT@	</dict>
+
+	<!--
+	  Re-activation has to be quick: utraque exits when idle, and launchd's
+	  default 10s respawn throttle would stall the very next request behind it.
+	-->
+	<key>ThrottleInterval</key>
+	<integer>1</integer>
+
+	<!--
+	  Longer than utraque's 25s shutdown grace, so a SIGTERM at exactly the
+	  wrong moment cannot SIGKILL a response that is still draining.
+	-->
+	<key>ExitTimeOut</key>
+	<integer>30</integer>
+
+	<!-- A latency-sensitive local proxy, not a batch job. -->
+	<key>ProcessType</key>
+	<string>Interactive</string>
+
+	<key>StandardOutPath</key>
+	<string>@STDOUT@</string>
+	<key>StandardErrorPath</key>
+	<string>@STDERR@</string>
+</dict>
+</plist>
