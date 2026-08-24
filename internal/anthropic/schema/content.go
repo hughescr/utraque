@@ -13,6 +13,10 @@ import (
 const (
 	RoleUser      = "user"
 	RoleAssistant = "assistant"
+	// RoleSystem appears on messages inside messages[] (not the top-level
+	// system field) when the client negotiates the
+	// mid-conversation-system beta.
+	RoleSystem = "system"
 )
 
 // Content block types.

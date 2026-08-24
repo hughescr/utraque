@@ -100,6 +100,12 @@ type InputItem struct {
 }
 
 // MessageItem builds a message input item with the given role and parts.
+// RoleDeveloper is the Responses input role that carries instruction-like
+// content positioned inside the conversation. The ChatGPT Codex backend
+// rejects role "system" on input items outright ("System messages are not
+// allowed"); developer is the role it accepts for the same purpose.
+const RoleDeveloper = "developer"
+
 func MessageItem(role string, parts ...ContentPart) InputItem {
 	return InputItem{Type: ItemMessage, Role: role, Content: parts}
 }

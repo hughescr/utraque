@@ -667,3 +667,56 @@ func readFixture(t *testing.T, name string) []byte {
 	}
 	return raw
 }
+
+// TestMidConversationSystemRemapped covers the mid-conversation-system beta:
+// Claude Code places role "system" messages inside messages[], and the ChatGPT
+// Codex backend rejects that role on an input item outright ("System messages
+// are not allowed"). They must be emitted as developer items, keeping their
+// position, while the top-level system field still becomes instructions.
+func TestMidConversationSystemRemapped(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join(requestsDir, "mid_conversation_system.anthropic.json"))
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	var req aschema.MessagesRequest
+	if err := json.Unmarshal(raw, &req); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	cfg := configFor("mid_conversation_system")
+	out, meta, err := request.Translate(&req, cfg.dec, cfg.model, cfg.opts)
+	if err != nil {
+		t.Fatalf("translate: %v", err)
+	}
+
+	for i, item := range out.Input {
+		if item.Role == aschema.RoleSystem {
+			t.Errorf("input[%d] kept role %q; the backend rejects it", i, item.Role)
+		}
+	}
+
+	var gotRoles []string
+	for _, item := range out.Input {
+		gotRoles = append(gotRoles, item.Role)
+	}
+	wantRoles := []string{"user", "developer", "assistant", "developer", "user"}
+	if len(gotRoles) != len(wantRoles) {
+		t.Fatalf("roles = %v, want %v", gotRoles, wantRoles)
+	}
+	for i := range wantRoles {
+		if gotRoles[i] != wantRoles[i] {
+			t.Errorf("input[%d] role = %q, want %q", i, gotRoles[i], wantRoles[i])
+		}
+	}
+
+	if meta.SystemMessagesRemapped != 2 {
+		t.Errorf("SystemMessagesRemapped = %d, want 2", meta.SystemMessagesRemapped)
+	}
+
+	// The top-level system field must still travel as instructions, not as an
+	// input item, and must not be disturbed by the remapping above.
+	if !strings.Contains(out.Instructions, "official CLI for Claude") ||
+		!strings.Contains(out.Instructions, "Platform: darwin") {
+		t.Errorf("instructions lost top-level system content: %q", out.Instructions)
+	}
+}

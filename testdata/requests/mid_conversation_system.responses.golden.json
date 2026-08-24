@@ -1,0 +1,61 @@
+{
+  "model": "gpt-5.6-sol",
+  "instructions": "You are Claude Code, Anthropic's official CLI for Claude.\n\n# Environment\nPlatform: darwin",
+  "input": [
+    {
+      "type": "message",
+      "role": "user",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "What OS am I on?"
+        }
+      ]
+    },
+    {
+      "type": "message",
+      "role": "developer",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "\u003csystem-reminder\u003eThe user changed the working directory. Re-read any cached paths.\u003c/system-reminder\u003e"
+        }
+      ]
+    },
+    {
+      "type": "message",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "Let me check."
+        }
+      ]
+    },
+    {
+      "type": "message",
+      "role": "developer",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "Budget remaining: 4000 tokens."
+        }
+      ]
+    },
+    {
+      "type": "message",
+      "role": "user",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "Go ahead."
+        }
+      ]
+    }
+  ],
+  "reasoning": {
+    "effort": "low"
+  },
+  "store": false,
+  "stream": true
+}

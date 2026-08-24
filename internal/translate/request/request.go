@@ -123,6 +123,10 @@ type Metadata struct {
 	// Dropped names the Anthropic parameters that were present in the input and
 	// discarded because the backend ignores them.
 	Dropped []string
+	// SystemMessagesRemapped counts messages[] entries that arrived with role
+	// "system" (the mid-conversation-system beta) and were emitted as developer
+	// items instead, because the backend rejects role "system" on input.
+	SystemMessagesRemapped int
 	// Effort is the reasoning-effort resolution.
 	Effort EffortResult
 	// Summary is the reasoning summary mode actually applied ("" when none).
@@ -167,13 +171,14 @@ func Translate(req *aschema.MessagesRequest, dec router.Decision, model cschema.
 		Stream:       true,
 	}
 
-	input, orphans, droppedImages, err := translateMessages(req.Messages)
+	input, orphans, droppedImages, systemRemapped, err := translateMessages(req.Messages)
 	if err != nil {
 		return nil, Metadata{}, err
 	}
 	out.Input = input
 	meta.OrphanedToolResults = orphans
 	meta.DroppedImages = droppedImages
+	meta.SystemMessagesRemapped = systemRemapped
 
 	out.Tools = translateTools(req.Tools)
 	out.ToolChoice = translateToolChoice(req.ToolChoice)
@@ -231,12 +236,22 @@ func joinSystem(system *aschema.Content) (instructions string, dropped []string)
 // rather than grouping all outputs before all images. This is pinned by the
 // two_image_tool_results golden fixture rather than changed, to avoid
 // reordering call_id/output linkage without a concrete need.
-func translateMessages(messages []aschema.Message) (items []cschema.InputItem, orphans []string, droppedImages []string, err error) {
+func translateMessages(messages []aschema.Message) (items []cschema.InputItem, orphans []string, droppedImages []string, systemRemapped int, err error) {
 	seenCalls := map[string]bool{}
 
 	for mi := range messages {
 		msg := messages[mi]
 		role := msg.Role
+		if role == aschema.RoleSystem {
+			// The mid-conversation-system beta puts system-role messages inside
+			// messages[]. The Responses API refuses role "system" on an input
+			// item; developer is its positional equivalent, so the instruction
+			// keeps both its content and its place in the turn order. The
+			// top-level system field is unaffected — it still becomes
+			// instructions via joinSystem.
+			role = cschema.RoleDeveloper
+			systemRemapped++
+		}
 		if msg.Content == nil {
 			continue
 		}
@@ -262,7 +277,7 @@ func translateMessages(messages []aschema.Message) (items []cschema.InputItem, o
 			case aschema.BlockImage:
 				url, drop, ierr := imageURL(blk.Source)
 				if ierr != nil {
-					return nil, nil, nil, ierr
+					return nil, nil, nil, 0, ierr
 				}
 				if drop {
 					droppedImages = append(droppedImages, DroppedImageEmptyMediaType)
@@ -274,7 +289,7 @@ func translateMessages(messages []aschema.Message) (items []cschema.InputItem, o
 				flush()
 				args, aerr := toolArguments(blk.Input)
 				if aerr != nil {
-					return nil, nil, nil, aerr
+					return nil, nil, nil, 0, aerr
 				}
 				seenCalls[blk.ID] = true
 				items = append(items, cschema.FunctionCall(blk.ID, blk.Name, args))
@@ -286,7 +301,7 @@ func translateMessages(messages []aschema.Message) (items []cschema.InputItem, o
 				}
 				text, images, imgDropped, terr := flattenToolResult(blk.Content)
 				if terr != nil {
-					return nil, nil, nil, terr
+					return nil, nil, nil, 0, terr
 				}
 				droppedImages = append(droppedImages, imgDropped...)
 				if blk.IsError {
@@ -321,7 +336,7 @@ func translateMessages(messages []aschema.Message) (items []cschema.InputItem, o
 		flush()
 	}
 
-	return items, orphans, droppedImages, nil
+	return items, orphans, droppedImages, systemRemapped, nil
 }
 
 // imageURL renders an Anthropic image source as a Responses input_image URL: a

@@ -1,0 +1,44 @@
+{
+  "model": "luna-low",
+  "max_tokens": 8192,
+  "stream": true,
+  "system": [
+    {
+      "type": "text",
+      "text": "You are Claude Code, Anthropic's official CLI for Claude.",
+      "cache_control": { "type": "ephemeral" }
+    },
+    {
+      "type": "text",
+      "text": "# Environment\nPlatform: darwin",
+      "cache_control": { "type": "ephemeral" }
+    }
+  ],
+  "messages": [
+    {
+      "role": "user",
+      "content": [{ "type": "text", "text": "What OS am I on?" }]
+    },
+    {
+      "role": "system",
+      "content": [
+        {
+          "type": "text",
+          "text": "<system-reminder>The user changed the working directory. Re-read any cached paths.</system-reminder>"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [{ "type": "text", "text": "Let me check." }]
+    },
+    {
+      "role": "system",
+      "content": "Budget remaining: 4000 tokens."
+    },
+    {
+      "role": "user",
+      "content": [{ "type": "text", "text": "Go ahead." }]
+    }
+  ]
+}
