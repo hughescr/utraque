@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -171,6 +172,91 @@ func TestTraceWritesThreeRedactedFiles(t *testing.T) {
 		if strings.Contains(dump, fakeJWT) || strings.Contains(dump, "ABCDEFGHIJKLMNOP") {
 			t.Errorf("%s trace leaked credential material: %s", name, dump)
 		}
+	}
+}
+
+// The manifest's summary block is copied out of the request line's fields, and
+// one of those — err — is free-form: an upstream error body reaches it. Every
+// other field of the manifest is redacted on the way in, so this one was the
+// hole, and the log path scrubbed the same string while the trace path did not.
+func TestTraceManifestScrubsTheSummary(t *testing.T) {
+	dir := t.TempDir()
+	tr, err := obs.NewTracer(dir, slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	trace := tr.Begin("req-err")
+	sum := obs.NewSummary()
+	sum.SetRoute("codex")
+	// What an upstream that echoes the presented credential into a plain-text
+	// error body looks like by the time it reaches the request line.
+	sum.SetErr(errors.New("upstream 401: invalid token: Bearer " + fakeJWT))
+	trace.SetSummary(sum)
+	trace.Close()
+
+	b, err := os.ReadFile(filepath.Join(dir, "req-err"+obs.SuffixRequest))
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest := string(b)
+	if strings.Contains(manifest, fakeJWT) {
+		t.Errorf("the manifest leaked a credential through the summary: %s", manifest)
+	}
+	if !strings.Contains(manifest, obs.Redacted) {
+		t.Errorf("the manifest did not mark the redaction: %s", manifest)
+	}
+	// Still a fixture: scrubbing the encoded form must not break the JSON.
+	var meta struct {
+		Summary map[string]any `json:"summary"`
+	}
+	if err := json.Unmarshal(b, &meta); err != nil {
+		t.Fatalf("a scrubbed manifest is not JSON: %v\n%s", err, manifest)
+	}
+	if meta.Summary["route"] != "codex" {
+		t.Errorf("scrubbing dropped the summary: %s", manifest)
+	}
+}
+
+// A stream with no newline in it is force-flushed when the held tail gets too
+// big. The flush must not cut a credential in half: the first half would go to
+// disk in the clear and the second half would no longer match anything.
+func TestTraceStreamScrubsAcrossAForcedFlush(t *testing.T) {
+	dir := t.TempDir()
+	tr, err := obs.NewTracer(dir, slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	trace := tr.Begin("req-flush")
+	var client bytes.Buffer
+	down := trace.TeeDownstream(&client)
+
+	// Fill past the 1 MiB hold with no newline anywhere, then straddle the cut
+	// with a credential written one byte at a time.
+	secret := "Bearer " + fakeJWT
+	if _, err := io.WriteString(down, strings.Repeat("x", (1<<20)+1)); err != nil {
+		t.Fatal(err)
+	}
+	for i := range len(secret) {
+		if _, err := io.WriteString(down, secret[i:i+1]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := io.WriteString(down, "\ntail\n"); err != nil {
+		t.Fatal(err)
+	}
+	trace.Close()
+
+	b, err := os.ReadFile(filepath.Join(dir, "req-flush"+obs.SuffixDownstream))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), fakeJWT) {
+		t.Error("a credential written across a forced flush reached the trace file in the clear")
+	}
+	if client.Len() != (1<<20)+1+len(secret)+len("\ntail\n") {
+		t.Errorf("the tee altered what the client received: %d bytes", client.Len())
 	}
 }
 

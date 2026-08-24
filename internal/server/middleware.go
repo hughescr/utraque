@@ -32,6 +32,13 @@ func (s *Server) withRequestID(next http.Handler) http.Handler {
 }
 
 // sanitizeRequestID accepts a short, printable, space-free ASCII id.
+//
+// The id is caller-supplied and reaches three durable places — the response
+// header, the request line, and a trace file's name and manifest — so one that
+// is itself credential-shaped is refused and a generated id used instead. That
+// is a backstop, not a guarantee: an opaque high-entropy string is exactly what
+// a request id looks like, so a caller that puts a secret of an unrecognised
+// shape in this header is disclosing it to its own logs.
 func sanitizeRequestID(id string) string {
 	if id == "" || len(id) > maxRequestIDLen {
 		return ""
@@ -40,6 +47,9 @@ func sanitizeRequestID(id string) string {
 		if id[i] < 0x21 || id[i] > 0x7e {
 			return ""
 		}
+	}
+	if obs.Scrub(id) != id {
+		return ""
 	}
 	return id
 }

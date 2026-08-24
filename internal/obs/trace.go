@@ -319,6 +319,15 @@ func (t *Trace) Close() {
 			slog.String("request_id", t.id), slog.String("err", err.Error()))
 		return
 	}
+	// Scrub the ENCODED manifest, not merely the fields that were scrubbed on
+	// the way in. Headers and bodies are redacted individually, but the summary
+	// block is copied verbatim out of the request line's fields and one of those,
+	// err, is free-form: an upstream error body reaches it, so an upstream that
+	// echoes a token into its error text would otherwise land here in the clear.
+	// The log path scrubs that same string through the slog handler; this is the
+	// trace path's equivalent. Scrubbing the encoded form keeps the file
+	// parseable JSON, because a redaction replaces a JSON string value in place.
+	data = ScrubBytes(data)
 	data = append(data, '\n')
 	path := filepath.Join(t.tracer.dir, t.id+SuffixRequest)
 	if err := os.WriteFile(path, data, 0o600); err != nil {
@@ -373,6 +382,14 @@ type scrubWriter struct {
 // buffer the whole conversation in memory.
 const maxScrubHold = 1 << 20
 
+// scrubOverlap is how much of a force-flushed buffer is carried forward. A
+// newline-less stream that crosses maxScrubHold is flushed mid-line, and a
+// credential straddling that cut would be unrecognisable on both sides of it —
+// the one way a token could walk past the scrubber. Retaining the tail means the
+// next flush still sees the whole match. It is far longer than any shape
+// scrubRE matches, and it is bounded, so the memory ceiling holds.
+const scrubOverlap = 8 << 10
+
 func newScrubWriter(w io.Writer) *scrubWriter { return &scrubWriter{w: w} }
 
 func (s *scrubWriter) Write(p []byte) (int, error) {
@@ -386,10 +403,13 @@ func (s *scrubWriter) Write(p []byte) (int, error) {
 		}
 		s.buf = append(s.buf[:0], s.buf[i+1:]...)
 	} else if len(s.buf) > maxScrubHold {
-		if _, err := s.w.Write(ScrubBytes(s.buf)); err != nil {
+		// Flush all but the last scrubOverlap bytes and carry those forward, so a
+		// credential lying across the cut is still matched on the next flush.
+		keep := len(s.buf) - scrubOverlap
+		if _, err := s.w.Write(ScrubBytes(s.buf[:keep])); err != nil {
 			return 0, err
 		}
-		s.buf = s.buf[:0]
+		s.buf = append(s.buf[:0], s.buf[keep:]...)
 	}
 	return len(p), nil
 }

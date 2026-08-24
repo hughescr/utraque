@@ -198,6 +198,31 @@ func TestRequestIDGeneratedAndEchoed(t *testing.T) {
 	}
 }
 
+// The request id is echoed to the caller, written to the request line, and used
+// to name a trace file. A caller that puts something credential-shaped in the
+// header does not get it honoured, and it does not reach the log.
+func TestCredentialShapedRequestIDIsNotHonoured(t *testing.T) {
+	const jwt = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9." +
+		"eyJleHAiOjIwMDAwMDAwMDAsInN1YiI6ImZha2UifQ." +
+		"c2lnbmF0dXJlLXRoYXQtaXMtbm90LXJlYWw"
+
+	for _, bad := range []string{jwt, "sk-ant-oat01-CALLERSECRETVALUE0123"} {
+		s, buf := newServer(t, nil)
+		r := httptest.NewRequest(http.MethodGet, server.HealthPath, nil)
+		r.Header.Set(server.RequestIDHeader, bad)
+		got := do(t, s, r).Header().Get(server.ResponseIDHeader)
+		if got == bad {
+			t.Errorf("a credential-shaped inbound id %q was honoured", bad)
+		}
+		if got == "" {
+			t.Error("rejecting the inbound id must still yield a generated one")
+		}
+		if strings.Contains(buf.String(), bad) {
+			t.Errorf("a credential-shaped inbound id reached the log: %s", buf.String())
+		}
+	}
+}
+
 func TestAccessLogRedactsAuthorization(t *testing.T) {
 	s, buf := newServer(t, nil)
 	r := httptest.NewRequest(http.MethodGet, server.HealthPath+"?key=sk-in-query", nil)

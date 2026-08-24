@@ -17,7 +17,13 @@ const Redacted = "[REDACTED]"
 // write into a log even by accident.
 //
 // Keys are compared after lowercasing and folding '-' to '_', so
-// "Refresh-Token", "refresh_token" and "REFRESH_TOKEN" are one key.
+// "Refresh-Token", "refresh_token" and "REFRESH_TOKEN" are one key. A key is
+// denied too when a denied name is its trailing underscore-separated segment
+// group: "codex_token" is denied by "token", "upstream_client_secret" by
+// "client_secret". Namespacing a field with a prefix is the obvious way to
+// write the mistake this list exists to make unwritable, and an exact-match
+// denylist did not stop it. Matching the TAIL rather than any substring is what
+// keeps "output_tokens" — plural, and a count — a perfectly loggable field.
 var deniedAttrKeys = map[string]struct{}{
 	"access_token":  {},
 	"refresh_token": {},
@@ -109,10 +115,23 @@ func redactMatch(m string) string {
 }
 
 // DeniedAttrKey reports whether an attribute with this key may never carry a
-// value into the log.
+// value into the log. A denied name matches the whole key or its trailing
+// underscore-separated segments, so a namespaced "codex_token" is denied and a
+// merely similar "output_tokens" is not.
 func DeniedAttrKey(key string) bool {
-	_, bad := deniedAttrKeys[normalizeAttrKey(key)]
-	return bad
+	k := normalizeAttrKey(key)
+	if _, bad := deniedAttrKeys[k]; bad {
+		return true
+	}
+	for i := 0; i < len(k); i++ {
+		if k[i] != '_' {
+			continue
+		}
+		if _, bad := deniedAttrKeys[k[i+1:]]; bad {
+			return true
+		}
+	}
+	return false
 }
 
 // HashedAttrKey reports whether an attribute with this key is logged only as a
@@ -216,10 +235,12 @@ func scrubValue(v slog.Value) slog.Value {
 }
 
 // scrubAny handles the value shapes a call site actually produces with
-// slog.Any: an error, a string slice, a raw byte slice, or a Stringer. Anything
-// else (a map of counters, a bool slice) is left alone — rewriting it would
-// change the JSON shape a reader depends on, and none of those shapes can hold
-// a credential without a call site having put one there under a denied key.
+// slog.Any: an error, a string slice, a raw byte slice, a Stringer, or a string
+// map. A map is rewritten in place — same keys, same shape — because a nested
+// key naming a credential is otherwise invisible to the top-level key check.
+// Anything else (a map of counters, a bool slice) is left alone: rewriting it
+// would change the JSON shape a reader depends on, and none of those shapes can
+// hold a credential the string paths would not already have caught.
 func scrubAny(v slog.Value) slog.Value {
 	switch x := v.Any().(type) {
 	case error:
@@ -235,6 +256,22 @@ func scrubAny(v slog.Value) slog.Value {
 			out[i] = Scrub(s)
 		}
 		return slog.AnyValue(out)
+	case map[string]string:
+		out := make(map[string]string, len(x))
+		for k, s := range x {
+			out[k] = scrubMapValue(k, s)
+		}
+		return slog.AnyValue(out)
+	case map[string]any:
+		out := make(map[string]any, len(x))
+		for k, av := range x {
+			if s, ok := av.(string); ok {
+				out[k] = scrubMapValue(k, s)
+				continue
+			}
+			out[k] = av
+		}
+		return slog.AnyValue(out)
 	case fmt.Stringer:
 		if x == nil {
 			return v
@@ -243,4 +280,13 @@ func scrubAny(v slog.Value) slog.Value {
 	default:
 		return v
 	}
+}
+
+// scrubMapValue applies the attr rules to one entry of a logged map: a denied
+// key loses its value outright, everything else is scrubbed by shape.
+func scrubMapValue(key, val string) string {
+	if DeniedAttrKey(key) {
+		return Redacted
+	}
+	return Scrub(val)
 }

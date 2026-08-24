@@ -92,6 +92,60 @@ func TestScrubHandlerDeniesKeysWhateverTheValue(t *testing.T) {
 	}
 }
 
+// A denied name is denied under a namespacing prefix too. This is the gap an
+// exact-match denylist left: "token" was denied, "codex_token" was not, and a
+// refresh token has no shape the regex backstop recognises — so a plausible
+// call site put one in the clear through BOTH layers.
+func TestDeniedKeysMatchNamespacedNames(t *testing.T) {
+	denied := []string{
+		"codex_token", "client_access_token", "upstream_client_secret",
+		"Codex-Refresh-Token", "x_api_key", "the_password", "my_cookie",
+	}
+	for _, k := range denied {
+		if !obs.DeniedAttrKey(k) {
+			t.Errorf("DeniedAttrKey(%q) = false, want true", k)
+		}
+	}
+	// The tail must be a whole segment group, so ordinary fields survive. These
+	// are real fields on the request line and losing them would be a regression
+	// in the opposite direction.
+	allowed := []string{
+		"output_tokens", "input_tokens", "tokenizer", "secretary",
+		"account_id", "transport", "stop_reason", "req_bytes",
+	}
+	for _, k := range allowed {
+		if obs.DeniedAttrKey(k) {
+			t.Errorf("DeniedAttrKey(%q) = true, want false", k)
+		}
+	}
+}
+
+// The same rule has to hold through the handler, since that is the layer a call
+// site actually goes through.
+func TestScrubHandlerDeniesNamespacedKeys(t *testing.T) {
+	l, buf := newBufLogger(t)
+	l.Info("creds",
+		slog.String("codex_token", "rt_LFRDkQ3mSecretRefreshTokenValue0123456789"),
+		slog.Any("meta", map[string]string{
+			"refresh_token": "rt_MAPSECRETVALUE0123456789",
+			"model":         "sol",
+		}),
+		slog.Int("output_tokens", 42),
+	)
+	out := buf.String()
+	for _, leak := range []string{"rt_LFRDkQ3mSecret", "rt_MAPSECRETVALUE"} {
+		if strings.Contains(out, leak) {
+			t.Errorf("a namespaced or nested denied key leaked %q: %s", leak, out)
+		}
+	}
+	if !strings.Contains(out, `"output_tokens":42`) {
+		t.Errorf("a count field was wrongly redacted: %s", out)
+	}
+	if !strings.Contains(out, `"model":"sol"`) {
+		t.Errorf("an ordinary map entry was lost: %s", out)
+	}
+}
+
 // The account id is correlatable but not disclosable, so it is hashed rather
 // than withheld — and a value that is already a hash is left alone.
 func TestScrubHandlerHashesAccountIDs(t *testing.T) {
