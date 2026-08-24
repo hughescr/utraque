@@ -107,6 +107,16 @@ func Resolve(model string, betaHeader string) (Decision, error) {
 		return Decision{}, unknownModelError(trimmed)
 	}
 
+	// The picker tier is authoritative and so is consulted first: these are
+	// whole ids internal/discovery actually advertised, and the user picked one
+	// from a list utraque itself served. Any grammar-based guess below would be
+	// a worse answer than the mapping discovery recorded when it emitted the
+	// row. The tier is empty until discovery runs, so a bare proxy is
+	// unaffected.
+	if dec, ok := resolvePicker(lower, trimmed); ok {
+		return dec, nil
+	}
+
 	// "anthropic-compat.*" is the Codex picker-variant namespace: it must
 	// never match the generic Anthropic-name check below, even though it
 	// contains "anthropic". Strip it and resolve the remainder as a Codex
@@ -149,6 +159,34 @@ func Resolve(model string, betaHeader string) (Decision, error) {
 	}
 
 	return Decision{}, unknownModelError(trimmed)
+}
+
+// resolvePicker resolves an id against the registry's picker tier — the
+// decorated ids internal/discovery advertised. ok=false means the id was never
+// advertised and the ordinary grammar should decide.
+//
+// An Anthropic-backed picker route carries the undecorated model id in
+// UpstreamModel; that becomes the Decision's ClientModel so a leg that does
+// rewrite the body has the name Anthropic will accept, and Decision.
+// UpstreamModel stays empty as the Anthropic backend's contract requires.
+func resolvePicker(lower, clientModel string) (Decision, bool) {
+	route, ok := DefaultRegistry.PickerRoute(lower)
+	if !ok {
+		return Decision{}, false
+	}
+
+	dec := Decision{Backend: route.Backend, ClientModel: clientModel, Effort: route.Effort}
+	if route.Effort != "" {
+		dec.EffortSource = EffortSourceSuffix
+	}
+	if route.Backend == BackendAnthropic {
+		if route.UpstreamModel != "" {
+			dec.ClientModel = route.UpstreamModel
+		}
+		return dec, true
+	}
+	dec.UpstreamModel = route.UpstreamModel
+	return dec, true
 }
 
 // resolveCodex resolves a (already-lowercased, "anthropic-compat."-stripped)

@@ -83,6 +83,93 @@ is also planned). Knobs that exist today:
 - **Idle timeout** — how long the process may sit idle before self-exiting
   (relevant once launchd socket activation lands).
 
+## The model picker (merged `/v1/models`)
+
+`utraque` serves its own `GET /v1/models`, merging Anthropic's model list with
+the Codex models it can route to, so both subscriptions show up in Claude
+Code's `/model` picker. Set `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1` in
+the client's environment to turn discovery on.
+
+Everything in this section is built to the client's actual behaviour, verified
+against the Claude Code binary rather than inferred:
+
+- The client fetches `GET {base}/v1/models?limit=1000` with a **3-second
+  timeout** and treats **any redirect as a hard failure**. `utraque` therefore
+  never redirects on this route and answers within an internal **1.5s
+  deadline**, falling back rather than running late.
+- It reads only `id` and `display_name`, and **discards any id that does not
+  match `/(claude|anthropic)/i`** — a case-insensitive, unanchored substring
+  test.
+- The id is sent back verbatim as the request's `model` when a row is picked,
+  so every id `utraque` advertises is registered in the router's alias registry
+  and is guaranteed to route.
+- An empty list always beats an error: every failure path still returns HTTP
+  200 with a well-formed `{"data":[…]}` body.
+
+### Anthropic models
+
+`catalog_mode` picks where the Claude rows come from:
+
+| Mode | Behaviour |
+| --- | --- |
+| `merge` (default) | Read Anthropic's own catalog using the credential on the incoming request, then union it with a built-in static list so nothing is missing. |
+| `upstream` | Only what the upstream read returned. If it fails, no Claude rows. |
+| `static` | Never contact Anthropic. |
+
+A failed or refused upstream read is **negative-cached for ~60s**, so a
+credential that cannot read that endpoint costs one slow picker open, not every
+one. Note that Claude Code only attempts gateway discovery at all when
+`ANTHROPIC_AUTH_TOKEN` or an API key is set — a plain subscription OAuth
+session sends neither, so in normal use the Claude half is served from the
+static list. That is the designed outcome, which is why the fallback, not the
+upstream read, is the load-bearing path.
+
+### Codex/GPT models
+
+Codex models are advertised under a configurable id template, defaulting to the
+prefixed compat form **`anthropic-compat.{alias}`** — chosen because it passes
+both today's "contains" filter and a plausible future "starts-with" one. Only
+models the Codex catalog marks `visibility: "list"` are offered unless
+`include_hidden` is set.
+
+Four emission strategies, alias emission **on by default**:
+
+| Strategy | Emits |
+| --- | --- |
+| `template` (default) | The rolling and pinned aliases: `anthropic-compat.sol`, `anthropic-compat.sol-5.6` |
+| `effort_variants` | The above plus one row per supported reasoning effort: `anthropic-compat.sol-high`, `anthropic-compat.sol-5.6-ultra` |
+| `passthrough` | One row per raw upstream slug: `anthropic-compat.gpt-5.6-sol` |
+| `off` | No Codex rows. GPT names still route when typed or set in agent frontmatter — they just don't appear in the picker. |
+
+An id template that could not produce a filter-passing id is rejected at
+startup rather than silently yielding a picker with no GPT rows in it.
+
+### 1M-context rows
+
+Because `utraque` is a gateway, Claude Code cannot verify that a model supports
+a 1M context window, so it does **not** offer the "(1M context)" picker entry
+it would offer on a direct connection. The capability is there; the row is not.
+
+So `utraque` emits the row itself: for each natively-1M Claude model it adds a
+second entry whose id carries the `[1m]` marker, e.g.
+
+```
+claude-sonnet-5        Sonnet 5
+claude-sonnet-5[1m]    Sonnet 5 (1M context)
+```
+
+Picking the second one makes the client send the `context-1m-2025-08-07` beta,
+treat the window as 1,000,000 tokens for auto-compaction, and strip the `[1m]`
+marker back off before putting the model in the request body — so the proxy
+receives an ordinary `claude-sonnet-5` request carrying the long-context beta,
+which the passthrough forwards untouched.
+
+The default set matches the client's own native-1M list (Sonnet 5, Fable 5,
+Opus 5, Opus 4.7, Opus 4.8) and is configurable, as is the whole feature. Pair
+it with `CLAUDE_CODE_MAX_CONTEXT_TOKENS` / auto-compaction settings if you want
+those models to compact at their true window rather than a conservative
+default.
+
 ## A note on terms of service
 
 The Anthropic leg follows Anthropic's own documented gateway behavior: a

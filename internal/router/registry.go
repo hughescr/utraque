@@ -119,6 +119,12 @@ type Registry struct {
 	pinned    map[string]string
 	bare      map[string]string
 	overrides map[string]slugOverride
+
+	// picker is the fourth tier: whole, decorated ids that internal/discovery
+	// actually advertised, mapped to the backend each must reach. It is
+	// maintained by SetPickerRoutes and is deliberately untouched by
+	// LoadCatalog — see SetPickerRoutes for why.
+	picker map[string]PickerRoute
 }
 
 // bareHold records which (version, priority) currently owns a bare alias, so
@@ -136,6 +142,7 @@ func NewRegistry() *Registry {
 		pinned:    map[string]string{},
 		bare:      map[string]string{},
 		overrides: map[string]slugOverride{},
+		picker:    map[string]PickerRoute{},
 	}
 }
 
@@ -320,6 +327,134 @@ func (r *Registry) Families() []string {
 	out := make([]string, 0, len(r.bare))
 	for k := range r.bare {
 		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// AliasTier names which of the registry's three derivation tiers an alias came
+// from. Discovery uses it to choose which names to advertise: the raw tier is
+// the upstream slug itself, pinned names one exact version, and bare is the
+// rolling newest-wins name.
+type AliasTier string
+
+// The alias tiers, in the order Resolve consults them.
+const (
+	TierRaw    AliasTier = "raw"
+	TierPinned AliasTier = "pinned"
+	TierBare   AliasTier = "bare"
+)
+
+// Alias is one registered routable name and the upstream slug it resolves to.
+type Alias struct {
+	Name string
+	Slug string
+	Tier AliasTier
+}
+
+// AliasList returns every alias the registry currently resolves, across all
+// three derivation tiers, sorted by (Slug, Tier, Name) so callers get a stable
+// order. Tier ordering is the constant order above (raw, pinned, bare), not
+// lexical.
+//
+// It is the seam internal/discovery advertises from: a name absent from this
+// list is not routable, so discovery must never invent one.
+func (r *Registry) AliasList() []Alias {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	out := make([]Alias, 0, len(r.raw)+len(r.pinned)+len(r.bare))
+	for name, slug := range r.raw {
+		out = append(out, Alias{Name: name, Slug: slug, Tier: TierRaw})
+	}
+	for name, slug := range r.pinned {
+		out = append(out, Alias{Name: name, Slug: slug, Tier: TierPinned})
+	}
+	for name, slug := range r.bare {
+		out = append(out, Alias{Name: name, Slug: slug, Tier: TierBare})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Slug != out[j].Slug {
+			return out[i].Slug < out[j].Slug
+		}
+		if out[i].Tier != out[j].Tier {
+			return tierRank(out[i].Tier) < tierRank(out[j].Tier)
+		}
+		return out[i].Name < out[j].Name
+	})
+	return out
+}
+
+func tierRank(t AliasTier) int {
+	switch t {
+	case TierRaw:
+		return 0
+	case TierPinned:
+		return 1
+	case TierBare:
+		return 2
+	default:
+		return 3
+	}
+}
+
+// PickerRoute is the routing target of one explicitly advertised picker id.
+//
+// Discovery emits decorated ids ("anthropic-compat.sol", "claude-sonnet-5[1m]")
+// that the alias grammar alone would place wrongly, or not at all, so it
+// registers the exact id it advertised together with the backend that id must
+// reach. Without this a user could pick a row utraque itself served and get a
+// 404 back.
+//
+// For BackendCodex, UpstreamModel is the catalog slug to request. For
+// BackendAnthropic it is the undecorated Anthropic model id the decorated
+// picker id stands for (e.g. "claude-sonnet-5" behind "claude-sonnet-5[1m]").
+type PickerRoute struct {
+	Backend       Backend
+	UpstreamModel string
+	Effort        string
+}
+
+// SetPickerRoutes replaces the whole picker-id tier with routes. Discovery
+// rebuilds it every time it serves a catalog, so a row that stops being
+// advertised stops being routable by its decorated id (the underlying alias is
+// unaffected). A nil or empty map clears the tier. Entries with an empty id or
+// an invalid backend are dropped.
+//
+// The picker tier is deliberately NOT rebuilt by LoadCatalog: the two have
+// different lifetimes — the catalog refreshes on a timer, discovery on a picker
+// open — and clearing one from the other would silently un-route ids already
+// showing in a user's model picker.
+func (r *Registry) SetPickerRoutes(routes map[string]PickerRoute) {
+	next := make(map[string]PickerRoute, len(routes))
+	for id, route := range routes {
+		key := strings.ToLower(strings.TrimSpace(id))
+		if key == "" || !route.Backend.Valid() {
+			continue
+		}
+		next[key] = route
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.picker = next
+}
+
+// PickerRoute looks up an explicitly advertised picker id. id is expected to be
+// already lowercased and trimmed.
+func (r *Registry) PickerRoute(id string) (PickerRoute, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	route, ok := r.picker[id]
+	return route, ok
+}
+
+// PickerIDs lists the registered picker ids, sorted.
+func (r *Registry) PickerIDs() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]string, 0, len(r.picker))
+	for id := range r.picker {
+		out = append(out, id)
 	}
 	sort.Strings(out)
 	return out
