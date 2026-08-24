@@ -115,7 +115,8 @@ the client never notices.
 
 ```sh
 go build -o bin/utraque ./cmd/utraque
-deploy/install.sh --local-token "$(openssl rand -hex 16)"
+openssl rand -hex 16 > ~/.utraque-token && chmod 600 ~/.utraque-token
+deploy/install.sh --local-token-file ~/.utraque-token
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.hughescr.utraque.plist
 ```
 
@@ -184,7 +185,7 @@ This is the whole surface.
 
 | Variable | Default | What it does |
 | --- | --- | --- |
-| `UTRAQUE_IDLE_TIMEOUT` | `1h` under launchd, off otherwise | How long the process may sit idle before self-exiting, as a Go duration. Setting it wins in both directions, and `0` means never exit. A request still running holds the timer open, so a long streamed answer can never be cut off by an idle exit. |
+| `UTRAQUE_IDLE_TIMEOUT` | `1h` under launchd, off otherwise | How long the process may sit idle before self-exiting, as a Go duration. Setting it wins in both directions, and `0` means never exit. A request still running holds the timer open, so a long streamed answer can never be cut off by an idle exit. A request that arrives in the instant after the deadline fires is answered `503` rather than started, since the drain that has already begun could not see it through; under launchd the retry restarts the daemon. |
 | `UTRAQUE_LAUNCHD_SOCKET` | `Listener` | The `Sockets` key in the plist whose descriptors `utraque` adopts. Must match the plist. |
 
 ### Observability
@@ -215,8 +216,14 @@ browser would be dishonest for no benefit.
 A hand-rolled TLS stack is a strictly larger attack surface, which is why uTLS
 is never the starting point. The two legs hold separate transports and therefore
 separate connection pools, so a switch on the Codex side cannot disturb an
-in-flight Anthropic stream. `/healthz` reports which stack is live, read fresh
-each time, because `auto` can change it mid-process.
+in-flight Anthropic stream. The Codex model catalog dials on the Codex transport
+too — `{base}/models` and `{base}/responses` are the same host — so a flip
+carries the picker and the effort clamping with it instead of leaving them
+gated. `/healthz` reports **both** legs (`anthropic` is always `std`; `codex` is
+the one that can move), read fresh each time, because `auto` can change it
+mid-process. The per-request `transport` field is recorded by the leg that
+dispatched the request, immediately before it goes out, so the request that
+trips a gate reads `std` and its successor reads `utls`.
 
 ## Logging and traces
 
@@ -236,21 +243,42 @@ hung up" from "it broke", so a cancelled turn never reads as an incident.
 their values — `anthropic-version`, `anthropic-beta`, `content-type`,
 `user-agent`. Every other header is named but never valued, so the shape of a
 request stays debuggable without its contents being disclosed. `Authorization`,
-`x-api-key`, `access_token`, `refresh_token` and `id_token` are unloggable *by
-construction*: the slog handler is wrapped in a scrubber that blanks any
-attribute whose key names a credential and rewrites any credential-shaped value
-(a bearer token, a JWT, an `sk-` key, a token field in a JSON body or query
-string) before it can reach the output. The Codex `account_id` appears only as
-a hash prefix. Request and response bodies are never logged, at any level.
+`x-api-key`, `access_token`, `refresh_token` and `id_token` cannot be logged:
+the slog handler is wrapped in a scrubber that blanks any attribute whose key
+names a credential — including under a namespacing prefix, so `codex_token` is
+blanked by the same rule as `token`, while a count like `output_tokens` is not —
+and rewrites any credential-shaped value (a bearer token, a JWT, an `sk-` key, a
+token field in a JSON body or query string) before it can reach the output. The
+Codex `account_id` appears only as a hash prefix.
 
-**Trace dumps** are the one exception, and they are behind their own switch.
-Setting `UTRAQUE_TRACE_DIR` writes three files per request —
-`<id>.request.json`, `<id>.upstream.sse` and `<id>.downstream.sse` (a
-non-streaming answer lands in `<id>.downstream.json`) — with the same redaction
-applied. They double as test fixtures: the bytes received and the bytes sent,
-side by side, turn a translation bug into a reproducible case. **A trace holds
-the prompt text and the model's output in the clear**, which is why enabling it
-logs a loud `WARN` at startup.
+Be precise about what that buys. The header layer is a true allowlist: a header
+not on the list of four is never valued, whatever it holds. The attribute layer
+is a denylist over names plus a shape-matching backstop over values, so a call
+site that both invented an un-denied key *and* put a credential of an
+unrecognised shape under it would get through. No call site does, and the tests
+say so; it is a rule enforced at the edge, not a type system.
+
+Request and response **bodies** are never logged, at any level. One thing that
+does come off an upstream response is the first 512 characters of its error
+body, which becomes the request line's `err` — it goes through the scrubber like
+every other string, on the log path and on the trace path alike.
+
+**Trace dumps** are the exception, and they are behind their own switch. Setting
+`UTRAQUE_TRACE_DIR` writes `<id>.request.json` for every request, and — for a
+Codex request that got as far as opening a stream — `<id>.upstream.sse` and
+`<id>.downstream.sse` beside it (a non-streaming answer lands in
+`<id>.downstream.json`). An Anthropic passthrough, a `/healthz` poll, a
+`/v1/models` open, or a Codex request that failed before the stream opened leave
+the manifest alone. The same redaction is applied, manifest included. They double
+as test fixtures: the bytes received and the bytes sent, side by side, turn a
+translation bug into a reproducible case. **A trace holds the prompt text and the
+model's output in the clear**, which is why enabling it logs a loud `WARN` at
+startup.
+
+A caller-supplied `X-Request-Id` is echoed back, logged, and used to name the
+trace files, so an id that is itself credential-shaped is refused and a
+generated one used instead. That is a backstop and not a guarantee: an opaque
+high-entropy string is exactly what a request id looks like.
 
 ## Short model names
 
@@ -289,8 +317,9 @@ reports process status, version and uptime, plus, for the Codex leg:
   `streams_with_unknowns`). A non-zero count is the early warning that the
   upstream protocol has drifted; the live contract test below is the deliberate
   version of the same check.
-- `transport` — which HTTP transport is in force (`std` or `utls`), read live,
-  since the auto transport can switch stacks mid-process.
+- `transport` — which HTTP transport is in force per leg (`anthropic`, always
+  `std`; `codex`, which `kind` repeats because it is the only one that can
+  change), read live, since the auto transport can switch stacks mid-process.
 - `trace` — whether per-request trace dumps are being written, and where. A
   directory of conversations accumulating on disk should never be a surprise.
 
