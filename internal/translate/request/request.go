@@ -267,12 +267,17 @@ func translateMessages(messages []aschema.Message) (items []cschema.InputItem, o
 		for _, blk := range msg.Content.Blocks {
 			switch blk.Type {
 			case aschema.BlockText:
-				// Every message part in a Responses input[] is input_text,
-				// regardless of role: the input content union is
-				// input_text/input_image/input_file, and output_text (an output
-				// content type) is not accepted on an input message. The role
-				// field alone carries the user/assistant distinction.
-				pending = append(pending, cschema.InputText(blk.Text))
+				// The role selects the content union. An assistant message is an
+				// output message, whose only text part is output_text; user and
+				// developer messages take input_text. Sending input_text under
+				// role assistant is rejected outright ("Invalid value:
+				// 'input_text'. Supported values are: 'output_text' and
+				// 'refusal'.").
+				if role == aschema.RoleAssistant {
+					pending = append(pending, cschema.OutputText(blk.Text))
+				} else {
+					pending = append(pending, cschema.InputText(blk.Text))
+				}
 
 			case aschema.BlockImage:
 				url, drop, ierr := imageURL(blk.Source)

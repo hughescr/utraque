@@ -7,7 +7,7 @@
       "content": [
         {
           "type": "input_text",
-          "text": "What is the weather in Paris?"
+          "text": "Which file holds the port?"
         }
       ]
     },
@@ -17,20 +17,40 @@
       "content": [
         {
           "type": "output_text",
-          "text": "Let me check."
+          "text": "Let me look."
         }
       ]
     },
     {
       "type": "function_call",
-      "name": "get_weather",
-      "arguments": "{\"city\":\"Paris\"}",
+      "name": "Grep",
+      "arguments": "{\"pattern\":\"8317\"}",
       "call_id": "toolu_01"
     },
     {
       "type": "function_call_output",
       "call_id": "toolu_01",
-      "output": "Sunny, 22C"
+      "output": "config.go:41"
+    },
+    {
+      "type": "message",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "output_text",
+          "text": "It is in config.go."
+        }
+      ]
+    },
+    {
+      "type": "message",
+      "role": "user",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "Thanks. Anything else?"
+        }
+      ]
     }
   ],
   "reasoning": {

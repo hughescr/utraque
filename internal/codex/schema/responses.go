@@ -16,15 +16,21 @@ const (
 	ItemFunctionCallOutput = "function_call_output"
 )
 
-// Content part types inside a message input item. Every message in a Responses
-// request's input[] carries input_text (the input content union is
-// input_text/input_image/input_file regardless of role, so assistant history is
-// emitted as input_text too); output_text belongs to a response's output and is
-// not a valid input part. Images (base64 data URLs or passed-through URLs) map
-// onto input_image.
+// Content part types inside a message input item. The explicit
+// "type":"message" tag selects the strict item form, where the ROLE picks which
+// content union applies: user and developer messages take input_text (alongside
+// input_image/input_file), while an assistant message is an output message and
+// takes output_text or refusal. Sending input_text under role assistant is
+// rejected with "Invalid value: 'input_text'. Supported values are:
+// 'output_text' and 'refusal'." Images (base64 data URLs or passed-through
+// URLs) map onto input_image, which belongs to the input union and so is valid
+// only on a non-assistant role; the Messages API does not accept an image block
+// in an assistant turn, so that combination cannot arise from a well-formed
+// request.
 const (
 	PartInputText  = "input_text"
 	PartInputImage = "input_image"
+	PartOutputText = "output_text"
 )
 
 // Reasoning effort levels the backend accepts, lowest to highest. This mirrors
@@ -63,6 +69,12 @@ type ContentPart struct {
 // InputText builds an input_text part (user-authored text).
 func InputText(text string) ContentPart {
 	return ContentPart{Type: PartInputText, Text: text}
+}
+
+// OutputText builds an output_text part (assistant-authored text replayed as
+// conversation history).
+func OutputText(text string) ContentPart {
+	return ContentPart{Type: PartOutputText, Text: text}
 }
 
 // InputImage builds an input_image part from an already-formed URL (a
