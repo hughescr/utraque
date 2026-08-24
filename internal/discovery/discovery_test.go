@@ -1113,3 +1113,111 @@ func TestConcurrentModelsCallsAreSafe(t *testing.T) {
 		<-done
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Advertised ids must outlive the in-memory picker tier
+// ---------------------------------------------------------------------------
+
+// TestAdvertisedIDsSurviveAPickerTierReset is the durability half of the
+// "every advertised id routes" invariant.
+//
+// The picker tier is in memory only, and Models replaces the WHOLE tier on
+// every /v1/models. So an id that resolves solely because discovery recorded it
+// stops resolving at the next daemon restart — or the moment one picker open
+// hits a Codex catalog error and rebuilds the tier without it. The user's next
+// message then hard-404s on a row utraque itself served. Clearing the tier and
+// re-resolving is the cheapest faithful model of both.
+func TestAdvertisedIDsSurviveAPickerTierReset(t *testing.T) {
+	reg := loadRegistry(t)
+	h := mustHandler(t, discovery.Options{
+		CatalogMode: discovery.CatalogModeStatic,
+		Codex:       codexOK(),
+		Alias: discovery.AliasOptions{
+			Strategy:      discovery.AliasEffortVariants,
+			IncludeHidden: true,
+		},
+		Registry: reg,
+	})
+	resp := h.Models(t.Context(), testCred)
+	if len(resp.Data) == 0 {
+		t.Fatal("the merged catalog is empty")
+	}
+
+	// Simulate the restart: the derived alias tiers persist (they are rebuilt
+	// from the catalog), the picker tier does not.
+	reg.SetPickerRoutes(nil)
+
+	for _, m := range resp.Data {
+		dec, err := router.ResolveWith(reg, m.ID, "")
+		if err != nil {
+			t.Errorf("advertised id %q stops routing once the picker tier is gone: %v", m.ID, err)
+			continue
+		}
+		if !dec.Backend.Valid() {
+			t.Errorf("advertised id %q resolved to an invalid backend %q", m.ID, dec.Backend)
+		}
+	}
+}
+
+// TestUnparseableEffortVariantsAreNotAdvertised: an "<alias>-<effort>" row whose
+// effort token the router cannot split back off is routable only while the
+// picker tier that recorded it survives, so it must not be offered at all.
+func TestUnparseableEffortVariantsAreNotAdvertised(t *testing.T) {
+	reg := loadRegistry(t)
+	exotic := discovery.CodexCatalogFunc(func(context.Context) ([]schema.Model, error) {
+		return []schema.Model{{
+			Slug: "gpt-5.6-sol", DisplayName: "GPT-5.6-Sol", Visibility: schema.VisibilityList,
+			SupportedReasoningLevels: []schema.ReasoningLevel{
+				{Effort: "high"},    // the grammar knows this one
+				{Effort: "minimal"}, // it does not
+			},
+		}}, nil
+	})
+	h := mustHandler(t, discovery.Options{
+		CatalogMode: discovery.CatalogModeStatic,
+		Codex:       exotic,
+		Alias:       discovery.AliasOptions{Strategy: discovery.AliasEffortVariants},
+		Registry:    reg,
+	})
+	resp := h.Models(t.Context(), testCred)
+
+	if !hasID(resp, "anthropic-compat.sol-high") {
+		t.Errorf("the parseable effort row is missing; got %v", ids(resp))
+	}
+	for _, id := range ids(resp) {
+		if strings.Contains(id, "minimal") {
+			t.Errorf("advertised %q, whose effort token the router cannot parse back", id)
+		}
+	}
+}
+
+// TestPickerRoutesGoToTheConfiguredRegistry: Options.Registry is honoured on
+// BOTH sides. It used to be written to but never read — resolution always
+// consulted router.DefaultRegistry — so a non-default registry silently
+// recorded routes that could never resolve.
+func TestPickerRoutesGoToTheConfiguredRegistry(t *testing.T) {
+	reg := router.NewRegistry()
+	h := mustHandler(t, discovery.Options{
+		CatalogMode: discovery.CatalogModeStatic,
+		Codex:       codexOK(),
+		Registry:    reg,
+	})
+	resp := h.Models(t.Context(), testCred)
+
+	var codexRows int
+	for _, id := range ids(resp) {
+		if !strings.HasPrefix(strings.ToLower(id), "anthropic-compat.") {
+			continue
+		}
+		codexRows++
+		if _, err := router.ResolveWith(reg, id, ""); err != nil {
+			t.Errorf("ResolveWith(configured registry, %q): %v", id, err)
+		}
+	}
+	if codexRows == 0 {
+		t.Fatal("no Codex rows were emitted, so nothing was proved")
+	}
+	if len(reg.PickerIDs()) == 0 {
+		t.Error("the configured registry received no picker routes")
+	}
+}

@@ -314,3 +314,49 @@ func TestNewCatalogRejectsBadBaseURLs(t *testing.T) {
 		t.Errorf("BaseURL = %q, want %q", got, want)
 	}
 }
+
+// TestCatalogDoesNotServeOneCallersListToAnother: utraque holds no Anthropic
+// secret of its own — every catalog read is signed by whichever credential the
+// caller sent this request. The cache is therefore keyed on that credential.
+// Harmless on a single-user loopback, wrong the moment the local token is
+// shared, which is exactly the configuration local_token exists to support.
+func TestCatalogDoesNotServeOneCallersListToAnother(t *testing.T) {
+	var seen atomic.Value // last Authorization observed
+	c, hits := newCatalog(t, func(w http.ResponseWriter, r *http.Request) {
+		auth := r.Header.Get("Authorization")
+		seen.Store(auth)
+		writeModels(w, anthropic.CatalogModel{ID: "claude-for-" + auth, DisplayName: auth})
+	}, anthropic.WithCatalogTTL(time.Hour))
+
+	alice := anthropic.Credential{Authorization: "Bearer alice-token"}
+	bob := anthropic.Credential{Authorization: "Bearer bob-token"}
+
+	got, err := c.Models(t.Context(), alice)
+	if err != nil {
+		t.Fatalf("Models(alice): %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "claude-for-Bearer alice-token" {
+		t.Fatalf("alice got %+v", got)
+	}
+
+	got, err = c.Models(t.Context(), bob)
+	if err != nil {
+		t.Fatalf("Models(bob): %v", err)
+	}
+	if hits.Load() != 2 {
+		t.Errorf("hits = %d, want 2: bob must not be served alice's cached list", hits.Load())
+	}
+	if len(got) != 1 || got[0].ID != "claude-for-Bearer bob-token" {
+		t.Errorf("bob got %+v, want a list fetched with bob's own credential", got)
+	}
+
+	// The cache is one slot keyed on the credential, not a per-caller map: it
+	// holds only the most recent caller's answer, so alice re-fetches with her
+	// own credential rather than being handed bob's. Bounded, and never wrong.
+	if _, err := c.Models(t.Context(), alice); err != nil {
+		t.Fatalf("Models(alice, again): %v", err)
+	}
+	if hits.Load() != 3 {
+		t.Errorf("hits = %d, want 3", hits.Load())
+	}
+}

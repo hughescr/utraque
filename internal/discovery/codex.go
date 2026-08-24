@@ -102,6 +102,16 @@ func (h *Handler) codexRows(models []schema.Model) []codexRow {
 				if effort == "" {
 					continue
 				}
+				// Only efforts the router can split back off a model name. An
+				// "<alias>-<effort>" id whose effort token the grammar does not
+				// know is routable ONLY while the in-memory picker tier that
+				// recorded it survives; after a restart — or after one picker
+				// open hits a catalog error and rebuilds the tier without it —
+				// the same id hard-404s. A row that dies like that is worse than
+				// a row we never offered.
+				if !router.KnownEffort(effort) {
+					continue
+				}
 				out = append(out, h.codexRow(idTmpl, displayTmpl,
 					name+"-"+effort, slug, display, effort))
 			}

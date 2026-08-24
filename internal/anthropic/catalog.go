@@ -2,6 +2,8 @@ package anthropic
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -96,6 +98,17 @@ func CredentialFromRequest(r *http.Request) Credential {
 
 // Present reports whether the credential can authenticate an upstream read.
 func (c Credential) Present() bool { return c.Authorization != "" || c.APIKey != "" }
+
+// cacheKey is a stable, non-reversible fingerprint of the material that
+// authenticates the upstream read. The catalog cache is keyed on it so a list
+// fetched with one caller's credential is never served to a different one:
+// utraque holds no Anthropic secret of its own, so each caller's answer is
+// theirs alone. Harmless on a single-user loopback, wrong the moment the local
+// token is shared.
+func (c Credential) cacheKey() string {
+	sum := sha256.Sum256([]byte(c.Authorization + "\x00" + c.APIKey))
+	return hex.EncodeToString(sum[:])
+}
 
 // apply writes the credential onto an outbound request.
 func (c Credential) apply(req *http.Request) {
@@ -206,10 +219,17 @@ type CatalogClient struct {
 	// models/goodUntil hold the last success; err/badUntil hold the last
 	// failure. At most one of the two windows is meaningful at a time: a
 	// success clears the negative cache and vice versa.
+	//
+	// credKey fingerprints the credential both windows belong to. A read by a
+	// different caller misses and fetches with its own credential rather than
+	// being served someone else's answer. One slot, not a per-caller map: a map
+	// would grow with every distinct credential, and utraque's normal shape is a
+	// single loopback caller, so a miss on a credential change costs one fetch.
 	models    []CatalogModel
 	goodUntil time.Time
 	err       error
 	badUntil  time.Time
+	credKey   string
 }
 
 var _ Catalog = (*CatalogClient)(nil)
@@ -262,25 +282,30 @@ func (c *CatalogClient) Models(ctx context.Context, cred Credential) ([]CatalogM
 	if !cred.Present() {
 		return nil, ErrNoCredential
 	}
-	if models, err, hit := c.cached(); hit {
+	key := cred.cacheKey()
+	if models, err, hit := c.cached(key); hit {
 		return models, err
 	}
 
 	models, err := c.fetch(ctx, cred)
 	if err != nil {
-		c.rememberFailure(err)
+		c.rememberFailure(key, err)
 		return nil, err
 	}
-	c.rememberSuccess(models)
+	c.rememberSuccess(key, models)
 	return cloneCatalog(models), nil
 }
 
-// cached returns a live cache entry, positive or negative. hit=false means the
-// caller must fetch.
-func (c *CatalogClient) cached() (models []CatalogModel, err error, hit bool) {
+// cached returns a live cache entry, positive or negative, for the credential
+// fingerprint key. hit=false means the caller must fetch — including when the
+// held entry belongs to a different credential.
+func (c *CatalogClient) cached(key string) (models []CatalogModel, err error, hit bool) {
 	now := c.now()
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.credKey != key {
+		return nil, nil, false
+	}
 	if now.Before(c.badUntil) && c.err != nil {
 		return nil, c.err, true
 	}
@@ -290,19 +315,21 @@ func (c *CatalogClient) cached() (models []CatalogModel, err error, hit bool) {
 	return nil, nil, false
 }
 
-func (c *CatalogClient) rememberSuccess(models []CatalogModel) {
+func (c *CatalogClient) rememberSuccess(key string, models []CatalogModel) {
 	now := c.now()
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.credKey = key
 	c.models = cloneCatalog(models)
 	c.goodUntil = now.Add(c.ttl)
 	c.err, c.badUntil = nil, time.Time{}
 }
 
-func (c *CatalogClient) rememberFailure(err error) {
+func (c *CatalogClient) rememberFailure(key string, err error) {
 	now := c.now()
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.credKey = key
 	c.err = err
 	c.badUntil = now.Add(c.negTTL)
 	// A stale success is deliberately dropped rather than served past its TTL:
@@ -331,6 +358,7 @@ func (c *CatalogClient) ResetCache() {
 	defer c.mu.Unlock()
 	c.models, c.goodUntil = nil, time.Time{}
 	c.err, c.badUntil = nil, time.Time{}
+	c.credKey = ""
 }
 
 func (c *CatalogClient) fetch(ctx context.Context, cred Credential) ([]CatalogModel, error) {

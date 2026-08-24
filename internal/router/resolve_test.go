@@ -204,3 +204,72 @@ func TestResolveCatalogSlugEndingInAnEffortWord(t *testing.T) {
 		t.Errorf(`Resolve("sol-high") = %+v, want gpt-5.6-sol with effort high`, suffixed)
 	}
 }
+
+// TestCompatPrefixFallsThroughToTheRawSlug: discovery emits
+// "anthropic-compat.<raw-slug>" for any catalog model the registry has no
+// derived alias for (a hidden model, or one that arrived between refreshes).
+// That id is routable through the picker tier — which is in memory only. Once
+// the tier is gone the compat branch must still place the remainder, or the user
+// hard-404s on a row utraque itself served.
+func TestCompatPrefixFallsThroughToTheRawSlug(t *testing.T) {
+	cases := []struct {
+		name, model, wantUpstream, wantEffort string
+	}{
+		{"unaliased raw slug", "anthropic-compat.gpt-5.9-nova", "gpt-5.9-nova", ""},
+		{"unaliased raw slug with effort", "anthropic-compat.gpt-5.9-nova-high", "gpt-5.9-nova", "high"},
+		{"two-token tail the grammar cannot parse", "anthropic-compat.gpt-5.3-codex-spark", "gpt-5.3-codex-spark", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// An empty registry: no aliases, no picker routes. This is exactly the
+			// state a freshly restarted daemon is in before its first catalog read.
+			dec, err := router.ResolveWith(router.NewRegistry(), tc.model, "")
+			if err != nil {
+				t.Fatalf("ResolveWith(%q): %v", tc.model, err)
+			}
+			if dec.Backend != router.BackendCodex {
+				t.Errorf("backend = %q, want codex", dec.Backend)
+			}
+			if dec.UpstreamModel != tc.wantUpstream {
+				t.Errorf("upstream = %q, want %q", dec.UpstreamModel, tc.wantUpstream)
+			}
+			if dec.Effort != tc.wantEffort {
+				t.Errorf("effort = %q, want %q", dec.Effort, tc.wantEffort)
+			}
+		})
+	}
+}
+
+// TestCompatPrefixStillRejectsNonCodexNames: the fallthrough must not turn the
+// compat namespace into a catch-all. Only gpt-shaped remainders are placed.
+func TestCompatPrefixStillRejectsNonCodexNames(t *testing.T) {
+	for _, model := range []string{"anthropic-compat.banana", "anthropic-compat.claude-sonnet-5", "anthropic-compat."} {
+		if dec, err := router.ResolveWith(router.NewRegistry(), model, ""); err == nil {
+			t.Errorf("ResolveWith(%q) = %+v, want an unknown-model error", model, dec)
+		}
+	}
+}
+
+// TestResolveWithUsesTheGivenRegistry: resolution reads the registry it is
+// handed, so a caller that registers routes in its own registry can resolve
+// them. A nil registry falls back to DefaultRegistry, which is what Resolve
+// itself does.
+func TestResolveWithUsesTheGivenRegistry(t *testing.T) {
+	reg := router.NewRegistry()
+	reg.LoadCatalog([]router.CatalogEntry{{Slug: "gpt-9.9-nova"}})
+
+	dec, err := router.ResolveWith(reg, "nova", "")
+	if err != nil {
+		t.Fatalf(`ResolveWith(reg, "nova"): %v`, err)
+	}
+	if dec.UpstreamModel != "gpt-9.9-nova" {
+		t.Errorf("upstream = %q, want gpt-9.9-nova", dec.UpstreamModel)
+	}
+	// The same name against the process registry, which never saw that slug.
+	if _, err := router.Resolve("nova", ""); err == nil {
+		t.Error(`Resolve("nova") resolved against DefaultRegistry; the registries are not isolated`)
+	}
+	if _, err := router.ResolveWith(nil, "sol", ""); err != nil {
+		t.Errorf("a nil registry should fall back to DefaultRegistry: %v", err)
+	}
+}

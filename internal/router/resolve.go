@@ -62,6 +62,16 @@ var effortLevels = map[string]bool{
 	"xhigh":  true,
 }
 
+// KnownEffort reports whether level is a reasoning-effort token
+// ParseEffortSuffix can split back off a model name.
+//
+// internal/discovery consults it before emitting an "<alias>-<effort>" picker
+// row: a row whose effort token cannot be parsed back is only routable while the
+// in-memory picker tier that recorded it survives, so it must not be advertised
+// at all. Advertising a row that dies at the next restart is worse than not
+// offering it.
+func KnownEffort(level string) bool { return effortLevels[strings.ToLower(level)] }
+
 // ParseEffortSuffix splits a trailing "-<level>" reasoning-effort suffix
 // off name, e.g. "sol-high" -> ("sol", "high", true) and
 // "sol-5.6-high" -> ("sol-5.6", "high", true). name is expected to already
@@ -98,13 +108,27 @@ var DefaultRegistry = NewStaticRegistry()
 // catalog, per the plan's stated precedence order) once that header
 // convention is decided.
 func Resolve(model string, betaHeader string) (Decision, error) {
+	return ResolveWith(DefaultRegistry, model, betaHeader)
+}
+
+// ResolveWith is Resolve against an explicit registry.
+//
+// It exists so the registry a caller WRITES is the registry resolution READS.
+// internal/discovery takes a *Registry and registers a picker route for every
+// id it emits; before this existed, resolution always consulted
+// DefaultRegistry, so any non-default registry silently registered rows that
+// could never resolve — production worked only because it passes nil.
+func ResolveWith(reg *Registry, model string, betaHeader string) (Decision, error) {
 	_ = betaHeader // TODO(phase 3/4): see doc comment above.
 
+	if reg == nil {
+		reg = DefaultRegistry
+	}
 	trimmed := strings.TrimSpace(model)
 	lower := strings.ToLower(trimmed)
 
 	if lower == "" {
-		return Decision{}, unknownModelError(trimmed)
+		return Decision{}, unknownModelError(reg, trimmed)
 	}
 
 	// The picker tier is authoritative and so is consulted first: these are
@@ -113,7 +137,7 @@ func Resolve(model string, betaHeader string) (Decision, error) {
 	// a worse answer than the mapping discovery recorded when it emitted the
 	// row. The tier is empty until discovery runs, so a bare proxy is
 	// unaffected.
-	if dec, ok := resolvePicker(lower, trimmed); ok {
+	if dec, ok := resolvePicker(reg, lower, trimmed); ok {
 		return dec, nil
 	}
 
@@ -122,10 +146,18 @@ func Resolve(model string, betaHeader string) (Decision, error) {
 	// contains "anthropic". Strip it and resolve the remainder as a Codex
 	// alias only — this namespace never means "route to Anthropic".
 	if rest, isCompat := strings.CutPrefix(lower, anthropicCompatPrefix); isCompat {
-		if dec, ok := resolveCodex(rest, trimmed); ok {
+		if dec, ok := resolveCodex(reg, rest, trimmed); ok {
 			return dec, nil
 		}
-		return Decision{}, unknownModelError(trimmed)
+		// The remainder is a raw slug the registry has not seen — which is what
+		// discovery emits for any catalog model it has no derived alias for. The
+		// picker tier that made it routable is in memory only, so without this
+		// fallthrough the id dies at the next daemon restart and the user gets a
+		// hard 404 on a row utraque itself served.
+		if dec, ok := resolveGPTSlug(rest, trimmed); ok {
+			return dec, nil
+		}
+		return Decision{}, unknownModelError(reg, trimmed)
 	}
 
 	if isAnthropicName(lower) {
@@ -136,29 +168,36 @@ func Resolve(model string, betaHeader string) (Decision, error) {
 		}, nil
 	}
 
-	if dec, ok := resolveCodex(lower, trimmed); ok {
+	if dec, ok := resolveCodex(reg, lower, trimmed); ok {
 		return dec, nil
 	}
 
-	// Generic "gpt-*" fallback: not a known alias yet, but shaped like a
-	// Codex slug, so route it there as raw-slug passthrough. Phase 3's live
-	// catalog will confirm or reject it upstream; router doesn't validate
-	// existence beyond the registry it has today.
-	if strings.HasPrefix(lower, "gpt-") {
-		base, effort, hasEffort := ParseEffortSuffix(lower)
-		dec := Decision{
-			Backend:       BackendCodex,
-			UpstreamModel: base,
-			ClientModel:   trimmed,
-		}
-		if hasEffort {
-			dec.Effort = effort
-			dec.EffortSource = EffortSourceSuffix
-		}
+	if dec, ok := resolveGPTSlug(lower, trimmed); ok {
 		return dec, nil
 	}
 
-	return Decision{}, unknownModelError(trimmed)
+	return Decision{}, unknownModelError(reg, trimmed)
+}
+
+// resolveGPTSlug is the generic "gpt-*" fallback: not a known alias, but shaped
+// like a Codex slug, so route it there as raw-slug passthrough. The live catalog
+// confirms or rejects it upstream; router does not validate existence beyond the
+// registry it holds.
+func resolveGPTSlug(lower, clientModel string) (Decision, bool) {
+	if !strings.HasPrefix(lower, "gpt-") {
+		return Decision{}, false
+	}
+	base, effort, hasEffort := ParseEffortSuffix(lower)
+	dec := Decision{
+		Backend:       BackendCodex,
+		UpstreamModel: base,
+		ClientModel:   clientModel,
+	}
+	if hasEffort {
+		dec.Effort = effort
+		dec.EffortSource = EffortSourceSuffix
+	}
+	return dec, true
 }
 
 // resolvePicker resolves an id against the registry's picker tier — the
@@ -169,8 +208,8 @@ func Resolve(model string, betaHeader string) (Decision, error) {
 // UpstreamModel; that becomes the Decision's ClientModel so a leg that does
 // rewrite the body has the name Anthropic will accept, and Decision.
 // UpstreamModel stays empty as the Anthropic backend's contract requires.
-func resolvePicker(lower, clientModel string) (Decision, bool) {
-	route, ok := DefaultRegistry.PickerRoute(lower)
+func resolvePicker(reg *Registry, lower, clientModel string) (Decision, bool) {
+	route, ok := reg.PickerRoute(lower)
 	if !ok {
 		return Decision{}, false
 	}
@@ -193,13 +232,13 @@ func resolvePicker(lower, clientModel string) (Decision, bool) {
 // name against DefaultRegistry, after stripping any effort suffix. ok=false
 // means no registry match — callers fall through to the generic "gpt-*"
 // passthrough or to the unknown-model error.
-func resolveCodex(lower string, clientModel string) (Decision, bool) {
+func resolveCodex(reg *Registry, lower string, clientModel string) (Decision, bool) {
 	// The whole name is tried against the registry first. A catalog slug whose
 	// own last token happens to be an effort word ("gpt-5.7-max") must resolve
 	// to itself, not be split into a different — and nonexistent — model with
 	// an effort of "max". A name the catalog serves verbatim is never a
 	// suffixed form of something else.
-	if upstream, ok := DefaultRegistry.Resolve(lower); ok {
+	if upstream, ok := reg.Resolve(lower); ok {
 		return Decision{
 			Backend:       BackendCodex,
 			UpstreamModel: upstream,
@@ -213,7 +252,7 @@ func resolveCodex(lower string, clientModel string) (Decision, bool) {
 		return Decision{}, false
 	}
 
-	upstream, ok := DefaultRegistry.Resolve(base)
+	upstream, ok := reg.Resolve(base)
 	if !ok {
 		return Decision{}, false
 	}
@@ -230,7 +269,7 @@ func resolveCodex(lower string, clientModel string) (Decision, bool) {
 // unknownModelError builds the 404 Anthropic-shaped error main renders for
 // a model Resolve couldn't place in any backend, listing the known route
 // families so the caller can see what would have worked.
-func unknownModelError(model string) error {
-	families := append([]string{"claude-*", "anthropic-*", "gpt-*"}, DefaultRegistry.Families()...)
+func unknownModelError(reg *Registry, model string) error {
+	families := append([]string{"claude-*", "anthropic-*", "gpt-*"}, reg.Families()...)
 	return apierr.UnknownModel(model, families)
 }
