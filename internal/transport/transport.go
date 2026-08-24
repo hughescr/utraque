@@ -1,20 +1,78 @@
 // Package transport builds the HTTP clients the upstream legs use. It exists
-// as an interface so a uTLS Chrome-impersonation dialer can replace the
-// standard one if Cloudflare ever fingerprint-gates an upstream.
+// as an interface so a uTLS Chrome-fingerprint dialer can replace the standard
+// one if Cloudflare ever fingerprint-gates an upstream.
+//
+// Three implementations exist:
+//
+//   - NewStd  — the standard library. The default, and the one everything else
+//     was built and live-verified against.
+//   - NewUTLS — a Chrome-shaped TLS ClientHello, for a fingerprint gate.
+//   - NewAuto — std until a gate is reported, uTLS from then on, once.
+//
+// Only the TLS handshake ever differs. No implementation invents a browser
+// User-Agent, a cookie, or any other header: the request identity stays the
+// honest codex_cli_rs originator the Codex CLI itself sends.
 package transport
 
 import (
+	"crypto/tls"
+	"crypto/x509"
+	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 )
 
-// Kinds of HTTP transport. KindUTLS is reserved for the phase-8 Cloudflare
-// fallback; only KindStd is implemented today.
+// Kinds of HTTP transport. A Kind names the TLS stack that actually carried a
+// request, which is what the request log records; it is not the configured
+// mode (auto reports whichever of the two is live).
 const (
 	KindStd  = "std"
 	KindUTLS = "utls"
 )
+
+// Modes are the configured transport selections, i.e. the accepted values of
+// codex.transport. They are plain strings because config validates them
+// without importing this package; the two lists must stay in step, which
+// TestModeValuesAreStable pins on this side.
+const (
+	// ModeStd always uses the standard library transport.
+	ModeStd = "std"
+	// ModeUTLS always uses the Chrome-fingerprint transport. Diagnostic and
+	// break-glass; it is never the default.
+	ModeUTLS = "utls"
+	// ModeAuto starts on std and switches to uTLS, once, if the upstream ever
+	// answers with a bot/TLS gate. This is the default.
+	ModeAuto = "auto"
+)
+
+// honestOriginator is the client identity the Codex leg sends. It is named in
+// the auto-switch warning to make the scope of the switch explicit: uTLS
+// changes the TLS handshake and nothing else.
+const honestOriginator = "codex_cli_rs"
+
+// New builds the transport named by mode. An empty mode is ModeAuto.
+//
+// log receives the auto transport's switch warning; nil means slog.Default.
+func New(mode string, opts Options, log *slog.Logger) (Transport, error) {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "", ModeAuto:
+		return NewAuto(opts, log), nil
+	case ModeStd:
+		return NewStd(opts), nil
+	case ModeUTLS:
+		return NewUTLS(opts), nil
+	default:
+		return nil, fmt.Errorf("utraque/transport: unknown mode %q: want %s|%s|%s", mode, ModeAuto, ModeStd, ModeUTLS)
+	}
+}
+
+// noRedirect is the redirect policy every implementation shares: report the 3xx
+// to the caller rather than following it. Following one would silently re-send
+// the caller's Authorization bearer token to whatever host upstream named.
+func noRedirect(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 
 // Transport hands out a configured *http.Client. Implementations build the
 // client once and return the same instance from every Client() call so
@@ -39,6 +97,13 @@ type Options struct {
 	// own Accept-Encoding is forwarded and the upstream body must reach the
 	// client byte-for-byte, still encoded as upstream sent it.
 	DisableCompression bool
+
+	// RootCAs replaces the system trust store. Nil — always, in production —
+	// means the system store. It exists so a test can point a transport at an
+	// httptest TLS server, which is the only way to exercise the uTLS handshake
+	// without contacting a real host. It can only ADD trust for a named CA; no
+	// option here can switch certificate verification off.
+	RootCAs *x509.CertPool
 }
 
 // DefaultOptions returns the tuned defaults used by the proxy.
@@ -116,12 +181,13 @@ func NewStd(opts Options) Transport {
 		DisableCompression:    o.DisableCompression,
 		ExpectContinueTimeout: 1 * time.Second,
 	}
+	if o.RootCAs != nil {
+		ht.TLSClientConfig = &tls.Config{RootCAs: o.RootCAs, MinVersion: tls.VersionTLS12}
+	}
 	return &stdTransport{
 		client: &http.Client{
-			Transport: ht,
-			CheckRedirect: func(*http.Request, []*http.Request) error {
-				return http.ErrUseLastResponse
-			},
+			Transport:     ht,
+			CheckRedirect: noRedirect,
 		},
 	}
 }
