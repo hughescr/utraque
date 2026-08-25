@@ -59,6 +59,15 @@ request; `utraque` forwards that request byte-for-byte to
 `anthropic-beta` headers. The proxy stores no Anthropic secret of its own —
 the credential lives entirely in the client and passes through untouched.
 
+A response body is relayed exactly as upstream encoded it, compression
+included. So when a stream dies part-way — a dropped link, an upstream that
+goes silent past the idle timeout — `utraque` drops the connection rather than
+closing the response tidily. A tidy close would tell the client it had received
+the whole body, and a client that then failed to decompress the truncated
+remains would report a corrupt response instead of the network fault it was. A
+dropped connection is the honest signal, and every HTTP client already retries
+one.
+
 **Codex/GPT leg.** Rather than a metered API key, this leg
 reads the Codex CLI's own login token from `~/.codex/auth.json`, refreshes it
 when it's near expiry (writing the refreshed token back to that file safely,

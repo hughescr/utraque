@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -20,6 +21,7 @@ import (
 	"github.com/hughescr/utraque/internal/anthropic/schema"
 	"github.com/hughescr/utraque/internal/apierr"
 	"github.com/hughescr/utraque/internal/config"
+	"github.com/hughescr/utraque/internal/obs"
 	"github.com/hughescr/utraque/internal/server"
 )
 
@@ -707,5 +709,80 @@ func TestHealthzReportsMissingCodexAuthWithoutAuthFile(t *testing.T) {
 	}
 	if health.CodexCatalog.Models != 0 {
 		t.Errorf("codex_catalog.models = %d, want 0", health.CodexCatalog.Models)
+	}
+}
+
+// TestMidStreamFailureAbortsTheConnectionAndStillLogs covers the same
+// truncation contract as the passthrough leg's own test, but through the real
+// dispatcher and the full middleware chain — which is where the two risks of
+// answering with a panic live.
+//
+// The first is the client-visible one: a body cut short must reach the caller
+// as an unfinished transfer, not as a complete one. The second is ours: the
+// abort unwinds through every middleware, so the access-log line — written from
+// a defer in withObserve, above the recover middleware that re-panics
+// http.ErrAbortHandler — must still be emitted. A request that vanishes from
+// the log is how a proxy stops being diagnosable.
+func TestMidStreamFailureAbortsTheConnectionAndStillLogs(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		rc := http.NewResponseController(w)
+		_, _ = fmt.Fprint(w, "event: message_start\ndata: {\"type\":\"message_start\"}\n\n")
+		_ = rc.Flush()
+		// The upstream link dies with the body half-sent.
+		panic(http.ErrAbortHandler)
+	}))
+	defer upstream.Close()
+
+	logs := &syncBuffer{}
+	log, err := obs.NewLogger(logs, slog.LevelInfo, "json")
+	if err != nil {
+		t.Fatalf("obs.NewLogger: %v", err)
+	}
+	cfg := config.Default()
+	cfg.Anthropic.BaseURL = upstream.URL
+	srv, err := newServer(cfg, log, nil)
+	if err != nil {
+		t.Fatalf("newServer: %v", err)
+	}
+	front := httptest.NewServer(srv)
+	defer front.Close()
+
+	resp := post(t, front.URL+"/v1/messages",
+		`{"model":"claude-sonnet-4-5-20250929","max_tokens":16,"stream":true,`+
+			`"messages":[{"role":"user","content":"hi"}]}`, nil)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200: the failure must arrive after the headers", resp.StatusCode)
+	}
+	body, readErr := io.ReadAll(resp.Body)
+	if readErr == nil {
+		t.Fatalf("read the body to a clean EOF (%q); a truncated body must not be reported as complete", body)
+	}
+	if !errors.Is(readErr, io.ErrUnexpectedEOF) {
+		t.Fatalf("reading the body = %v, want io.ErrUnexpectedEOF from the aborted transfer", readErr)
+	}
+
+	// The access-log line is written as the panic unwinds, which can land after
+	// the client's read returns. Poll rather than assume an ordering.
+	deadline := time.Now().Add(2 * time.Second)
+	var got string
+	for {
+		got = logs.String()
+		if strings.Contains(got, `"msg":"request"`) || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !strings.Contains(got, `"msg":"request"`) {
+		t.Fatalf("no access-log line after an aborted response; log was:\n%s", got)
+	}
+	if !strings.Contains(got, "aborting the connection") {
+		t.Errorf("log does not say the connection was aborted; log was:\n%s", got)
+	}
+	if strings.Contains(got, "panic recovered") {
+		t.Errorf("the abort was logged as a panic; http.ErrAbortHandler must pass through untouched:\n%s", got)
 	}
 }

@@ -939,8 +939,9 @@ func (d *dispatcher) dispatch(w http.ResponseWriter, r *http.Request, call legCa
 	}
 }
 
-// fail renders a leg's error, unless the leg already committed a status line —
-// appending an error envelope to a half-sent body would corrupt it.
+// fail renders a leg's error, unless the leg already committed a status line.
+// Appending an error envelope to a half-sent body would corrupt it; ending that
+// body cleanly would misreport it (see the ErrResponseStarted branch).
 func (d *dispatcher) fail(w http.ResponseWriter, r *http.Request, err error) {
 	ctx := r.Context()
 	log := obs.LoggerFrom(ctx)
@@ -952,9 +953,17 @@ func (d *dispatcher) fail(w http.ResponseWriter, r *http.Request, err error) {
 	} else {
 		sum.SetErr(err)
 	}
-	if errors.Is(err, router.ErrResponseStarted) || errors.Is(err, router.ErrClientGone) {
+	if errors.Is(err, router.ErrResponseStarted) {
 		log.LogAttrs(context.WithoutCancel(ctx), slog.LevelWarn,
-			"leg failed after the response started", slog.String("err", err.Error()))
+			"leg failed after the response started; aborting the connection",
+			slog.String("err", err.Error()))
+		router.AbortResponse()
+	}
+	if errors.Is(err, router.ErrClientGone) {
+		// Nothing was committed and there is no longer anyone to tell, so there
+		// is no body to truncate and no envelope worth writing.
+		log.LogAttrs(context.WithoutCancel(ctx), slog.LevelWarn,
+			"leg failed after the client went away", slog.String("err", err.Error()))
 		return
 	}
 	log.LogAttrs(ctx, slog.LevelWarn, "leg failed", slog.String("err", err.Error()))

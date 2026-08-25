@@ -2,6 +2,7 @@ package anthropic
 
 import (
 	"bufio"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -738,4 +739,55 @@ func TestUpstreamErrorDoesNotLogTheQueryString(t *testing.T) {
 		t.Fatalf("get: %v", err)
 	}
 	defer resp.Body.Close()
+}
+
+// TestUpstreamDyingMidStreamTruncatesTheClientTransfer pins the answer to a
+// failure that arrives after the response has started.
+//
+// Returning normally there would let net/http finish the response — on
+// HTTP/1.1, write the terminating zero-length chunk — telling the caller it
+// received a complete body when it did not. That misreports a dropped link as a
+// complete answer, and when the relayed body carries upstream's
+// Content-Encoding the caller's decompressor fails on the truncated stream and
+// blames the data instead of the network. The leg must abort the connection so
+// the caller sees the transfer for what it is: unfinished.
+func TestUpstreamDyingMidStreamTruncatesTheClientTransfer(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		rc := http.NewResponseController(w)
+		io.WriteString(w, "event: message_start\ndata: {\"type\":\"message_start\"}\n\n")
+		_ = rc.Flush()
+		// Drop the upstream connection with the body half-written, exactly as a
+		// network fault does. The leg's copy loop sees an unexpected EOF.
+		panic(http.ErrAbortHandler)
+	}))
+	defer upstream.Close()
+
+	proxy := httptest.NewServer(newTestLeg(t, upstream.URL))
+	defer proxy.Close()
+
+	resp, err := noRedirectClient().Post(proxy.URL+"/v1/messages", "application/json",
+		strings.NewReader(`{"stream":true}`))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200: the failure must arrive after the headers", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err == nil {
+		t.Fatalf("read the body to a clean EOF (%q); a truncated body must not be reported as complete", body)
+	}
+	if !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("reading the body = %v, want io.ErrUnexpectedEOF from the aborted transfer", err)
+	}
+	// What did arrive should still be the real bytes: aborting must not discard
+	// the part of the answer that did make it.
+	if !strings.Contains(string(body), "message_start") {
+		t.Errorf("body = %q, want the frames sent before the abort", body)
+	}
 }

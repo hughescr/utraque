@@ -210,8 +210,13 @@ func (l *Leg) CountTokens(w http.ResponseWriter, r *http.Request, rq *router.Req
 // relayed upstream unchanged.
 func (l *Leg) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err := l.forward(w, r, nil); err != nil {
-		if errors.Is(err, ErrResponseStarted) || errors.Is(err, ErrClientGone) {
-			l.log.WarnContext(r.Context(), "anthropic passthrough failed after response started",
+		if errors.Is(err, ErrResponseStarted) {
+			l.log.WarnContext(r.Context(), "anthropic passthrough failed after response started; aborting the connection",
+				"path", r.URL.Path, "err", err)
+			router.AbortResponse()
+		}
+		if errors.Is(err, ErrClientGone) {
+			l.log.WarnContext(r.Context(), "anthropic passthrough failed after the client went away",
 				"path", r.URL.Path, "err", err)
 			return
 		}

@@ -24,6 +24,27 @@ var (
 	ErrClientGone = errors.New("utraque: client went away")
 )
 
+// AbortResponse tears down the caller's connection instead of letting net/http
+// finish the response.
+//
+// It is the required answer to ErrResponseStarted. A handler that simply
+// returns after a half-sent body lets net/http complete the response properly
+// — on HTTP/1.1 that means writing the terminating zero-length chunk — which
+// tells the caller it received the whole body. It did not. When the body is
+// compressed (the Anthropic passthrough relays upstream's Content-Encoding
+// byte-for-byte) the caller's decompressor then fails on the truncated stream
+// and it reports data corruption; a dropped network link is diagnosed as a
+// mangled response. Aborting instead closes the connection with no terminating
+// chunk, so the caller sees a truncated transfer: a network fault, which is
+// what it was, and which every HTTP client already knows how to retry.
+//
+// http.ErrAbortHandler is net/http's own signal for this and is suppressed by
+// its panic logger. It must reach the server: internal/server's recover
+// middleware re-panics it rather than swallowing it, and every middleware that
+// has cleanup to do — the access-log line, the trace file, the idle-timer hold
+// — does that cleanup in a defer, so unwinding past them loses nothing.
+func AbortResponse() { panic(http.ErrAbortHandler) }
+
 // Backend names one of the two upstream legs a request can be sent to.
 type Backend string
 
