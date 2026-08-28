@@ -525,6 +525,7 @@ func (l *Leg) logResult(ctx context.Context, log *slog.Logger, rq *router.Reques
 		sum.SetStopReason(res.StopReason)
 		if res.Terminated && !res.Errored {
 			sum.SetOutputTokens(res.OutputTokens)
+			sum.SetInputTokens(res.InputTokens, res.CachedInputTokens)
 		}
 	}
 
@@ -559,6 +560,11 @@ func logTranslation(ctx context.Context, log *slog.Logger, rq *router.Request, m
 		slog.String("effort_source", meta.Effort.Source),
 		slog.Bool("effort_clamped", meta.Effort.Clamped),
 		slog.Bool("parallel_tool_calls_disabled", meta.ParallelToolCallsDisabled),
+	}
+	if meta.ReasoningReplayed > 0 || meta.ReasoningUnreplayable > 0 {
+		attrs = append(attrs,
+			slog.Int("reasoning_replayed", meta.ReasoningReplayed),
+			slog.Int("reasoning_unreplayable", meta.ReasoningUnreplayable))
 	}
 	if len(meta.Dropped) > 0 {
 		attrs = append(attrs, slog.Any("dropped", meta.Dropped))

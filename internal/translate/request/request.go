@@ -16,11 +16,14 @@ package request
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
 
+	"github.com/hughescr/utraque/internal/anthropic"
 	aschema "github.com/hughescr/utraque/internal/anthropic/schema"
 	cschema "github.com/hughescr/utraque/internal/codex/schema"
 	"github.com/hughescr/utraque/internal/router"
@@ -70,6 +73,26 @@ const (
 	// has no effect — but the package's contract is that every drop is recorded.
 	DroppedThinking = "thinking"
 )
+
+// billingHeaderPrefix marks a system block Claude Code prepends carrying its own
+// billing metadata for Anthropic — client version, entrypoint, a prompt id, and
+// a "cch" value that CHANGES ON EVERY TURN of a conversation.
+//
+// It is dropped from the Codex leg's instructions, for two reasons that point
+// the same way. It is addressed to Anthropic's billing system and means nothing
+// to the Codex backend, so it is not instruction content by any reading. And it
+// sits FIRST, so a value that changes every turn changes the opening tokens of
+// every prompt — which is the one place a prefix cache cannot tolerate a change.
+// Left in, it would invalidate the whole cached prefix from its first token, and
+// no amount of reasoning replay further down would matter.
+//
+// The Anthropic leg is untouched: that is a byte-for-byte passthrough, and the
+// header reaches Anthropic exactly as Claude Code wrote it.
+const billingHeaderPrefix = "x-anthropic-billing-header:"
+
+// DroppedBillingHeader records that a client billing-metadata system block was
+// dropped from the instructions. See billingHeaderPrefix.
+const DroppedBillingHeader = "system:billing-header"
 
 // DroppedImageEmptyMediaType is the Metadata.DroppedImages reason recorded
 // when a base64 image block's media_type or data is empty. Emitting a data
@@ -149,6 +172,18 @@ type Metadata struct {
 	// was dropped instead of emitted. The image itself is NOT emitted — this
 	// is the only trace that it existed in the request.
 	DroppedImages []string
+
+	// ReasoningReplayed counts assistant thinking blocks that carried replayable
+	// encrypted reasoning and were emitted as reasoning input items.
+	// ReasoningUnreplayable counts those that carried none and were dropped.
+	// Together they are the health of the prompt cache: a conversation whose
+	// reasoning is replayed keeps matching the cached prefix as it grows, and one
+	// whose reasoning is not stops matching at its first assistant turn.
+	ReasoningReplayed     int
+	ReasoningUnreplayable int
+	// PromptCacheKey is the key sent as prompt_cache_key, recorded so a log line
+	// can show which prefix a request claimed.
+	PromptCacheKey string
 }
 
 // Translate converts an Anthropic Messages request into a Codex Responses
@@ -171,14 +206,22 @@ func Translate(req *aschema.MessagesRequest, dec router.Decision, model cschema.
 		Stream:       true,
 	}
 
-	input, orphans, droppedImages, systemRemapped, err := translateMessages(req.Messages)
+	walk, err := translateMessages(req.Messages)
 	if err != nil {
 		return nil, Metadata{}, err
 	}
-	out.Input = input
-	meta.OrphanedToolResults = orphans
-	meta.DroppedImages = droppedImages
-	meta.SystemMessagesRemapped = systemRemapped
+	out.Input = walk.items
+	meta.OrphanedToolResults = walk.orphans
+	meta.DroppedImages = walk.droppedImages
+	meta.SystemMessagesRemapped = walk.systemRemapped
+	meta.ReasoningReplayed = walk.reasoningReplayed
+	meta.ReasoningUnreplayable = walk.reasoningUnreplayable
+
+	// Ask for every reasoning item's encrypted content. Under store:false it is
+	// the only form of a reasoning item that can be replayed on the next turn,
+	// and replaying it is what keeps the backend's prompt cache matching past
+	// the first assistant message.
+	out.Include = []string{cschema.IncludeReasoningEncryptedContent}
 
 	out.Tools = translateTools(req.Tools)
 	out.ToolChoice = translateToolChoice(req.ToolChoice)
@@ -195,6 +238,10 @@ func Translate(req *aschema.MessagesRequest, dec router.Decision, model cschema.
 	}
 
 	out.Reasoning, meta.Effort, meta.Summary = translateReasoning(dec, model, opts)
+
+	// The cache key is derived last, once the parts it names are all in place.
+	out.PromptCacheKey = promptCacheKey(out)
+	meta.PromptCacheKey = out.PromptCacheKey
 
 	meta.Dropped = droppedParams(req)
 	meta.Dropped = append(meta.Dropped, systemDropped...)
@@ -215,6 +262,10 @@ func joinSystem(system *aschema.Content) (instructions string, dropped []string)
 	parts := make([]string, 0, len(system.Blocks))
 	for _, b := range system.Blocks {
 		if b.Type == aschema.BlockText {
+			if strings.HasPrefix(strings.TrimSpace(b.Text), billingHeaderPrefix) {
+				dropped = append(dropped, DroppedBillingHeader)
+				continue
+			}
 			parts = append(parts, b.Text)
 		} else {
 			dropped = append(dropped, "system:"+b.Type)
@@ -236,7 +287,28 @@ func joinSystem(system *aschema.Content) (instructions string, dropped []string)
 // rather than grouping all outputs before all images. This is pinned by the
 // two_image_tool_results golden fixture rather than changed, to avoid
 // reordering call_id/output linkage without a concrete need.
-func translateMessages(messages []aschema.Message) (items []cschema.InputItem, orphans []string, droppedImages []string, systemRemapped int, err error) {
+// messagesResult is what one walk of the conversation produced: the Responses
+// input items, plus everything about the walk the caller has to record in
+// Metadata. It is a struct rather than a run of return values because the walk
+// now reports on reasoning replay as well, and six positional results is a
+// signature nobody can read.
+type messagesResult struct {
+	items          []cschema.InputItem
+	orphans        []string
+	droppedImages  []string
+	systemRemapped int
+	// reasoningReplayed counts thinking blocks that carried replayable encrypted
+	// reasoning and became reasoning input items. reasoningUnreplayable counts
+	// those that did not and were dropped — the two together are the prompt
+	// cache's health, so both are logged.
+	reasoningReplayed     int
+	reasoningUnreplayable int
+}
+
+func translateMessages(messages []aschema.Message) (messagesResult, error) {
+	var items []cschema.InputItem
+	var orphans, droppedImages []string
+	var systemRemapped, replayed, unreplayable int
 	seenCalls := map[string]bool{}
 
 	for mi := range messages {
@@ -282,7 +354,7 @@ func translateMessages(messages []aschema.Message) (items []cschema.InputItem, o
 			case aschema.BlockImage:
 				url, drop, ierr := imageURL(blk.Source)
 				if ierr != nil {
-					return nil, nil, nil, 0, ierr
+					return messagesResult{}, ierr
 				}
 				if drop {
 					droppedImages = append(droppedImages, DroppedImageEmptyMediaType)
@@ -294,7 +366,7 @@ func translateMessages(messages []aschema.Message) (items []cschema.InputItem, o
 				flush()
 				args, aerr := toolArguments(blk.Input)
 				if aerr != nil {
-					return nil, nil, nil, 0, aerr
+					return messagesResult{}, aerr
 				}
 				seenCalls[blk.ID] = true
 				items = append(items, cschema.FunctionCall(blk.ID, blk.Name, args))
@@ -306,7 +378,7 @@ func translateMessages(messages []aschema.Message) (items []cschema.InputItem, o
 				}
 				text, images, imgDropped, terr := flattenToolResult(blk.Content)
 				if terr != nil {
-					return nil, nil, nil, 0, terr
+					return messagesResult{}, terr
 				}
 				droppedImages = append(droppedImages, imgDropped...)
 				if blk.IsError {
@@ -328,9 +400,30 @@ func translateMessages(messages []aschema.Message) (items []cschema.InputItem, o
 				}
 
 			case aschema.BlockThinking, aschema.BlockRedactedThinking:
-				// Reasoning history is dropped: with store:false it can't be
-				// replayed, and a synthetic signature would be rejected on a
-				// later Claude turn.
+				// A thinking block utraque itself minted carries the reasoning
+				// item's encrypted_content in its signature (or, for a redacted
+				// block, its data). Replaying it as a reasoning item keeps the
+				// prompt identical to the token sequence the model actually saw,
+				// which is what lets the backend's prompt cache keep matching
+				// past the first assistant turn instead of stopping there for the
+				// rest of the conversation.
+				//
+				// Anything else is still dropped. A genuine Anthropic-signed
+				// block from a Claude turn is not ours to replay, and one of ours
+				// minted before its encrypted content arrived (a stream that
+				// broke early, or a response predating the include) carries
+				// nothing to replay. Both cost a cache miss, never correctness.
+				sig := blk.Signature
+				if blk.Type == aschema.BlockRedactedThinking {
+					sig = blk.Data
+				}
+				if id, enc, ok := anthropic.DecodeReasoningSignature(sig); ok {
+					flush()
+					items = append(items, cschema.ReasoningItem(id, enc))
+					replayed++
+				} else {
+					unreplayable++
+				}
 
 			default:
 				// Unknown block types are skipped rather than fatal — an input
@@ -341,7 +434,14 @@ func translateMessages(messages []aschema.Message) (items []cschema.InputItem, o
 		flush()
 	}
 
-	return items, orphans, droppedImages, systemRemapped, nil
+	return messagesResult{
+		items:                 items,
+		orphans:               orphans,
+		droppedImages:         droppedImages,
+		systemRemapped:        systemRemapped,
+		reasoningReplayed:     replayed,
+		reasoningUnreplayable: unreplayable,
+	}, nil
 }
 
 // imageURL renders an Anthropic image source as a Responses input_image URL: a
@@ -610,4 +710,46 @@ func droppedParams(req *aschema.MessagesRequest) []string {
 		dropped = append(dropped, DroppedThinking)
 	}
 	return dropped
+}
+
+// promptCacheKey names the prompt PREFIX this request shares with the other
+// turns of the same conversation.
+//
+// The backend routes a request to whichever machine already holds a cached
+// prefix by hashing the prompt's opening tokens, and spills to a different
+// machine when one prefix draws too much concurrent traffic. prompt_cache_key
+// makes that routing explicit instead of incidental, which matters here because
+// a fleet of subagents can put many conversations through one backend at once.
+//
+// It hashes exactly the part of a request that does NOT change as the
+// conversation grows: the model, the instructions, the tool declarations, and
+// the opening input item. Hashing anything later would mint a new key on every
+// turn, which is worse than sending no key at all — each turn would claim a
+// prefix nothing had cached under that name.
+//
+// A conversation whose opening item is rewritten (by the client compacting its
+// history, say) earns a new key. That is correct rather than unfortunate: the
+// prefix genuinely changed, so the old cache entry could not have matched it.
+func promptCacheKey(r *cschema.ResponsesRequest) string {
+	prefix := struct {
+		Model        string             `json:"model"`
+		Instructions string             `json:"instructions"`
+		Tools        []cschema.Tool     `json:"tools"`
+		First        *cschema.InputItem `json:"first,omitempty"`
+	}{Model: r.Model, Instructions: r.Instructions, Tools: r.Tools}
+	if len(r.Input) > 0 {
+		prefix.First = &r.Input[0]
+	}
+	// Marshalling rather than concatenating keeps the fields unambiguously
+	// separated: no run of tool schemas can be rearranged into the same bytes as
+	// a different run.
+	b, err := json.Marshal(prefix)
+	if err != nil {
+		// Every field here already survived being marshalled into the request
+		// body, so this cannot fire. An empty key omits prompt_cache_key rather
+		// than sending a key that names nothing.
+		return ""
+	}
+	sum := sha256.Sum256(b)
+	return "utq-" + hex.EncodeToString(sum[:16])
 }

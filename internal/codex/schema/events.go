@@ -117,6 +117,13 @@ type OutputItem struct {
 	Arguments string `json:"arguments,omitempty"`
 	Content   []Part `json:"content,omitempty"`
 	Summary   []Part `json:"summary,omitempty"`
+
+	// EncryptedContent is the opaque reasoning blob the backend issues only when
+	// the request asked for it with include: ["reasoning.encrypted_content"]. It
+	// is the ONLY part of a reasoning item that can be replayed under
+	// store:false, and replaying it is what keeps the prompt cache matching on
+	// the next turn.
+	EncryptedContent string `json:"encrypted_content,omitempty"`
 }
 
 // Response is the response object on created/in_progress/completed/incomplete/

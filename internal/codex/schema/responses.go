@@ -14,6 +14,7 @@ const (
 	ItemMessage            = "message"
 	ItemFunctionCall       = "function_call"
 	ItemFunctionCallOutput = "function_call_output"
+	ItemReasoning          = "reasoning"
 )
 
 // Content part types inside a message input item. The explicit
@@ -56,6 +57,13 @@ const (
 
 // ToolTypeFunction is the only tool type utraque emits.
 const ToolTypeFunction = "function"
+
+// IncludeReasoningEncryptedContent asks the backend to return each reasoning
+// item's encrypted_content. Under store:false it is the only way to get a
+// reasoning item back in a form that can be replayed on the next turn, and
+// replaying it is what keeps the prompt cache matching past the first assistant
+// message.
+const IncludeReasoningEncryptedContent = "reasoning.encrypted_content"
 
 // ContentPart is one element of a message item's content array. Only the field
 // belonging to the part Type is populated: Text for input_text/output_text,
@@ -109,6 +117,15 @@ type InputItem struct {
 	// function_call_output that omits output — while message/function_call items
 	// (nil here) leave the field off.
 	Output *string `json:"output,omitempty"`
+
+	// reasoning. A reasoning item is replayed verbatim from a previous turn so
+	// the prompt still matches the token sequence the model saw, which is what
+	// keeps the backend's prompt cache warm across an agentic loop. Summary is a
+	// pointer so a reasoning item serialises the required empty "summary":[]
+	// while every other item type omits the field.
+	ID               string              `json:"id,omitempty"`
+	Summary          *[]ReasoningSummary `json:"summary,omitempty"`
+	EncryptedContent string              `json:"encrypted_content,omitempty"`
 }
 
 // MessageItem builds a message input item with the given role and parts.
@@ -133,6 +150,28 @@ func FunctionCall(callID, name, arguments string) InputItem {
 // output field is present on the wire.
 func FunctionCallOutput(callID, output string) InputItem {
 	return InputItem{Type: ItemFunctionCallOutput, CallID: callID, Output: &output}
+}
+
+// ReasoningSummary is one element of a reasoning item's summary array. utraque
+// never replays summary text — the summary is prose for the reader, not part of
+// what the model needs to see again — so this exists only to give the required
+// empty array a type.
+type ReasoningSummary struct {
+	Type string `json:"type"`
+	Text string `json:"text,omitempty"`
+}
+
+// ReasoningItem builds a reasoning input item replaying a previous turn's
+// encrypted reasoning. summary is always the empty array: the backend requires
+// the field, and utraque has no summary worth replaying.
+func ReasoningItem(id, encryptedContent string) InputItem {
+	summary := []ReasoningSummary{}
+	return InputItem{
+		Type:             ItemReasoning,
+		ID:               id,
+		Summary:          &summary,
+		EncryptedContent: encryptedContent,
+	}
 }
 
 // Tool is a function tool declaration on a Responses request. Parameters is the
@@ -201,6 +240,8 @@ type ResponsesRequest struct {
 	ToolChoice        *ToolChoice `json:"tool_choice,omitempty"`
 	ParallelToolCalls *bool       `json:"parallel_tool_calls,omitempty"`
 	Reasoning         *Reasoning  `json:"reasoning,omitempty"`
+	Include           []string    `json:"include,omitempty"`
+	PromptCacheKey    string      `json:"prompt_cache_key,omitempty"`
 	Store             bool        `json:"store"`
 	Stream            bool        `json:"stream"`
 }

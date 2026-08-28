@@ -1,5 +1,6 @@
 {
   "model": "gpt-5.6-sol",
+  "instructions": "You are a helpful assistant.",
   "input": [
     {
       "type": "message",
@@ -10,6 +11,12 @@
           "text": "Which file holds the port?"
         }
       ]
+    },
+    {
+      "type": "reasoning",
+      "id": "rs_abc123",
+      "summary": [],
+      "encrypted_content": "ENCRYPTEDBLOBAAA=="
     },
     {
       "type": "message",
@@ -38,7 +45,7 @@
       "content": [
         {
           "type": "output_text",
-          "text": "It is in config.go."
+          "text": "It is config.go:41."
         }
       ]
     },
@@ -48,7 +55,7 @@
       "content": [
         {
           "type": "input_text",
-          "text": "Thanks. Anything else?"
+          "text": "Thanks."
         }
       ]
     }
@@ -59,7 +66,7 @@
   "include": [
     "reasoning.encrypted_content"
   ],
-  "prompt_cache_key": "utq-2dd995c017094f0016934a6498c97b55",
+  "prompt_cache_key": "utq-507508c4d8e8edbb2c44fe299546f59b",
   "store": false,
   "stream": true
 }

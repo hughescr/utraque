@@ -36,12 +36,15 @@ type Summary struct {
 	reqBytes       int64
 	upstreamStatus int
 	outputTokens   int
+	inputTokens    int
+	cachedTokens   int
 
 	stream      bool
 	interrupted bool
 
 	haveReqBytes     bool
 	haveOutputTokens bool
+	haveInputTokens  bool
 }
 
 // NewSummary builds an empty Summary.
@@ -112,6 +115,17 @@ func (s *Summary) SetOutputTokens(n int) {
 	s.set(func() { s.outputTokens, s.haveOutputTokens = n, true })
 }
 
+// SetInputTokens records the prompt token count and how much of it the upstream
+// served from its prompt cache.
+//
+// Both go on the request line because the RATIO is the diagnostic: a cached
+// count that stays flat while a conversation's input grows is what a broken
+// prompt-cache prefix looks like, and it is otherwise invisible until the
+// quota runs out.
+func (s *Summary) SetInputTokens(total, cached int) {
+	s.set(func() { s.inputTokens, s.cachedTokens, s.haveInputTokens = total, cached, true })
+}
+
 // SetStopReason records the Anthropic stop_reason the answer terminated with.
 func (s *Summary) SetStopReason(reason string) { s.set(func() { s.stopReason = reason }) }
 
@@ -172,6 +186,10 @@ func (s *Summary) Attrs() []slog.Attr {
 	}
 	if s.haveOutputTokens {
 		attrs = append(attrs, slog.Int("output_tokens", s.outputTokens))
+	}
+	if s.haveInputTokens {
+		attrs = append(attrs, slog.Int("input_tokens", s.inputTokens))
+		attrs = append(attrs, slog.Int("cache_read_input_tokens", s.cachedTokens))
 	}
 	str("stop_reason", s.stopReason)
 	attrs = append(attrs, slog.Bool("interrupted", s.interrupted))

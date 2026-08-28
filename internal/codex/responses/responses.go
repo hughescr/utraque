@@ -61,6 +61,11 @@ const (
 	headerOriginator    = "originator"
 	headerContentType   = "Content-Type"
 	headerAccept        = "Accept"
+	headerSessionID     = "session_id"
+
+	// promptCacheKeyPrefix is what request.promptCacheKey stamps on every key it
+	// mints. Only a key carrying it can name a conversation here.
+	promptCacheKeyPrefix = "utq-"
 
 	openAIBetaValue = "responses=experimental"
 	originatorValue = "codex_cli_rs"
@@ -215,6 +220,9 @@ func (c *Client) StreamResponse(ctx context.Context, cred auth.Credential, req *
 	httpReq.Header.Set(headerOriginator, originatorValue)
 	httpReq.Header.Set(headerContentType, contentTypeJSON)
 	httpReq.Header.Set(headerAccept, acceptSSE)
+	if sid := sessionID(req.PromptCacheKey); sid != "" {
+		httpReq.Header.Set(headerSessionID, sid)
+	}
 
 	// Which TLS stack this request is about to go out on. It is read HERE rather
 	// than captured by the server middleware at the top of the request: the
@@ -395,4 +403,30 @@ func (b *streamBody) Read(p []byte) (int, error) { return b.rc.Read(p) }
 func (b *streamBody) Close() error {
 	b.once.Do(func() { b.err = b.rc.Close() })
 	return b.err
+}
+
+// sessionID renders a conversation's prompt cache key as the UUID-shaped
+// session_id header the Codex CLI sends. The backend is undocumented and may
+// key cache affinity on the header rather than (or as well as) the body's
+// prompt_cache_key, so the two name the SAME conversation: one hash, two
+// spellings, and a request can never claim one identity in the header and a
+// different one in the body.
+//
+// An empty key yields an empty id and the header is omitted, which is what the
+// leg did before the key existed.
+func sessionID(promptCacheKey string) string {
+	digest, found := strings.CutPrefix(promptCacheKey, promptCacheKeyPrefix)
+	if !found || len(digest) != 32 {
+		return ""
+	}
+	// Only a key utraque minted can name a conversation, and only hex renders as
+	// a UUID. Anything else yields no id and the header is simply omitted, which
+	// is what the leg did before the key existed.
+	for i := 0; i < len(digest); i++ {
+		c := digest[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return ""
+		}
+	}
+	return digest[0:8] + "-" + digest[8:12] + "-" + digest[12:16] + "-" + digest[16:20] + "-" + digest[20:32]
 }

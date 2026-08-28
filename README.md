@@ -36,6 +36,11 @@ one session.
   login`, or point `UTRAQUE_CODEX_AUTH_FILE` at a file that holds a token. A
   request racing the idle exit can also see `503`; under launchd a retry
   activates a fresh daemon.
+- **The prompt cache is kept warm.** Reasoning items are replayed through the
+  client, and every request carries a `prompt_cache_key` and a matching
+  `session_id`. Without this the backend's cache stops matching at the first
+  assistant turn and an agentic loop re-reads its whole conversation every turn.
+  See *Prompt caching*.
 - **It runs unattended.** launchd holds the listening socket and starts
   `utraque` on the first connection; it exits after an idle hour and launchd
   re-activates it on the next request. See *Unattended, on demand* below.
@@ -364,14 +369,21 @@ trips a gate reads `std` and its successor reads `utls`.
 One structured line per request, on stderr (launchd captures it), carrying
 `request_id`, `method`, `path`, `status`, `req_bytes`, `resp_bytes`, `ttfb_ms`,
 `total_ms`, `route`, `client_model`, `upstream_model`, `effort`, `stream`,
-`upstream_status`, `output_tokens`, `stop_reason`, `interrupted`, `transport`,
-and `err` when there was one.
+`upstream_status`, `output_tokens`, `input_tokens`, `cache_read_input_tokens`,
+`stop_reason`, `interrupted`, `transport`, and `err` when there was one.
 
 Two of those fields earn their place by being *differences*. `upstream_status`
 is the status the BACKEND gave, which is not always the one you were answered
 with — an upstream 200 whose body carried no events becomes a 502 downstream,
 and an upstream 401 becomes a refresh and a retry. `interrupted` separates "you
 hung up" from "it broke", so a cancelled turn never reads as an incident.
+
+`input_tokens` and `cache_read_input_tokens` are the pair to watch on the Codex
+leg, because their RATIO is the only visible sign of whether the prompt cache is
+working. In a healthy agentic loop the cached count tracks the input count as
+the conversation grows. A cached count that stays FLAT while the input climbs
+means the replayed history has stopped matching what the model saw, and every
+turn is paying full price for the whole conversation — see *Prompt caching*.
 
 **Redaction is by allowlist.** Exactly four request headers may be logged with
 their values — `anthropic-version`, `anthropic-beta`, `content-type`,
@@ -413,6 +425,92 @@ A caller-supplied `X-Request-Id` is echoed back, logged, and used to name the
 trace files, so an id that is itself credential-shaped is refused and a
 generated one used instead. That is a backstop and not a guarantee: an opaque
 high-entropy string is exactly what a request id looks like.
+
+## Prompt caching
+
+The Codex backend caches a prompt prefix and bills the cached part at a
+discount. The cache is automatic — nothing turns it on — but it only pays out
+while the conversation utraque replays still matches the token sequence the
+model actually saw, and that sequence includes the **reasoning items** the model
+emitted. Replay an assistant turn without them and the prefix diverges at the
+first assistant message, so the hit stops there and never grows again: every
+later turn re-reads the whole conversation at full price.
+
+That is not hypothetical. Before this was fixed, real sessions ran at an 11.7%
+cache hit rate — 246M input tokens against 28.7M cached — while the Codex CLI on
+the same backend runs at 95–99%. The tell was a `cache_read_input_tokens` pinned
+at exactly the same number, turn after turn, while `input_tokens` climbed from
+56k to 113k.
+
+Three things keep the prefix matching.
+
+**Reasoning replay.** Every request asks for
+`include: ["reasoning.encrypted_content"]`. Under `store:false` — which utraque
+always sends, because it keeps no conversation on the backend — that encrypted
+blob is the only form of a reasoning item that can be replayed at all. utraque
+is stateless per request, so the blob has to come back from the client: it rides
+in the signature of the synthetic thinking block utraque already mints for every
+reasoning item, the client replays that block in the next turn's history, and
+the request translator turns it back into a reasoning input item. The
+Anthropic-leg sanitizer strips these blocks before they could reach Anthropic,
+which signs its own thinking blocks and rejects one it did not issue.
+
+A blob that does not come back is a cache miss, never a broken request. A
+thinking block from a Claude turn, or one of ours minted before its encrypted
+content arrived, is dropped exactly as before and counted as
+`reasoning_unreplayable` on the translation log line.
+
+**`prompt_cache_key`.** The backend routes a request to whichever machine holds
+its cached prefix by hashing the prompt's opening tokens, and spills elsewhere
+when one prefix draws too much concurrent traffic — which is what a fleet of
+subagents looks like. The key makes that routing explicit. It hashes exactly the
+part of a request that does not change as a conversation grows: the model, the
+instructions, the tool declarations, and the opening input item.
+
+**The client's billing header is dropped.** Claude Code prepends a system block
+carrying its own billing metadata for Anthropic, including a `cch` value that
+changes on every turn. It sits first, so left in it would change the opening
+tokens of every prompt and invalidate the cached prefix from its first token —
+no amount of reasoning replay further down would matter. It is addressed to
+Anthropic's billing system and means nothing to the Codex backend, so the Codex
+leg drops it and records `system:billing-header` as a drop. The Anthropic leg is
+untouched: that is a byte-for-byte passthrough and the header reaches Anthropic
+exactly as Claude Code wrote it.
+
+**`session_id`.** Derived from the same hash, so the header and the body always
+name the same conversation. The Codex CLI sends one, the backend is
+undocumented, and a request must never claim one identity in the header and a
+different one in the body.
+
+### Testing the round trip without spending quota
+
+The one part of this that no unit test can settle is whether a real client
+replays the synthetic thinking blocks with their signatures intact. That trip is
+client → utraque → client and never reaches OpenAI, so `cmd/fakecodex` stands in
+for the backend and answers it for free:
+
+```
+go run ./cmd/fakecodex -listen 127.0.0.1:8411
+UTRAQUE_CODEX_BASE_URL=http://127.0.0.1:8411 utraque
+# then drive a normal session against any gpt-* route
+```
+
+The blob size matters when testing this. Real `encrypted_content` runs about
+1–11KB (measured across Codex CLI rollouts, mean ~2.5KB), so a stub that hands
+out a short string proves nothing about whether a client returns a realistic one
+intact. `-blob-bytes` sets the size and `-tool-turns` sets how many reasoning
+items pile up in one conversation; the defaults are a realistic 3000 bytes and a
+single tool call.
+
+Measured with a real Claude Code session: 735 reasoning items totalling 2.2MB
+came back in one request byte-for-byte, and single blobs of 100KB — an order of
+magnitude past anything the real backend issues — survived intact. Nothing in
+the chain truncates or rewrites a signature.
+
+It prints a verdict per turn. `ROUND TRIP OK` means the client carried the
+encrypted content back and utraque replayed it. `reasoning_replayed=0` turn
+after turn on a growing conversation means the client is not carrying the blocks
+back, and the stateless design does not hold.
 
 ## Short model names
 

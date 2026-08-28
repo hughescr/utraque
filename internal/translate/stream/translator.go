@@ -143,6 +143,14 @@ type Result struct {
 	StopReason string
 	// OutputTokens is the completion token count reported on that terminus.
 	OutputTokens int
+	// InputTokens is the prompt token count reported on that terminus, and
+	// CachedInputTokens is how much of it the backend served from its prompt
+	// cache. The pair is the only visible measure of whether the conversation's
+	// prefix is still matching: a cached count that stays flat while the input
+	// grows means the replayed history has diverged from what the model saw, and
+	// every turn is paying full price for the whole conversation.
+	InputTokens       int
+	CachedInputTokens int
 
 	UnknownEvents map[string]int
 }
@@ -198,6 +206,8 @@ type Translator struct {
 	unknown             map[string]int
 	finalStop           string
 	finalOutputTokens   int
+	finalInputTokens    int
+	finalCachedTokens   int
 }
 
 // New builds a Translator from opts, filling defaults.
@@ -253,16 +263,20 @@ func (t *Translator) reset() {
 	t.unknown = make(map[string]int)
 	t.finalStop = ""
 	t.finalOutputTokens = 0
+	t.finalInputTokens = 0
+	t.finalCachedTokens = 0
 }
 
 func (t *Translator) result() Result {
 	return Result{
-		Started:       t.started,
-		Terminated:    t.terminated,
-		Errored:       t.errored,
-		StopReason:    t.finalStop,
-		OutputTokens:  t.finalOutputTokens,
-		UnknownEvents: t.unknown,
+		Started:           t.started,
+		Terminated:        t.terminated,
+		Errored:           t.errored,
+		StopReason:        t.finalStop,
+		OutputTokens:      t.finalOutputTokens,
+		InputTokens:       t.finalInputTokens,
+		CachedInputTokens: t.finalCachedTokens,
+		UnknownEvents:     t.unknown,
 	}
 }
 
@@ -422,8 +436,18 @@ func (t *Translator) handle(sink Sink, fr sse.Frame) (bool, error) {
 		return false, t.pushDelta(sink, b, schema.Delta{Type: schema.DeltaThinking, Thinking: ev.Delta})
 
 	case cschema.EventReasoningSummaryTextDone, cschema.EventReasoningTextDone:
-		b := t.blockFor(ev.OutputIndex, kindThinking)
-		return false, t.markDoneOrClose(sink, b)
+		// Deliberately NOT a close. A reasoning item's encrypted content arrives
+		// later, on its own output_item.done, and closing a thinking block is
+		// what emits the signature that carries that content back to the client
+		// — so closing here would emit the signature before there was anything
+		// to put in it. The item's own done event closes it, and a stream that
+		// never sends one still has every block closed by the final drain.
+		//
+		// It also makes a multi-part summary work: several summary_text.done
+		// events for one reasoning item now leave a single block open across all
+		// of them instead of closing on the first and pushing the rest into a
+		// block that had already stopped.
+		return false, nil
 
 	case cschema.EventFunctionCallArgumentsDelta:
 		if err := t.ensureStarted(sink); err != nil {
@@ -568,6 +592,30 @@ func (t *Translator) onItemDone(sink Sink, ev *cschema.StreamEvent) error {
 		}
 		b.argsDone = true
 		return t.markDoneOrClose(sink, b)
+	case cschema.OutputItemReasoning:
+		// The encrypted content arrives HERE, on the completed item. It has to be
+		// stashed before the block is closed, because closing is what emits the
+		// signature that carries it back to the client.
+		b := t.blocks[ev.OutputIndex]
+		if b == nil {
+			if ev.Item.EncryptedContent == "" {
+				// A reasoning item that produced neither summary text nor
+				// replayable content has nothing to become a block for.
+				return nil
+			}
+			// A reasoning item can complete without ever emitting a summary part
+			// (the model summarised nothing, or summaries are off), so no block
+			// exists yet. Make one anyway: an otherwise empty thinking block is
+			// the only carrier the encrypted content has back to the client.
+			b = t.blockFor(ev.OutputIndex, kindThinking)
+		}
+		if ev.Item.ID != "" {
+			b.reasoningID = ev.Item.ID
+		}
+		if ev.Item.EncryptedContent != "" {
+			b.reasoningEnc = ev.Item.EncryptedContent
+		}
+		return t.markDoneOrClose(sink, b)
 	default:
 		b := t.blocks[ev.OutputIndex]
 		if b == nil {
@@ -677,6 +725,7 @@ func (t *Translator) finalizeClean(sink Sink) error {
 	// Recorded from the same values the sink saw, so the request log cannot
 	// disagree with what the client was told.
 	t.finalStop, t.finalOutputTokens = stop, usage.OutputTokens
+	t.finalInputTokens, t.finalCachedTokens = usage.InputTokens, usage.CacheReadInputTokens
 	if err := sink.MessageStop(); err != nil {
 		return err
 	}

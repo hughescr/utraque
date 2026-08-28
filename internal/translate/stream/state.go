@@ -38,6 +38,13 @@ type block struct {
 	argsDone bool   // arguments.done / output_item.done finalised this call's args
 	fullArgs string // full arguments from arguments.done / output_item.done
 
+	// Reasoning identity, replayed back to the backend on the next turn via the
+	// block's synthetic signature. reasoningEnc is the item's encrypted_content;
+	// it arrives on output_item.done and MUST be stashed before the block closes,
+	// because closing is what emits the signature that carries it.
+	reasoningID  string
+	reasoningEnc string
+
 	pending []schema.Delta // deltas buffered while another block is active
 	bytes   int            // size of buffered deltas, for the overflow bound
 }
@@ -277,8 +284,21 @@ func (t *Translator) enforceBounds(sink Sink) error {
 // syntheticSignature builds the signature carried by a thinking block's closing
 // signature_delta. It begins with the fixed marker the Anthropic-leg sanitizer
 // strips, so a mixed-model replay never sends this fabricated signature on to
-// Anthropic. It is deterministic in the response id and output index.
+// Anthropic.
+//
+// When the reasoning item's encrypted content was captured, the signature
+// CARRIES it: the client replays the block on its next turn, and the request
+// translator turns it back into a reasoning input item so the prompt still
+// matches the token sequence the model saw. That is what keeps the backend's
+// prompt cache matching as a conversation grows.
+//
+// Otherwise it falls back to the payload-free form, deterministic in the
+// response id and output index. That block is still marked as ours — which is
+// what stops it reaching Anthropic — it simply has nothing to replay.
 func (t *Translator) syntheticSignature(b *block) string {
+	if sig := anthropic.EncodeReasoningSignature(b.reasoningID, b.reasoningEnc); sig != "" {
+		return sig
+	}
 	return anthropic.SyntheticThinkingMarker + t.responseID + "-" + strconv.Itoa(b.outIdx)
 }
 

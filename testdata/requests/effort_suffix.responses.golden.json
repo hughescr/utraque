@@ -15,6 +15,10 @@
   "reasoning": {
     "effort": "high"
   },
+  "include": [
+    "reasoning.encrypted_content"
+  ],
+  "prompt_cache_key": "utq-77481669679e81c14ef9a0d565243cda",
   "store": false,
   "stream": true
 }
