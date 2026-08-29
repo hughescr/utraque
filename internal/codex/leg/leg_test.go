@@ -216,3 +216,41 @@ func TestCountTokensAnswersLocally(t *testing.T) {
 		t.Errorf("the responses client was called %d times, want 0", st.calls)
 	}
 }
+
+// TestUpstreamModelEchoesTheResolvedSlug pins what the caller is told it talked
+// to. The client writes this value straight into its own session log, so a
+// request routed as an alias must come back as the slug that actually served
+// it: that log is the only record usage reporting downstream can price. The
+// fallback covers a zero Decision, which must never echo an empty model.
+func TestUpstreamModelEchoesTheResolvedSlug(t *testing.T) {
+	cases := []struct {
+		name string
+		rq   *router.Request
+		want string
+	}{
+		{
+			name: "resolved slug wins over the alias the caller wrote",
+			rq: &router.Request{
+				Model: "sol-high",
+				Dec: router.Decision{
+					Backend:       router.BackendCodex,
+					ClientModel:   "sol-high",
+					UpstreamModel: "gpt-5.6-sol",
+				},
+			},
+			want: "gpt-5.6-sol",
+		},
+		{
+			name: "a decision with no slug falls back to the caller's string",
+			rq:   &router.Request{Model: "sol-high"},
+			want: "sol-high",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := upstreamModel(tc.rq); got != tc.want {
+				t.Errorf("upstreamModel = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

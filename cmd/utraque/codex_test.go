@@ -455,10 +455,11 @@ func TestCodexStreamingProducesAnthropicSSE(t *testing.T) {
 	if err := json.Unmarshal([]byte(frames[0].data), &start); err != nil {
 		t.Fatalf("decode message_start %q: %v", frames[0].data, err)
 	}
-	// The model is echoed back exactly as the caller wrote it, not as the
-	// upstream slug: the client matches this against what it asked for.
-	if start.Message.Model != "sol" {
-		t.Errorf("message_start.model = %q, want sol", start.Message.Model)
+	// The model echoed back is the upstream slug the leg actually called, not
+	// the alias the caller wrote: the client records this verbatim in its own
+	// session log, so it has to name the model that really served the turn.
+	if start.Message.Model != "gpt-5.6-sol" {
+		t.Errorf("message_start.model = %q, want gpt-5.6-sol", start.Message.Model)
 	}
 	if start.Message.Role != "assistant" {
 		t.Errorf("message_start.role = %q, want assistant", start.Message.Role)
@@ -649,8 +650,8 @@ func TestCodexNonStreamingReturnsMessagesResponse(t *testing.T) {
 	if msg.Type != "message" || msg.Role != "assistant" {
 		t.Errorf("type/role = %q/%q, want message/assistant", msg.Type, msg.Role)
 	}
-	if msg.Model != "sol" {
-		t.Errorf("model = %q, want sol echoed back", msg.Model)
+	if msg.Model != "gpt-5.6-sol" {
+		t.Errorf("model = %q, want the upstream slug echoed back", msg.Model)
 	}
 	if msg.StopReason == nil || *msg.StopReason != "end_turn" {
 		t.Errorf("stop_reason = %v, want end_turn", msg.StopReason)
