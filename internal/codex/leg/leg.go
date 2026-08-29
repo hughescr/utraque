@@ -17,17 +17,17 @@
 // The plan's phase-5 contract is kept intact end to end, and this package is
 // where the distinction becomes visible to the client:
 //
-//  1. Before any byte reaches the client Ã¢ÂÂ a non-200 from the backend, a bot
-//     gate, a network failure, or a 200 whose body carried no events Ã¢ÂÂ the leg
+//  1. Before any byte reaches the client — a non-200 from the backend, a bot
+//     gate, a network failure, or a 200 whose body carried no events — the leg
 //     answers with a real HTTP status and an Anthropic error envelope. A 429
 //     forwards the upstream's Retry-After (and the quota headers) verbatim, so
 //     the client's own backoff sees what the backend actually said.
-//  2. Mid-stream Ã¢ÂÂ the upstream failed after output began Ã¢ÂÂ the Translator
+//  2. Mid-stream — the upstream failed after output began — the Translator
 //     closes the open block, emits an SSE error event and STOPS. No clean
 //     terminus is faked over a broken stream. For a non-streaming client there
 //     is no way to show a truncation, so the Aggregator turns the same condition
 //     into a real HTTP error instead of a short answer.
-//  3. Client interrupt Ã¢ÂÂ the caller hung up Ã¢ÂÂ cancels the upstream request,
+//  3. Client interrupt — the caller hung up — cancels the upstream request,
 //     writes nothing further, and joins the reader goroutine, so nothing leaks
 //     and no terminus is invented.
 //
@@ -89,7 +89,7 @@ type Options struct {
 	Client responses.Streamer
 
 	// Credentials supplies the Codex OAuth credential. Nil is a supported
-	// state Ã¢ÂÂ it means "no `codex login` on this machine" Ã¢ÂÂ and makes every
+	// state — it means "no `codex login` on this machine" — and makes every
 	// codex-routed request answer with a clear 503 rather than failing
 	// obscurely at construction time.
 	Credentials auth.CredentialSource
@@ -197,7 +197,7 @@ func New(opts Options) (*Leg, error) {
 // Messages serves POST /v1/messages for a codex-routed model.
 //
 // It renders every failure it is able to render itself, so the error it returns
-// is for the dispatcher's log Ã¢ÂÂ and, when it wraps router.ErrResponseStarted,
+// is for the dispatcher's log — and, when it wraps router.ErrResponseStarted,
 // to tell the dispatcher that bytes are already committed and no envelope may
 // follow.
 func (l *Leg) Messages(w http.ResponseWriter, r *http.Request, rq *router.Request) error {
@@ -297,7 +297,7 @@ func (l *Leg) CountTokens(w http.ResponseWriter, r *http.Request, rq *router.Req
 //
 // The client's 200 is NOT committed up front: it is written lazily by the first
 // sink frame. That is what keeps failure mode 1 available for a 200 whose body
-// turns out to be empty Ã¢ÂÂ a status line already on the wire could not be taken
+// turns out to be empty — a status line already on the wire could not be taken
 // back, and an error envelope appended to it would corrupt the stream.
 func (l *Leg) serveStream(ctx context.Context, w http.ResponseWriter, rq *router.Request, upstream io.ReadCloser, inputTokens int, log *slog.Logger) error {
 	lw := newLazyWriter(w, func(h http.Header) {
@@ -312,7 +312,7 @@ func (l *Leg) serveStream(ctx context.Context, w http.ResponseWriter, rq *router
 	})
 
 	// The downstream tee sits between the translator and the client, so the
-	// trace records exactly the bytes the client received Ã¢ÂÂ including the
+	// trace records exactly the bytes the client received — including the
 	// heartbeat pings and the frame boundaries, which is where an SSE bug
 	// usually is.
 	tr := stream.New(l.translatorOptions(rq, inputTokens, l.heartbeat, log))
@@ -333,8 +333,8 @@ func (l *Leg) serveStream(ctx context.Context, w http.ResponseWriter, rq *router
 
 // serveAggregate folds the upstream stream into one MessagesResponse.
 //
-// Nothing is written until the fold succeeds, so every failure Ã¢ÂÂ including a
-// mid-stream one Ã¢ÂÂ reaches the client as a real HTTP status rather than as a
+// Nothing is written until the fold succeeds, so every failure — including a
+// mid-stream one — reaches the client as a real HTTP status rather than as a
 // truncated answer dressed up as a complete one.
 func (l *Leg) serveAggregate(ctx context.Context, w http.ResponseWriter, rq *router.Request, upstream io.ReadCloser, inputTokens int, log *slog.Logger) error {
 	agg := stream.NewAggregator()
@@ -371,7 +371,7 @@ func (l *Leg) translatorOptions(rq *router.Request, inputTokens int, heartbeat t
 		// Echo the upstream slug utraque actually called, not the model string
 		// the caller wrote. Claude Code (verified against 2.1.241) does not match
 		// this against its request, and it records what it receives into its own
-		// session log â so echoing the slug is what makes that log name the model
+		// session log — so echoing the slug is what makes that log name the model
 		// that really served the turn, which is what usage reporting downstream
 		// has to price. The reasoning effort is deliberately left off: it is not
 		// part of the model's identity, and the client does not record it for
@@ -490,8 +490,8 @@ func classifyStreamFailure(err error) *apierr.Error {
 }
 
 // catalogModel looks up the routed slug's catalog entry, used only to clamp
-// reasoning effort and to source the default summary. Every failure Ã¢ÂÂ no
-// catalog, a fetch error, an unknown slug Ã¢ÂÂ yields the zero Model, which leaves
+// reasoning effort and to source the default summary. Every failure — no
+// catalog, a fetch error, an unknown slug — yields the zero Model, which leaves
 // the requested effort unclamped. A picker open must never be blocked on this,
 // and neither must an inference request.
 func (l *Leg) catalogModel(ctx context.Context, cred auth.Credential, slug string, log *slog.Logger) cschema.Model {
@@ -534,7 +534,7 @@ func (l *Leg) logger(rq *router.Request) *slog.Logger {
 // logResult records the translation outcome, including the unknown-event counts
 // that are the early warning for upstream protocol drift.
 //
-// How the answer ended Ã¢ÂÂ the stop reason and the completion size Ã¢ÂÂ goes on the
+// How the answer ended — the stop reason and the completion size — goes on the
 // request line rather than a second log line of its own, so one request stays
 // one record.
 func (l *Leg) logResult(ctx context.Context, log *slog.Logger, rq *router.Request, res stream.Result) {
@@ -596,7 +596,7 @@ func logTranslation(ctx context.Context, log *slog.Logger, rq *router.Request, m
 }
 
 // markRoute stamps the debug headers. They are set before anything is written so
-// they survive whichever layer ends up committing the status line Ã¢ÂÂ including
+// they survive whichever layer ends up committing the status line — including
 // the dispatcher rendering an error envelope on this leg's behalf.
 func markRoute(h http.Header, rq *router.Request) {
 	h.Set(HeaderRoute, string(router.BackendCodex))
@@ -607,8 +607,8 @@ func markRoute(h http.Header, rq *router.Request) {
 
 // noCredentialError is the answer when no Codex login is configured at all.
 //
-// It is a 503 rather than a 401: the caller's own Authorization header is fine Ã¢ÂÂ
-// it is utraque that has nothing to spend Ã¢ÂÂ and a 401 would send Claude Code
+// It is a 503 rather than a 401: the caller's own Authorization header is fine —
+// it is utraque that has nothing to spend — and a 401 would send Claude Code
 // off to re-authenticate against Anthropic, which would not help.
 func noCredentialError(dec router.Decision) *apierr.Error {
 	return apierr.WithStatus(http.StatusServiceUnavailable, apierr.TypeAPI,
