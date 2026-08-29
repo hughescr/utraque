@@ -41,8 +41,6 @@ func TestResolve(t *testing.T) {
 			want: router.Decision{Backend: router.BackendCodex, UpstreamModel: "gpt-5.6-terra", ClientModel: "terra", EffortSource: router.EffortSourceNone}},
 		{name: "bare codename luna", model: "luna",
 			want: router.Decision{Backend: router.BackendCodex, UpstreamModel: "gpt-5.6-luna", ClientModel: "luna", EffortSource: router.EffortSourceNone}},
-		{name: "bare codename spark (override-derived)", model: "spark",
-			want: router.Decision{Backend: router.BackendCodex, UpstreamModel: "gpt-5.3-codex-spark", ClientModel: "spark", EffortSource: router.EffortSourceNone}},
 		{name: "codename case-insensitive", model: "SOL",
 			want: router.Decision{Backend: router.BackendCodex, UpstreamModel: "gpt-5.6-sol", ClientModel: "SOL", EffortSource: router.EffortSourceNone}},
 		{name: "codename-version pinned", model: "sol-5.6",
@@ -51,8 +49,6 @@ func TestResolve(t *testing.T) {
 			want: router.Decision{Backend: router.BackendCodex, UpstreamModel: "gpt-5.6-sol", ClientModel: "sol-high", Effort: "high", EffortSource: router.EffortSourceSuffix}},
 		{name: "effort suffix on pinned codename-version", model: "sol-5.6-high",
 			want: router.Decision{Backend: router.BackendCodex, UpstreamModel: "gpt-5.6-sol", ClientModel: "sol-5.6-high", Effort: "high", EffortSource: router.EffortSourceSuffix}},
-		{name: "effort suffix on override-derived pinned spark", model: "spark-5.3-ultra",
-			want: router.Decision{Backend: router.BackendCodex, UpstreamModel: "gpt-5.3-codex-spark", ClientModel: "spark-5.3-ultra", Effort: "ultra", EffortSource: router.EffortSourceSuffix}},
 		{name: "raw slug sol", model: "gpt-5.6-sol",
 			want: router.Decision{Backend: router.BackendCodex, UpstreamModel: "gpt-5.6-sol", ClientModel: "gpt-5.6-sol", EffortSource: router.EffortSourceNone}},
 		{name: "raw slug terra", model: "gpt-5.6-terra",
@@ -271,5 +267,46 @@ func TestResolveWithUsesTheGivenRegistry(t *testing.T) {
 	}
 	if _, err := router.ResolveWith(nil, "sol", ""); err != nil {
 		t.Errorf("a nil registry should fall back to DefaultRegistry: %v", err)
+	}
+}
+
+// TestOverrideMakesAnIrregularSlugReachable pins the escape hatch that keeps a
+// two-token-tail slug routable without a new build. The alias grammar reads
+// "gpt-<version>[-<one tail token>]", so a slug like "gpt-5.7-codex-nova" parses
+// as nothing and would be reachable only by its full raw name. An override says
+// which token is the codename, and the bare and pinned tiers follow from it.
+//
+// No shipped slug needs this today, which is exactly why it is tested: the seam
+// is dormant until an irregular slug appears, and a dormant seam that quietly
+// stopped working is one nobody would notice until a model was unreachable.
+func TestOverrideMakesAnIrregularSlugReachable(t *testing.T) {
+	reg := router.NewRegistry()
+	reg.SetOverride("gpt-5.7-codex-nova", "nova", "5.7", "")
+	reg.LoadCatalog([]router.CatalogEntry{{Slug: "gpt-5.7-codex-nova"}})
+
+	cases := []struct {
+		name, model, wantUpstream, wantEffort string
+	}{
+		{"bare codename", "nova", "gpt-5.7-codex-nova", ""},
+		{"pinned codename-version", "nova-5.7", "gpt-5.7-codex-nova", ""},
+		{"effort suffix on the pinned form", "nova-5.7-ultra", "gpt-5.7-codex-nova", "ultra"},
+		{"raw slug still routes as itself", "gpt-5.7-codex-nova", "gpt-5.7-codex-nova", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dec, err := router.ResolveWith(reg, tc.model, "")
+			if err != nil {
+				t.Fatalf("ResolveWith(%q): %v", tc.model, err)
+			}
+			if dec.Backend != router.BackendCodex {
+				t.Errorf("backend = %q, want codex", dec.Backend)
+			}
+			if dec.UpstreamModel != tc.wantUpstream {
+				t.Errorf("upstream = %q, want %q", dec.UpstreamModel, tc.wantUpstream)
+			}
+			if dec.Effort != tc.wantEffort {
+				t.Errorf("effort = %q, want %q", dec.Effort, tc.wantEffort)
+			}
+		})
 	}
 }

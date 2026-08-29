@@ -166,15 +166,16 @@ start with `claude-`**. It sizes the GPT routes and can never change a Claude
 model's window, so it is not an alternative to the variable above — the two do
 not overlap.
 
-One value covers every GPT route, and their real windows differ: the live Codex
-catalog reports 272,000 tokens for `gpt-5.6-sol`, `gpt-5.6-terra`,
-`gpt-5.6-luna`, `gpt-5.5`, `gpt-5.4` and `gpt-5.4-mini`, but **128,000** for
-`gpt-5.3-codex-spark`. Set `272000` and a `spark` session can grow past its real
-window before Claude Code thinks to compact, risking a hard "too long" error
-from the backend; set `128000` and the larger models compact earlier than they
-need to. Prefer `128000` if your routing ever reaches `spark` — an early
-compaction costs context you can re-establish, while an overshoot breaks the
-conversation outright. Leave it unset if you only use Claude models.
+One value covers every GPT route, and every model the live Codex catalog now
+lists reports the same window: 272,000 tokens for `gpt-5.6-sol`,
+`gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-5.5`, `gpt-5.4` and `gpt-5.4-mini`. Set
+`272000`, and leave it unset if you only use Claude models.
+
+If a narrower model ever reappears in the catalog, size this to the smallest
+route you actually use rather than the largest. An early compaction costs
+context you can re-establish, while a session allowed to grow past its real
+window draws a hard "too long" error from the backend and breaks the
+conversation outright.
 
 #### If you turn the local token on
 

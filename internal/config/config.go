@@ -212,9 +212,10 @@ type Codex struct {
 }
 
 // AliasOverride pins how one Codex slug decomposes into router aliases, for a
-// slug the alias grammar parses wrongly or not at all. "gpt-5.3-codex-spark" is
-// the shipped example: it has two trailing tokens, and the codename is "spark",
-// not "codex".
+// slug the alias grammar parses wrongly or not at all. No slug in the current
+// catalog needs one, so none ship; "gpt-5.3-codex-spark", which did until it was
+// retired upstream, is the worked example: two trailing tokens, with the codename
+// "spark" rather than the last token "codex".
 //
 // Nothing here is a secret; it is a routing table, and it is logged in full.
 type AliasOverride struct {

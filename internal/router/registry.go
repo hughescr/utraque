@@ -156,15 +156,18 @@ var staticSlugs = []string{
 	"gpt-5.5",
 	"gpt-5.4",
 	"gpt-5.4-mini",
-	"gpt-5.3-codex-spark",
 }
 
-// staticOverrides seeds the one irregular slug the grammar can't parse:
-// "gpt-5.3-codex-spark" has two trailing tokens ("codex", "spark"); the
-// codename is "spark", not "codex".
-var staticOverrides = map[string]slugOverride{
-	"gpt-5.3-codex-spark": {Codename: "spark", Version: "5.3"},
-}
+// staticOverrides seeds alias overrides for slugs the grammar cannot parse:
+// those carrying more than one trailing token, where the codename is not the
+// last of them. It is empty. Every slug the catalog currently lists parses
+// cleanly, and "gpt-5.3-codex-spark" — the one that did not — has been retired
+// upstream and is no longer offered by the model catalog.
+//
+// The seam stays because the next irregular slug must not need a new build to
+// be reachable by a short name: UTRAQUE_ROUTING_ALIAS_OVERRIDES fills this in
+// at startup, and LoadCatalog consults it on every rebuild.
+var staticOverrides = map[string]slugOverride{}
 
 // NewStaticRegistry returns a Registry seeded from the Phase 1/2 static slug
 // table above. DefaultRegistry (in resolve.go) is one of these; Phase 3
