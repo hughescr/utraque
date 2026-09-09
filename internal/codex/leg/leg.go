@@ -592,6 +592,12 @@ func logTranslation(ctx context.Context, log *slog.Logger, rq *router.Request, m
 	if len(meta.DroppedImages) > 0 {
 		attrs = append(attrs, slog.Int("dropped_images", len(meta.DroppedImages)))
 	}
+	if len(meta.RewrittenPatterns) > 0 {
+		attrs = append(attrs, slog.Any("rewritten_patterns", meta.RewrittenPatterns))
+	}
+	if len(meta.DroppedPatterns) > 0 {
+		attrs = append(attrs, slog.Any("dropped_patterns", meta.DroppedPatterns))
+	}
 	log.LogAttrs(ctx, slog.LevelDebug, "translated a Messages request for the codex backend", attrs...)
 }
 

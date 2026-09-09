@@ -172,6 +172,14 @@ type Metadata struct {
 	// was dropped instead of emitted. The image itself is NOT emitted — this
 	// is the only trace that it existed in the request.
 	DroppedImages []string
+	// RewrittenPatterns names, as "<tool>.<json path>", each tool schema node
+	// whose "pattern" keyword was translated into the Python regex dialect the
+	// backend's schema validator uses (see pattern.go). DroppedPatterns names
+	// the nodes whose pattern had no Python translation and was removed, with
+	// its text folded into the node's description so the model still sees the
+	// constraint.
+	RewrittenPatterns []string
+	DroppedPatterns   []string
 
 	// ReasoningReplayed counts assistant thinking blocks that carried replayable
 	// encrypted reasoning and were emitted as reasoning input items.
@@ -223,7 +231,7 @@ func Translate(req *aschema.MessagesRequest, dec router.Decision, model cschema.
 	// the first assistant message.
 	out.Include = []string{cschema.IncludeReasoningEncryptedContent}
 
-	out.Tools = translateTools(req.Tools)
+	out.Tools, meta.RewrittenPatterns, meta.DroppedPatterns = translateTools(req.Tools)
 	out.ToolChoice = translateToolChoice(req.ToolChoice)
 
 	disabled, names := disableParallel(req.Tools, opts.mutatingSet())
@@ -541,17 +549,28 @@ func withImagePlaceholder(text string, n int) string {
 }
 
 // translateTools maps Anthropic tool declarations onto Responses function
-// tools, carrying the input_schema through verbatim as the parameters. A nil
-// tool list yields nil (the field is omitted).
-func translateTools(tools []aschema.Tool) []cschema.Tool {
+// tools, carrying the input_schema through as the parameters. The schema is
+// byte-identical to the input unless it carries a "pattern" the backend's
+// Python-based validator cannot parse (see pattern.go), in which case the
+// pattern is rewritten into Python's dialect or, failing that, dropped. The
+// affected nodes are named "<tool>.<path>" in the returned rewritten and
+// dropped lists. A nil tool list yields nil (the field is omitted).
+func translateTools(tools []aschema.Tool) (out []cschema.Tool, rewritten, dropped []string) {
 	if len(tools) == 0 {
-		return nil
+		return nil, nil, nil
 	}
-	out := make([]cschema.Tool, 0, len(tools))
+	out = make([]cschema.Tool, 0, len(tools))
 	for _, t := range tools {
-		out = append(out, cschema.FunctionTool(t.Name, t.Description, t.InputSchema))
+		params, res := sanitizeToolSchema(t.InputSchema)
+		for _, p := range res.Rewritten {
+			rewritten = append(rewritten, t.Name+droppedPatternSep+p)
+		}
+		for _, p := range res.Dropped {
+			dropped = append(dropped, t.Name+droppedPatternSep+p)
+		}
+		out = append(out, cschema.FunctionTool(t.Name, t.Description, params))
 	}
-	return out
+	return out, rewritten, dropped
 }
 
 // translateToolChoice maps Anthropic tool_choice onto the Responses form:

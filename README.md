@@ -241,6 +241,31 @@ Typed names and agent frontmatter never depended on discovery and are
 unaffected, which is why they are listed first. The merged catalog is still
 served and is still useful to any client that does ask for it.
 
+### Tool schemas on a GPT route
+
+The Codex backend validates every tool's parameter schema before a model runs,
+and it compiles each JSON Schema `pattern` with Python's `re` module. Anthropic
+accepts any pattern the client sends, so a tool whose pattern uses a form
+Python lacks — Claude Code's Artifact tool has a `\p{Cc}` Unicode class — used
+to fail every request on a GPT route with `Invalid schema for function
+'Artifact': ... is not a 'regex'`.
+
+The request translator now rewrites each pattern into Python's dialect before
+it goes out. Unicode property classes become explicit codepoint ranges from
+Go's own Unicode tables, `(?<name>…)` becomes `(?P<name>…)`, `\k<name>` becomes
+`(?P=name)`, `\z` becomes `\Z`, and `\x{HHHH}` becomes `\uHHHH`. Lookaround
+and backreferences are left alone because Python accepts them. A pattern with
+no Python spelling (atomic groups, possessive quantifiers, `\Q…\E`, POSIX
+classes) or one whose class expansion would run to hundreds of ranges is
+dropped from the schema and its text appended to the property's description,
+which is where the model reads a constraint from anyway. Claude Code still
+validates tool input against its own original schema, so nothing is lost on
+the client side.
+
+Untouched schemas go through byte-for-byte. The translation log line names
+each rewritten node as `rewritten_patterns` and each dropped one as
+`dropped_patterns`, in `Tool.properties.field` form.
+
 
 ### Unattended, on demand (macOS)
 

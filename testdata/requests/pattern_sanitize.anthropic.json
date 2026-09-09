@@ -1,0 +1,43 @@
+{
+  "model": "sol",
+  "max_tokens": 1024,
+  "tools": [
+    {
+      "name": "Artifact",
+      "description": "publish a page",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "field": {
+            "type": "string",
+            "description": "top-level string field to edit.",
+            "pattern": "^(?!__.*__$)[^\\p{Cc}\\p{Cf}\\p{Zl}\\p{Zp}\"\\\\./[\\]]{1,200}$"
+          },
+          "asset_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$"
+          },
+          "writes": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "doc_id": { "type": "string", "pattern": "^(?!\\.\\.?(?:\\/|$))[A-Za-z0-9_\\-.~:@+]{1,200}$" }
+              }
+            }
+          },
+          "contract": {
+            "anyOf": [
+              { "const": "latest", "type": "string" },
+              { "type": "string", "pattern": "^\\p{Nd}+$" }
+            ]
+          }
+        }
+      }
+    },
+    { "name": "Read", "description": "read a file", "input_schema": { "type": "object" } }
+  ],
+  "messages": [
+    { "role": "user", "content": "publish it" }
+  ]
+}
