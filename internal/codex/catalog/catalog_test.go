@@ -193,7 +193,7 @@ func TestFetchSendsClientVersionQueryParam(t *testing.T) {
 
 	c := catalog.New(catalog.Options{
 		BaseURL: srv.URL, HTTPClient: srv.Client(), Now: newClock().now,
-		ClientVersion: "0.148.0",
+		ClientVersion: "test-client-version",
 	})
 
 	if _, err := c.Models(context.Background(), fakeCred()); err != nil {
@@ -205,8 +205,8 @@ func TestFetchSendsClientVersionQueryParam(t *testing.T) {
 	if fake.gotClientVersion == "" {
 		t.Error("client_version query parameter was empty or absent")
 	}
-	if fake.gotClientVersion != "0.148.0" {
-		t.Errorf("client_version = %q, want %q", fake.gotClientVersion, "0.148.0")
+	if fake.gotClientVersion != "test-client-version" {
+		t.Errorf("client_version = %q, want %q", fake.gotClientVersion, "test-client-version")
 	}
 }
 

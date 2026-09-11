@@ -192,6 +192,9 @@ func newLiveEnv(t *testing.T) *liveEnv {
 	if err != nil {
 		t.Fatalf("config.Load: %v", err)
 	}
+	if err := resolveCodexClientVersion(context.Background(), &cfg); err != nil {
+		t.Fatalf("resolve Codex client version: %v", err)
+	}
 	// The one deviation: keep utraque's own catalog cache out of the user's
 	// cache directory, so a live run leaves nothing behind.
 	cfg.Codex.CachePath = filepath.Join(t.TempDir(), "models_cache.json")

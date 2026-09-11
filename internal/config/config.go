@@ -70,15 +70,6 @@ const (
 	DefaultCodexRefreshSkew = 120 * time.Second
 	DefaultCodexLockTimeout = 10 * time.Second
 
-	// DefaultCodexClientVersion is sent as the client_version query parameter
-	// on every GET {base}/models request. Verified live: the real endpoint
-	// answers HTTP 400 ("client_version" reported as a missing required query
-	// field) without it, so this must never be empty — Validate rejects an
-	// empty value rather than letting the daemon start and fail every catalog
-	// fetch. "0.148.0" is a confirmed-accepted Codex CLI version; bump it via
-	// UTRAQUE_CODEX_CLIENT_VERSION if the endpoint ever starts rejecting it.
-	DefaultCodexClientVersion = "0.148.0"
-
 	// Transport* are the accepted values of UTRAQUE_CODEX_TRANSPORT: which TLS
 	// stack the Codex leg dials chatgpt.com with. They mirror the transport
 	// package's Mode* constants, which config deliberately does not import —
@@ -238,9 +229,9 @@ type Codex struct {
 	// ClientVersion is sent as the client_version query parameter on every
 	// GET {base}/models request (see catalog.Options.ClientVersion) and is
 	// also recorded in utraque's own on-disk catalog cache. Not a secret — it
-	// is a Codex CLI version string. UTRAQUE_CODEX_CLIENT_VERSION. Validate
-	// rejects an empty value: the real endpoint 400s every catalog fetch
-	// without it.
+	// is a Codex CLI version string. An empty value means production startup
+	// must discover it from UTRAQUE_CODEX_EXECUTABLE; an explicit
+	// UTRAQUE_CODEX_CLIENT_VERSION bypasses discovery.
 	ClientVersion string
 }
 
@@ -340,13 +331,12 @@ func Default() Config {
 		Codex: Codex{
 			// AuthFile is intentionally empty here: a bare Default() performs no
 			// environment or filesystem lookups. LoadFrom resolves it.
-			BaseURL:       DefaultCodexBaseURL,
-			TokenURL:      DefaultCodexTokenURL,
-			ClientID:      DefaultCodexClientID,
-			RefreshSkew:   DefaultCodexRefreshSkew,
-			LockTimeout:   DefaultCodexLockTimeout,
-			Transport:     DefaultCodexTransport,
-			ClientVersion: DefaultCodexClientVersion,
+			BaseURL:     DefaultCodexBaseURL,
+			TokenURL:    DefaultCodexTokenURL,
+			ClientID:    DefaultCodexClientID,
+			RefreshSkew: DefaultCodexRefreshSkew,
+			LockTimeout: DefaultCodexLockTimeout,
+			Transport:   DefaultCodexTransport,
 		},
 		Idle:    Idle{Timeout: DefaultIdleTimeout},
 		Launchd: Launchd{SocketName: DefaultLaunchdSocketName},
@@ -693,13 +683,10 @@ func (c Config) Validate() error {
 	if c.Codex.ClientID == "" {
 		return fmt.Errorf("config: codex client id must not be empty")
 	}
-	// An empty client_version reproduces a live-observed failure mode: the
-	// real endpoint 400s every GET {base}/models request outright ("field
-	// required" at query.client_version). Reject it here rather than let the
-	// daemon start and fail every catalog fetch from the first request on.
-	if c.Codex.ClientVersion == "" {
-		return fmt.Errorf("config: %s must not be empty", EnvCodexClientVersion)
-	}
+	// ClientVersion may be empty here. It is the sentinel that tells production
+	// startup to discover the installed Codex CLI version before constructing
+	// the catalog client. Keeping discovery out of config makes Default and
+	// LoadFrom deterministic and free of subprocess side effects.
 	// Both Codex endpoints must be plain https/http URLs with no embedded
 	// credentials — the same rule as the Anthropic base URL, since a
 	// misconfigured value is printed to stderr on failure.

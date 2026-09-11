@@ -103,8 +103,9 @@ copies the key. Keep the key file in place for the launchd agent; utraque reads
 it when launchd starts the process.
 
 Usage history runs `bunx ccusage@latest`, while live Codex quota uses `codex
-app-server`. launchd has a small system `PATH`, so record the executables you
-intend the service to use rather than relying on your interactive shell:
+app-server` and model discovery runs `codex --version` once at startup. launchd
+has a small system `PATH`, so record the executables you intend the service to
+use rather than relying on your interactive shell:
 
 ```sh
 deploy/install.sh \

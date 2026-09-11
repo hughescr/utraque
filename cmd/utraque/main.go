@@ -68,6 +68,9 @@ func run(ctx context.Context, getenv func(string) string, stderr io.Writer) erro
 	if err != nil {
 		return err
 	}
+	if err := resolveCodexClientVersion(ctx, &cfg); err != nil {
+		return err
+	}
 
 	log, err := obs.NewLogger(stderr, cfg.SlogLevel(), cfg.Log.Format)
 	if err != nil {

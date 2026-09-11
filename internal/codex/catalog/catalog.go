@@ -97,9 +97,9 @@ type Options struct {
 	// models request — the real endpoint 400s the request outright without it
 	// ("client_version" reported as a missing required query field) — and is
 	// also recorded in the on-disk cache for interop/debugging. It is NOT
-	// defaulted here: a caller wired to config.Config gets
-	// config.DefaultCodexClientVersion (config.Codex.ClientVersion, validated
-	// non-empty at startup); a caller that builds Options directly (tests)
+	// defaulted here: production startup discovers config.Codex.ClientVersion
+	// from the configured Codex executable (or accepts its explicit override)
+	// before constructing this client. A caller that builds Options directly
 	// must set it if the query parameter matters to what it is asserting.
 	ClientVersion string
 	// HTTPClient performs the fetch. Defaults to a client with a modest

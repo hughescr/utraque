@@ -373,7 +373,7 @@ This is the whole surface.
 | `UTRAQUE_CODEX_REFRESH_SKEW` | `2m` | Refresh pre-emptively once the access token is this close to expiry. |
 | `UTRAQUE_CODEX_LOCK_TIMEOUT` | `10s` | How long a refresh waits for the cross-process advisory lock on `auth.json` before giving up, so `utraque` and the Codex CLI never clobber each other. |
 | `UTRAQUE_CODEX_TRANSPORT` | `auto` | `auto` \| `std` \| `utls`. See *Transport* below. A typo is a startup error, never a silent fallback. |
-| `UTRAQUE_CODEX_CLIENT_VERSION` | `0.148.0` | Sent as the `client_version` query parameter on every model-catalog request. The real endpoint rejects the request outright (HTTP 400) without it, so an empty value is a startup error rather than a silent, permanently-failing catalog fetch. |
+| `UTRAQUE_CODEX_CLIENT_VERSION` | detected from `UTRAQUE_CODEX_EXECUTABLE --version` | Sent as the `client_version` query parameter on every model-catalog request. Discovery is bounded and requires `codex-cli <semantic-version>` on stdout; startup fails if discovery cannot supply a real version, because stale versions can hide newly released models. Set this explicitly to bypass executable discovery. |
 
 ### Routing
 
@@ -395,15 +395,19 @@ This is the whole surface.
 | `UTRAQUE_CCUSAGE_EXECUTABLE` | *(none)* | Direct path to an installed native `ccusage` binary. When set, this takes precedence over the package runner. Homebrew users can set `/opt/homebrew/bin/ccusage` after `brew install ccusage`. Utraque never downloads or updates it. |
 | `UTRAQUE_CCUSAGE_RUNNER` | `bunx` | Package runner used when no native executable is set. |
 | `UTRAQUE_CCUSAGE_VERSION` | `latest` | `ccusage` package version requested through the runner. The resolved version is recorded in each report. |
-| `UTRAQUE_CODEX_EXECUTABLE` | `codex` | Codex executable used only for the report's isolated, short-lived app-server query. It uses the same credential source as inference. |
+| `UTRAQUE_CODEX_EXECUTABLE` | `codex` | Codex executable queried once at startup for the model-catalog client version, then used for the report's isolated, short-lived app-server query. It uses the same credential source as inference. Under launchd, configure an absolute path because its `PATH` is intentionally narrow. |
 | `UTRAQUE_PROVIDER_CACHE_TTL` | `30s` | Lifetime of one coherent quota-before, local-history, quota-after snapshot. |
 | `UTRAQUE_PROVIDER_TIMEOUT` | `90s` | Overall deadline for an on-demand report collection. |
 | `UTRAQUE_CLAUDE_PLAN` | *(none)* | Optional operator-supplied Claude plan label. It is reported as configured metadata, not provider-confirmed data. |
 | `UTRAQUE_CLAUDE_PLAN_MULTIPLIER` | *(none)* | Optional positive operator-supplied plan multiplier. There is deliberately no assumed default. |
 
-The native executable avoids a Bun/Node runtime dependency. The default remains
-`bunx ccusage@latest` for installations that do not set a native path. Helper
-availability is checked on the report request, never at startup.
+The native ccusage executable avoids a Bun/Node runtime dependency. The default
+remains `bunx ccusage@latest` for installations that do not set a native path.
+ccusage availability is checked on the report request. Codex availability is
+checked at startup unless `UTRAQUE_CODEX_CLIENT_VERSION` is set explicitly.
+This startup requirement applies even when you intend to use only non-Codex
+routes; set the explicit version override if that host deliberately has no
+Codex executable.
 
 ### Observability
 
