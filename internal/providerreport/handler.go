@@ -135,7 +135,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if current, err := h.codexSource.Get(work); err == nil {
 				oldScope, oldErr := providerquota.CodexCacheScope(creds.codex)
 				newScope, newErr := providerquota.CodexCacheScope(current)
-				if oldErr == nil && newErr == nil && oldScope != newScope {
+				if oldErr != nil || newErr != nil {
+					markCodexScopeUnverified(&attempt)
+				} else if oldScope != newScope {
 					markCodexScopeChanged(&attempt)
 				}
 			} else {

@@ -57,6 +57,24 @@ func (s *switchingSource) Get(context.Context) (auth.Credential, error) {
 func (*switchingSource) Invalidate(auth.Credential) {}
 func (s *switchingSource) set(cred auth.Credential) { s.mu.Lock(); s.cred = cred; s.mu.Unlock() }
 
+type sequenceSource struct {
+	mu    sync.Mutex
+	creds []auth.Credential
+	next  int
+}
+
+func (s *sequenceSource) Get(context.Context) (auth.Credential, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.next >= len(s.creds) {
+		return s.creds[len(s.creds)-1], nil
+	}
+	cred := s.creds[s.next]
+	s.next++
+	return cred, nil
+}
+func (*sequenceSource) Invalidate(auth.Credential) {}
+
 func TestEndpointRequiresLocalTokenConfigurationAndReservesMethods(t *testing.T) {
 	h := New(Options{})
 	for _, tc := range []struct {
@@ -323,6 +341,59 @@ func TestCanceledCoalescedCallerDoesNotCancelSharedCollection(t *testing.T) {
 	if calls.Load() != 1 {
 		t.Fatalf("history calls=%d", calls.Load())
 	}
+}
+
+func TestMalformedFinalCodexScopeCannotRestorePreviousSnapshot(t *testing.T) {
+	for name, malformed := range map[string]string{"whitespace": "   ", "overlong": strings.Repeat("x", (256<<10)+1)} {
+		t.Run(name, func(t *testing.T) {
+			now := time.Date(2026, 9, 11, 12, 0, 0, 0, time.UTC)
+			valid := auth.Credential{AccessToken: "token-a", AccountID: "account-a"}
+			source := &sequenceSource{creds: []auth.Credential{valid, valid, valid, {AccessToken: "token-x", AccountID: malformed}}}
+			history := historyFunc(func(context.Context, time.Time, time.Time) (usagehistory.Report, error) {
+				return sampleHistory(now), nil
+			})
+			codex := codexFunc(func(context.Context, auth.CredentialSource, auth.Credential) (providerquota.Observation, error) {
+				return providerquota.Observation{Source: providerquota.ProviderCodex, CollectedAt: now}, nil
+			})
+			h := New(Options{LocalTokenConfigured: true, History: history, Codex: codex, CodexSource: source, CacheTTL: time.Second, Now: func() time.Time { return now }})
+			request := func() Report {
+				r := httptest.NewRequest(http.MethodGet, "/v1/utraque/providers", nil)
+				r.RemoteAddr = "127.0.0.1:4000"
+				w := httptest.NewRecorder()
+				h.ServeHTTP(w, r)
+				var out Report
+				_ = json.Unmarshal(w.Body.Bytes(), &out)
+				return out
+			}
+			first := request()
+			if p := providerNamed(first, "codex"); p == nil || p.Paired == nil || p.Status != "ok" {
+				t.Fatalf("initial snapshot=%+v", p)
+			}
+			now = now.Add(2 * time.Second)
+			p := providerNamed(request(), "codex")
+			if p == nil || p.QuotaBefore != nil || p.QuotaAfter != nil || p.Paired != nil || p.LastComplete != nil {
+				t.Fatalf("malformed final scope leaked snapshot: %+v", p)
+			}
+			found := false
+			for _, e := range p.Errors {
+				if e.Code == "account_scope_unverified" {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("errors=%+v", p.Errors)
+			}
+		})
+	}
+}
+
+func providerNamed(r Report, name string) *ProviderReport {
+	for i := range r.Providers {
+		if r.Providers[i].Provider == name {
+			return &r.Providers[i]
+		}
+	}
+	return nil
 }
 
 func TestCalibrationRejectsMixedProviderAndComputesExactClaudeBlock(t *testing.T) {
