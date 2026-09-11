@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -111,16 +112,39 @@ func TestDeepSeekKeyNeverAppearsInConfigRendering(t *testing.T) {
 	}
 }
 
+func TestReportingExecutablePathsAreNotRendered(t *testing.T) {
+	c := config.Default()
+	c.Reporting.CCUsageExecutable = "/private/sensitive/bin/ccusage"
+	c.Reporting.CCUsageRunner = "/private/sensitive/bin/bunx"
+	c.Reporting.CodexExecutable = "/private/sensitive/bin/codex"
+	var buf bytes.Buffer
+	slog.New(slog.NewTextHandler(&buf, nil)).Info("config", "cfg", c)
+	for _, rendered := range []string{c.String(), buf.String()} {
+		if strings.Contains(rendered, "/private/sensitive") {
+			t.Fatalf("reporting executable path leaked: %s", rendered)
+		}
+	}
+}
+
 func TestEnvOverrides(t *testing.T) {
+	multiplier := 4.5
 	c, err := config.LoadFrom(envFrom(map[string]string{
-		config.EnvListen:              "127.0.0.1:9999",
-		config.EnvLocalToken:          secret,
-		config.EnvMaxBodyBytes:        "1024",
-		config.EnvUpstreamIdleTimeout: "45s",
-		config.EnvAnthropicBaseURL:    "https://example.test/api/",
-		config.EnvIdleTimeout:         "15m",
-		config.EnvLogLevel:            "DEBUG",
-		config.EnvLogFormat:           " Text ",
+		config.EnvListen:               "127.0.0.1:9999",
+		config.EnvLocalToken:           secret,
+		config.EnvMaxBodyBytes:         "1024",
+		config.EnvUpstreamIdleTimeout:  "45s",
+		config.EnvAnthropicBaseURL:     "https://example.test/api/",
+		config.EnvIdleTimeout:          "15m",
+		config.EnvLogLevel:             "DEBUG",
+		config.EnvLogFormat:            " Text ",
+		config.EnvCCUsageRunner:        "custom-bunx",
+		config.EnvCCUsageExecutable:    "/opt/homebrew/bin/ccusage",
+		config.EnvCCUsageVersion:       "20.0.20",
+		config.EnvCodexExecutable:      "custom-codex",
+		config.EnvProviderCacheTTL:     "45s",
+		config.EnvProviderTimeout:      "80s",
+		config.EnvClaudePlan:           "Max",
+		config.EnvClaudePlanMultiplier: strconv.FormatFloat(multiplier, 'f', -1, 64),
 	}))
 	if err != nil {
 		t.Fatalf("LoadFrom: %v", err)
@@ -149,15 +173,23 @@ func TestEnvOverrides(t *testing.T) {
 	if c.SlogLevel() != slog.LevelDebug {
 		t.Errorf("SlogLevel = %v", c.SlogLevel())
 	}
+	if c.Reporting.CCUsageRunner != "custom-bunx" || c.Reporting.CCUsageExecutable != "/opt/homebrew/bin/ccusage" || c.Reporting.CCUsageVersion != "20.0.20" || c.Reporting.CodexExecutable != "custom-codex" {
+		t.Fatalf("reporting executables = %+v", c.Reporting)
+	}
+	if c.Reporting.CacheTTL != 45*time.Second || c.Reporting.Timeout != 80*time.Second || c.Reporting.ClaudePlan != "Max" || c.Reporting.ClaudePlanMultiplier == nil || *c.Reporting.ClaudePlanMultiplier != multiplier {
+		t.Fatalf("reporting config = %+v", c.Reporting)
+	}
 }
 
 func TestLoadFromParseErrors(t *testing.T) {
 	cases := map[string]map[string]string{
-		"bad max body": {config.EnvMaxBodyBytes: "lots"},
-		"bad upstream": {config.EnvUpstreamIdleTimeout: "forever"},
-		"bad idle":     {config.EnvIdleTimeout: "1 hour"},
-		"bad listen":   {config.EnvListen: "not-a-hostport"},
-		"bad base url": {config.EnvAnthropicBaseURL: "https://u:p@api.anthropic.com"},
+		"bad max body":        {config.EnvMaxBodyBytes: "lots"},
+		"bad upstream":        {config.EnvUpstreamIdleTimeout: "forever"},
+		"bad idle":            {config.EnvIdleTimeout: "1 hour"},
+		"bad listen":          {config.EnvListen: "not-a-hostport"},
+		"bad base url":        {config.EnvAnthropicBaseURL: "https://u:p@api.anthropic.com"},
+		"bad provider ttl":    {config.EnvProviderCacheTTL: "forever"},
+		"bad plan multiplier": {config.EnvClaudePlanMultiplier: "NaN"},
 	}
 	for name, env := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -191,21 +223,23 @@ func TestValidateAcceptsABracketedIPv6Listen(t *testing.T) {
 
 func TestValidateRejects(t *testing.T) {
 	cases := map[string]func(*config.Config){
-		"empty listen":      func(c *config.Config) { c.Listen = "" },
-		"listen no port":    func(c *config.Config) { c.Listen = "127.0.0.1" },
-		"listen bad port":   func(c *config.Config) { c.Listen = "127.0.0.1:http" },
-		"zero body":         func(c *config.Config) { c.Limits.MaxBodyBytes = 0 },
-		"negative body":     func(c *config.Config) { c.Limits.MaxBodyBytes = -1 },
-		"negative upstream": func(c *config.Config) { c.Limits.UpstreamIdleTimeout = -time.Second },
-		"negative idle":     func(c *config.Config) { c.Idle.Timeout = -time.Second },
-		"empty base url":    func(c *config.Config) { c.Anthropic.BaseURL = "" },
-		"relative base url": func(c *config.Config) { c.Anthropic.BaseURL = "api.anthropic.com" },
-		"bad scheme":        func(c *config.Config) { c.Anthropic.BaseURL = "ftp://api.anthropic.com" },
-		"userinfo":          func(c *config.Config) { c.Anthropic.BaseURL = "https://user:pass@api.anthropic.com" },
-		"query":             func(c *config.Config) { c.Anthropic.BaseURL = "https://api.anthropic.com?key=sk-abc" },
-		"fragment":          func(c *config.Config) { c.Anthropic.BaseURL = "https://api.anthropic.com#tok" },
-		"bad level":         func(c *config.Config) { c.Log.Level = "verbose" },
-		"bad format":        func(c *config.Config) { c.Log.Format = "logfmt" },
+		"empty listen":             func(c *config.Config) { c.Listen = "" },
+		"listen no port":           func(c *config.Config) { c.Listen = "127.0.0.1" },
+		"listen bad port":          func(c *config.Config) { c.Listen = "127.0.0.1:http" },
+		"zero body":                func(c *config.Config) { c.Limits.MaxBodyBytes = 0 },
+		"negative body":            func(c *config.Config) { c.Limits.MaxBodyBytes = -1 },
+		"negative upstream":        func(c *config.Config) { c.Limits.UpstreamIdleTimeout = -time.Second },
+		"negative idle":            func(c *config.Config) { c.Idle.Timeout = -time.Second },
+		"empty base url":           func(c *config.Config) { c.Anthropic.BaseURL = "" },
+		"relative base url":        func(c *config.Config) { c.Anthropic.BaseURL = "api.anthropic.com" },
+		"bad scheme":               func(c *config.Config) { c.Anthropic.BaseURL = "ftp://api.anthropic.com" },
+		"userinfo":                 func(c *config.Config) { c.Anthropic.BaseURL = "https://user:pass@api.anthropic.com" },
+		"query":                    func(c *config.Config) { c.Anthropic.BaseURL = "https://api.anthropic.com?key=sk-abc" },
+		"fragment":                 func(c *config.Config) { c.Anthropic.BaseURL = "https://api.anthropic.com#tok" },
+		"bad level":                func(c *config.Config) { c.Log.Level = "verbose" },
+		"bad format":               func(c *config.Config) { c.Log.Format = "logfmt" },
+		"zero report ttl":          func(c *config.Config) { c.Reporting.CacheTTL = 0 },
+		"negative plan multiplier": func(c *config.Config) { n := -1.0; c.Reporting.ClaudePlanMultiplier = &n },
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -221,6 +255,16 @@ func TestValidateRejects(t *testing.T) {
 func TestValidateAcceptsDefault(t *testing.T) {
 	if err := config.Default().Validate(); err != nil {
 		t.Fatalf("Default() must validate: %v", err)
+	}
+}
+
+func TestNativeCCUsageExecutableTakesPrecedenceOverRunnerSettings(t *testing.T) {
+	c := config.Default()
+	c.Reporting.CCUsageExecutable = "/opt/homebrew/bin/ccusage"
+	c.Reporting.CCUsageRunner = ""
+	c.Reporting.CCUsageVersion = ""
+	if err := c.Validate(); err != nil {
+		t.Fatalf("Validate with native ccusage: %v", err)
 	}
 }
 

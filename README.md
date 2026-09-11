@@ -388,6 +388,23 @@ This is the whole surface.
 | `UTRAQUE_IDLE_TIMEOUT` | `1h` under launchd, off otherwise | How long the process may sit idle before self-exiting, as a Go duration. Setting it wins in both directions, and `0` means never exit. A request still running holds the timer open, so a long streamed answer can never be cut off by an idle exit. A request that arrives in the instant after the deadline fires is answered `503` rather than started, since the drain that has already begun could not see it through; under launchd the retry restarts the daemon. |
 | `UTRAQUE_LAUNCHD_SOCKET` | `Listener` | The `Sockets` key in the plist whose descriptors `utraque` adopts. Must match the plist. |
 
+### Provider reporting
+
+| Variable | Default | What it does |
+| --- | --- | --- |
+| `UTRAQUE_CCUSAGE_EXECUTABLE` | *(none)* | Direct path to an installed native `ccusage` binary. When set, this takes precedence over the package runner. Homebrew users can set `/opt/homebrew/bin/ccusage` after `brew install ccusage`. Utraque never downloads or updates it. |
+| `UTRAQUE_CCUSAGE_RUNNER` | `bunx` | Package runner used when no native executable is set. |
+| `UTRAQUE_CCUSAGE_VERSION` | `latest` | `ccusage` package version requested through the runner. The resolved version is recorded in each report. |
+| `UTRAQUE_CODEX_EXECUTABLE` | `codex` | Codex executable used only for the report's isolated, short-lived app-server query. It uses the same credential source as inference. |
+| `UTRAQUE_PROVIDER_CACHE_TTL` | `30s` | Lifetime of one coherent quota-before, local-history, quota-after snapshot. |
+| `UTRAQUE_PROVIDER_TIMEOUT` | `90s` | Overall deadline for an on-demand report collection. |
+| `UTRAQUE_CLAUDE_PLAN` | *(none)* | Optional operator-supplied Claude plan label. It is reported as configured metadata, not provider-confirmed data. |
+| `UTRAQUE_CLAUDE_PLAN_MULTIPLIER` | *(none)* | Optional positive operator-supplied plan multiplier. There is deliberately no assumed default. |
+
+The native executable avoids a Bun/Node runtime dependency. The default remains
+`bunx ccusage@latest` for installations that do not set a native path. Helper
+availability is checked on the report request, never at startup.
+
 ### Observability
 
 | Variable | Default | What it does |
@@ -615,6 +632,89 @@ reports process status, version and uptime, plus, for the Codex leg:
   change), read live, since the auto transport can switch stacks mid-process.
 - `trace` — whether per-request trace dumps are being written, and where. A
   directory of conversations accumulating on disk should never be a surprise.
+
+## Provider report
+
+`GET /v1/utraque/providers` returns schema version 1 JSON for Anthropic,
+Codex, and DeepSeek. It is available only when `UTRAQUE_LOCAL_TOKEN` is
+configured and the request passes the ordinary `X-Utraque-Token` check. The
+caller must also supply its Claude OAuth bearer credential for the Anthropic
+usage reading; utraque sends that bearer only to Anthropic's official usage
+endpoint and does not capture it from OAuth files, the environment, or a
+keychain.
+
+```sh
+curl -sS \
+  -H 'X-Utraque-Token: <local-token>' \
+  -H 'Authorization: Bearer <claude-oauth-token>' \
+  http://127.0.0.1:8317/v1/utraque/providers
+```
+
+Every response is `Cache-Control: no-store`. Collection is paired: utraque
+reads live quota, collects 30 inclusive UTC dates of local `ccusage` history,
+then reads live quota again. Cached responses retain those original timestamps,
+identify cached and stale sources explicitly, and never combine a newer quota
+percentage with older token history. Providers fail independently, so a
+DeepSeek balance can still be returned when local history fails, and local
+history can still be returned when a live provider reading fails. A previous
+complete snapshot may accompany a partial attempt as a separate stale object.
+
+An abbreviated response looks like this:
+
+```json
+{
+  "schema_version": 1,
+  "generated_at": "2026-09-11T12:00:00Z",
+  "collection_started_at": "2026-09-11T11:59:58Z",
+  "collection_ended_at": "2026-09-11T12:00:00Z",
+  "providers": [
+    {
+      "provider": "anthropic",
+      "status": "ok",
+      "source_freshness": {"cached": false, "stale": false, "age_seconds": 0},
+      "quota_after": {
+        "source": "anthropic",
+        "collected_at": "2026-09-11T12:00:00Z",
+        "quotas": [{"id": "five_hour", "used_percent": 31.5, "unit": "percent_0_100"}]
+      },
+      "history": {
+        "source": "ccusage",
+        "coverage": "local_only",
+        "cost_basis": "calculated_api_reference_usd",
+        "unit_prices_available": false,
+        "unit_price_unavailable_reason": "ccusage_does_not_report_unit_prices"
+      }
+    }
+  ]
+}
+```
+
+The endpoint returns `200` even when one provider is partial or unavailable;
+each provider carries its own status and classified errors. It returns `503`
+when local-token protection is not configured, the normal local-auth `401` for
+a missing or wrong `X-Utraque-Token`, `403` for a non-loopback caller, and
+`405` for methods other than GET or HEAD. Times are RFC 3339 UTC, durations and ages are seconds, percentages use
+`percent_0_100`, token fields are counts, and provider balances retain decimal
+strings plus their three-letter currency.
+
+History is always labelled `local_only`; it is not whole-account coverage.
+Costs are `calculated_api_reference_usd`, not subscription charges or prepaid
+deductions. `ccusage` does not expose a current unit-price catalog, so per-model
+effective rates are weighted historical observations and remain unavailable
+when any included usage is unpriced.
+
+Remaining-token figures are conditional estimates. A DeepSeek USD balance can
+be divided by a fully priced historical workload rate, with future price and
+workload assumptions stated in the result. Other currencies remain null. The
+Claude five-hour estimate is emitted only when an all-Anthropic five-hour log
+block exactly matches the unscoped provider window and both readings bracket
+the collection without a reset or material percentage change. A mixed-provider
+block, zero percentage, expired window, scoped quota, or stale cache produces a
+reason instead of a number. Mixed Claude models produce one observed-workload
+estimate; a model label appears only for a single-model block.
+
+`/healthz` remains network-free and contains none of this financial or usage
+detail. Report failures do not affect inference routes.
 
 ## The model picker (merged `/v1/models`)
 

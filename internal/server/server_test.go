@@ -324,6 +324,35 @@ func TestNoLocalTokenMeansOpen(t *testing.T) {
 	}
 }
 
+func TestProviderReportPathNeverFallsThrough(t *testing.T) {
+	var reports, relays int
+	s, _ := newServer(t, func(o *server.Options) {
+		o.Config.LocalToken = localSecret
+		o.Routes.ProviderReport = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			reports++
+			if r.Method != http.MethodGet && r.Method != http.MethodHead {
+				w.WriteHeader(http.StatusMethodNotAllowed)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+		})
+		o.Routes.Passthrough = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { relays++; w.WriteHeader(http.StatusTeapot) })
+	})
+	for _, tc := range []struct {
+		method string
+		status int
+	}{{http.MethodGet, 200}, {http.MethodHead, 200}, {http.MethodPost, 405}, {http.MethodPatch, 405}} {
+		r := httptest.NewRequest(tc.method, server.ProviderReportPath, nil)
+		r.Header.Set(server.LocalTokenHeader, localSecret)
+		if w := do(t, s, r); w.Code != tc.status {
+			t.Fatalf("%s status=%d want %d", tc.method, w.Code, tc.status)
+		}
+	}
+	if reports != 4 || relays != 0 {
+		t.Fatalf("reports=%d relays=%d", reports, relays)
+	}
+}
+
 func TestBodyLimitDeclaredContentLength(t *testing.T) {
 	reached := false
 	s, _ := newServer(t, func(o *server.Options) {

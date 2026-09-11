@@ -35,6 +35,9 @@ const (
 
 	// HealthPath is the local health endpoint.
 	HealthPath = "/healthz"
+
+	// ProviderReportPath is the authenticated local reporting endpoint.
+	ProviderReportPath = "/v1/utraque/providers"
 )
 
 // DefaultShutdownGrace is how long Serve drains in-flight requests.
@@ -43,10 +46,11 @@ const DefaultShutdownGrace = 25 * time.Second
 // Routes are the backend handlers main mounts. A nil handler is not
 // registered; a nil Passthrough means unmatched paths get a 404 envelope.
 type Routes struct {
-	Messages    http.Handler // POST /v1/messages
-	CountTokens http.Handler // POST /v1/messages/count_tokens
-	Models      http.Handler // GET  /v1/models
-	Passthrough http.Handler // catch-all; in production this must not 404
+	Messages       http.Handler // POST /v1/messages
+	CountTokens    http.Handler // POST /v1/messages/count_tokens
+	Models         http.Handler // GET  /v1/models
+	ProviderReport http.Handler // GET/HEAD /v1/utraque/providers; handler owns 405s
+	Passthrough    http.Handler // catch-all; in production this must not 404
 }
 
 // ActivityTracker is the slice of *idle.Timer the server depends on: Hold
@@ -203,6 +207,11 @@ func New(opts Options) (*Server, error) {
 	}
 	if h := opts.Routes.Models; h != nil {
 		mux.Handle("GET /v1/models", h)
+	}
+	if h := opts.Routes.ProviderReport; h != nil {
+		// Reserve the exact path for every method. The report handler answers
+		// unsupported methods with 405 so they can never leak to passthrough.
+		mux.Handle(ProviderReportPath, h)
 	}
 	var root http.Handler = mux
 	if h := opts.Routes.Passthrough; h != nil {

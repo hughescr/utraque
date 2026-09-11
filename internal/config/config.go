@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net"
 	"net/url"
 	"os"
@@ -25,6 +26,11 @@ const (
 	DefaultUpstreamIdleTimeout = 120 * time.Second
 	DefaultAnthropicBaseURL    = "https://api.anthropic.com"
 	DefaultDeepSeekBaseURL     = "https://api.deepseek.com/anthropic"
+	DefaultCCUsageRunner       = "bunx"
+	DefaultCCUsageVersion      = "latest"
+	DefaultCodexExecutable     = "codex"
+	DefaultProviderCacheTTL    = 30 * time.Second
+	DefaultProviderTimeout     = 90 * time.Second
 
 	// DefaultIdleTimeout is 0 — self-exit off — on purpose. Idle self-exit
 	// only makes sense once something can bring the daemon back: launchd
@@ -113,17 +119,25 @@ const (
 
 // Environment variable names.
 const (
-	EnvListen              = EnvPrefix + "LISTEN"
-	EnvLocalToken          = EnvPrefix + "LOCAL_TOKEN"
-	EnvMaxBodyBytes        = EnvPrefix + "MAX_BODY_BYTES"
-	EnvUpstreamIdleTimeout = EnvPrefix + "UPSTREAM_IDLE_TIMEOUT"
-	EnvAnthropicBaseURL    = EnvPrefix + "ANTHROPIC_BASE_URL"
-	EnvDeepSeekBaseURL     = EnvPrefix + "DEEPSEEK_BASE_URL"
-	EnvDeepSeekAPIKeyFile  = EnvPrefix + "DEEPSEEK_API_KEY_FILE"
-	EnvIdleTimeout         = EnvPrefix + "IDLE_TIMEOUT"
-	EnvLaunchdSocketName   = EnvPrefix + "LAUNCHD_SOCKET"
-	EnvLogLevel            = EnvPrefix + "LOG_LEVEL"
-	EnvLogFormat           = EnvPrefix + "LOG_FORMAT"
+	EnvListen               = EnvPrefix + "LISTEN"
+	EnvLocalToken           = EnvPrefix + "LOCAL_TOKEN"
+	EnvMaxBodyBytes         = EnvPrefix + "MAX_BODY_BYTES"
+	EnvUpstreamIdleTimeout  = EnvPrefix + "UPSTREAM_IDLE_TIMEOUT"
+	EnvAnthropicBaseURL     = EnvPrefix + "ANTHROPIC_BASE_URL"
+	EnvDeepSeekBaseURL      = EnvPrefix + "DEEPSEEK_BASE_URL"
+	EnvDeepSeekAPIKeyFile   = EnvPrefix + "DEEPSEEK_API_KEY_FILE"
+	EnvCCUsageRunner        = EnvPrefix + "CCUSAGE_RUNNER"
+	EnvCCUsageExecutable    = EnvPrefix + "CCUSAGE_EXECUTABLE"
+	EnvCCUsageVersion       = EnvPrefix + "CCUSAGE_VERSION"
+	EnvCodexExecutable      = EnvPrefix + "CODEX_EXECUTABLE"
+	EnvProviderCacheTTL     = EnvPrefix + "PROVIDER_CACHE_TTL"
+	EnvProviderTimeout      = EnvPrefix + "PROVIDER_TIMEOUT"
+	EnvClaudePlan           = EnvPrefix + "CLAUDE_PLAN"
+	EnvClaudePlanMultiplier = EnvPrefix + "CLAUDE_PLAN_MULTIPLIER"
+	EnvIdleTimeout          = EnvPrefix + "IDLE_TIMEOUT"
+	EnvLaunchdSocketName    = EnvPrefix + "LAUNCHD_SOCKET"
+	EnvLogLevel             = EnvPrefix + "LOG_LEVEL"
+	EnvLogFormat            = EnvPrefix + "LOG_FORMAT"
 
 	EnvCodexBaseURL       = EnvPrefix + "CODEX_BASE_URL"
 	EnvCodexAuthFile      = EnvPrefix + "CODEX_AUTH_FILE"
@@ -278,6 +292,20 @@ type Log struct {
 	Format string // UTRAQUE_LOG_FORMAT: json|text
 }
 
+// Reporting configures the authenticated local provider report. External
+// helper availability is checked only when the endpoint is requested, so a
+// missing helper can never prevent inference from starting.
+type Reporting struct {
+	CCUsageRunner        string
+	CCUsageExecutable    string
+	CCUsageVersion       string
+	CodexExecutable      string
+	CacheTTL             time.Duration
+	Timeout              time.Duration
+	ClaudePlan           string
+	ClaudePlanMultiplier *float64
+}
+
 // Config is the whole configuration surface. LocalToken is a secret and is
 // never rendered in full by String or LogValue.
 type Config struct {
@@ -291,6 +319,7 @@ type Config struct {
 	Idle       Idle
 	Launchd    Launchd
 	Log        Log
+	Reporting  Reporting
 }
 
 var (
@@ -322,6 +351,11 @@ func Default() Config {
 		Idle:    Idle{Timeout: DefaultIdleTimeout},
 		Launchd: Launchd{SocketName: DefaultLaunchdSocketName},
 		Log:     Log{Level: DefaultLogLevel, Format: DefaultLogFormat},
+		Reporting: Reporting{
+			CCUsageRunner: DefaultCCUsageRunner, CCUsageVersion: DefaultCCUsageVersion,
+			CodexExecutable: DefaultCodexExecutable, CacheTTL: DefaultProviderCacheTTL,
+			Timeout: DefaultProviderTimeout,
+		},
 	}
 }
 
@@ -353,6 +387,11 @@ func LoadFrom(getenv func(string) string) (Config, error) {
 	setString(EnvLaunchdSocketName, &c.Launchd.SocketName)
 	setString(EnvLogLevel, &c.Log.Level)
 	setString(EnvLogFormat, &c.Log.Format)
+	setString(EnvCCUsageRunner, &c.Reporting.CCUsageRunner)
+	setString(EnvCCUsageExecutable, &c.Reporting.CCUsageExecutable)
+	setString(EnvCCUsageVersion, &c.Reporting.CCUsageVersion)
+	setString(EnvCodexExecutable, &c.Reporting.CodexExecutable)
+	setString(EnvClaudePlan, &c.Reporting.ClaudePlan)
 
 	c.Codex.AuthFile = resolveCodexAuthFile(getenv)
 	c.Codex.CachePath = resolveCodexCacheFile(getenv)
@@ -416,6 +455,19 @@ func LoadFrom(getenv func(string) string) (Config, error) {
 	if err := setDuration(EnvCodexLockTimeout, &c.Codex.LockTimeout); err != nil {
 		return Config{}, err
 	}
+	if err := setDuration(EnvProviderCacheTTL, &c.Reporting.CacheTTL); err != nil {
+		return Config{}, err
+	}
+	if err := setDuration(EnvProviderTimeout, &c.Reporting.Timeout); err != nil {
+		return Config{}, err
+	}
+	if v, ok := lookup(getenv, EnvClaudePlanMultiplier); ok {
+		f, err := strconv.ParseFloat(v, 64)
+		if err != nil || math.IsNaN(f) || math.IsInf(f, 0) {
+			return Config{}, fmt.Errorf("config: %s must be a finite number", EnvClaudePlanMultiplier)
+		}
+		c.Reporting.ClaudePlanMultiplier = &f
+	}
 
 	c.Codex.BaseURL = strings.TrimRight(strings.TrimSpace(c.Codex.BaseURL), "/")
 	c.Codex.TokenURL = strings.TrimRight(strings.TrimSpace(c.Codex.TokenURL), "/")
@@ -427,6 +479,11 @@ func LoadFrom(getenv func(string) string) (Config, error) {
 	c.Log.Format = strings.ToLower(strings.TrimSpace(c.Log.Format))
 	c.Anthropic.BaseURL = strings.TrimRight(strings.TrimSpace(c.Anthropic.BaseURL), "/")
 	c.DeepSeek.BaseURL = strings.TrimRight(strings.TrimSpace(c.DeepSeek.BaseURL), "/")
+	c.Reporting.CCUsageRunner = strings.TrimSpace(c.Reporting.CCUsageRunner)
+	c.Reporting.CCUsageExecutable = strings.TrimSpace(c.Reporting.CCUsageExecutable)
+	c.Reporting.CCUsageVersion = strings.TrimSpace(c.Reporting.CCUsageVersion)
+	c.Reporting.CodexExecutable = strings.TrimSpace(c.Reporting.CodexExecutable)
+	c.Reporting.ClaudePlan = strings.TrimSpace(c.Reporting.ClaudePlan)
 
 	if err := c.Validate(); err != nil {
 		return Config{}, err
@@ -560,6 +617,32 @@ func (c Config) Validate() error {
 	}
 	if c.Idle.Timeout < 0 {
 		return fmt.Errorf("config: %s must not be negative, got %s", EnvIdleTimeout, c.Idle.Timeout)
+	}
+	if strings.TrimSpace(c.Reporting.CCUsageExecutable) != c.Reporting.CCUsageExecutable || strings.ContainsRune(c.Reporting.CCUsageExecutable, 0) {
+		return fmt.Errorf("config: %s must not have surrounding whitespace or NUL", EnvCCUsageExecutable)
+	}
+	if c.Reporting.CCUsageExecutable == "" {
+		if c.Reporting.CCUsageRunner == "" || strings.TrimSpace(c.Reporting.CCUsageRunner) != c.Reporting.CCUsageRunner || strings.ContainsRune(c.Reporting.CCUsageRunner, 0) {
+			return fmt.Errorf("config: %s must name an executable", EnvCCUsageRunner)
+		}
+		if c.Reporting.CCUsageVersion == "" || strings.ContainsAny(c.Reporting.CCUsageVersion, " \t\r\n\x00") {
+			return fmt.Errorf("config: %s must be a single version token", EnvCCUsageVersion)
+		}
+	}
+	if c.Reporting.CodexExecutable == "" || strings.TrimSpace(c.Reporting.CodexExecutable) != c.Reporting.CodexExecutable || strings.ContainsRune(c.Reporting.CodexExecutable, 0) {
+		return fmt.Errorf("config: %s must name an executable", EnvCodexExecutable)
+	}
+	if c.Reporting.CacheTTL <= 0 {
+		return fmt.Errorf("config: %s must be positive", EnvProviderCacheTTL)
+	}
+	if c.Reporting.Timeout <= 0 {
+		return fmt.Errorf("config: %s must be positive", EnvProviderTimeout)
+	}
+	if c.Reporting.ClaudePlanMultiplier != nil && *c.Reporting.ClaudePlanMultiplier <= 0 {
+		return fmt.Errorf("config: %s must be positive", EnvClaudePlanMultiplier)
+	}
+	if len(c.Reporting.ClaudePlan) > 256 || strings.IndexFunc(c.Reporting.ClaudePlan, func(r rune) bool { return r < 0x20 || r == 0x7f }) >= 0 {
+		return fmt.Errorf("config: %s must be a short printable label", EnvClaudePlan)
 	}
 	if c.Launchd.SocketName == "" {
 		return fmt.Errorf("config: %s must not be empty", EnvLaunchdSocketName)
@@ -728,6 +811,11 @@ func (c Config) String() string {
 	fmt.Fprintf(&b, " launchd.socket=%s", c.Launchd.SocketName)
 	fmt.Fprintf(&b, " log.level=%s", c.Log.Level)
 	fmt.Fprintf(&b, " log.format=%s", c.Log.Format)
+	fmt.Fprintf(&b, " reporting.ccusage_version=%s", c.Reporting.CCUsageVersion)
+	fmt.Fprintf(&b, " reporting.cache_ttl=%s", c.Reporting.CacheTTL)
+	fmt.Fprintf(&b, " reporting.timeout=%s", c.Reporting.Timeout)
+	fmt.Fprintf(&b, " reporting.claude_plan=%s", c.Reporting.ClaudePlan)
+	fmt.Fprintf(&b, " reporting.claude_plan_multiplier=%s", optionalFloat(c.Reporting.ClaudePlanMultiplier))
 	b.WriteString("}")
 	return b.String()
 }
@@ -757,7 +845,19 @@ func (c Config) LogValue() slog.Value {
 		slog.String("launchd.socket", c.Launchd.SocketName),
 		slog.String("log.level", c.Log.Level),
 		slog.String("log.format", c.Log.Format),
+		slog.String("reporting.ccusage_version", c.Reporting.CCUsageVersion),
+		slog.Duration("reporting.cache_ttl", c.Reporting.CacheTTL),
+		slog.Duration("reporting.timeout", c.Reporting.Timeout),
+		slog.String("reporting.claude_plan", c.Reporting.ClaudePlan),
+		slog.String("reporting.claude_plan_multiplier", optionalFloat(c.Reporting.ClaudePlanMultiplier)),
 	)
+}
+
+func optionalFloat(v *float64) string {
+	if v == nil {
+		return "none"
+	}
+	return strconv.FormatFloat(*v, 'g', -1, 64)
 }
 
 // joinOverrides renders the override table for a log line. It carries no

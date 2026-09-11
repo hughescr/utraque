@@ -15,6 +15,7 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
+	"net/url"
 	"os"
 	"sort"
 	"strconv"
@@ -35,10 +36,13 @@ import (
 	"github.com/hughescr/utraque/internal/idle"
 	"github.com/hughescr/utraque/internal/launchd"
 	"github.com/hughescr/utraque/internal/obs"
+	"github.com/hughescr/utraque/internal/providerquota"
+	"github.com/hughescr/utraque/internal/providerreport"
 	"github.com/hughescr/utraque/internal/router"
 	"github.com/hughescr/utraque/internal/server"
 	"github.com/hughescr/utraque/internal/tokens"
 	"github.com/hughescr/utraque/internal/transport"
+	"github.com/hughescr/utraque/internal/usagehistory"
 )
 
 // version is stamped at build time with -ldflags "-X main.version=...".
@@ -339,6 +343,10 @@ func newApp(cfg config.Config, log *slog.Logger, activity server.ActivityTracker
 		cat: cat, catState: catState, obs: obsv,
 		anthTransport: tr, codexTransport: codexTr, tracer: tracer,
 	}
+	reportHandler, err := newProviderReport(cfg, credSource, nil)
+	if err != nil {
+		return nil, err
+	}
 	if credSource != nil {
 		hr.auth = credSource
 	}
@@ -352,9 +360,10 @@ func newApp(cfg config.Config, log *slog.Logger, activity server.ActivityTracker
 		TransportKind: tr.Kind,
 		Tracer:        tracer,
 		Routes: server.Routes{
-			Messages:    http.HandlerFunc(d.messages),
-			CountTokens: http.HandlerFunc(d.countTokens),
-			Models:      models,
+			Messages:       http.HandlerFunc(d.messages),
+			CountTokens:    http.HandlerFunc(d.countTokens),
+			Models:         models,
+			ProviderReport: reportHandler,
 			// Everything else — /v1/organizations/..., whatever Claude Code
 			// reaches for next — relays upstream unchanged. None of it may 404
 			// locally.
@@ -369,6 +378,77 @@ func newApp(cfg config.Config, log *slog.Logger, activity server.ActivityTracker
 		srv:  srv,
 		warm: newCatalogWarmer(cat, credSource, loadAliases, catState, log),
 	}, nil
+}
+
+// reportDependencies makes the production composition hermetic in tests. A
+// nil dependency is constructed from Config without starting a subprocess or
+// contacting a provider; all such work remains request-driven.
+type reportDependencies struct {
+	history   providerreport.HistoryCollector
+	anthropic providerreport.AnthropicReader
+	deepseek  providerreport.DeepSeekReader
+	codex     providerreport.CodexReader
+}
+
+func newProviderReport(cfg config.Config, source auth.CredentialSource, deps *reportDependencies) (http.Handler, error) {
+	if deps == nil {
+		deps = &reportDependencies{}
+	}
+	if deps.history == nil {
+		collector, err := usagehistory.New(usagehistory.Options{
+			Executable: cfg.Reporting.CCUsageRunner, NativeExecutable: cfg.Reporting.CCUsageExecutable,
+			Package: usagehistory.DefaultPackage, Version: cfg.Reporting.CCUsageVersion,
+			Timeout: min(cfg.Reporting.Timeout, usagehistory.DefaultTimeout),
+		})
+		if err != nil {
+			return nil, err
+		}
+		deps.history = collector
+	}
+	if deps.anthropic == nil {
+		client, err := providerquota.NewAnthropicClient(providerquota.AnthropicOptions{Timeout: min(cfg.Reporting.Timeout, 15*time.Second)})
+		if err != nil {
+			return nil, err
+		}
+		deps.anthropic = client
+	}
+	if deps.deepseek == nil && cfg.DeepSeek.Configured() {
+		client, err := providerquota.NewDeepSeekClient(providerquota.DeepSeekOptions{
+			BaseURL: deepSeekAccountBase(cfg.DeepSeek.BaseURL), APIKey: cfg.DeepSeek.APIKey,
+			Timeout: min(cfg.Reporting.Timeout, 15*time.Second),
+		})
+		if err != nil {
+			return nil, err
+		}
+		deps.deepseek = client
+	}
+	if deps.codex == nil {
+		client, err := providerquota.NewCodexClient(providerquota.CodexOptions{
+			Command: []string{cfg.Reporting.CodexExecutable, "app-server", "--listen", "stdio://"},
+			Timeout: min(cfg.Reporting.Timeout, 15*time.Second),
+		})
+		if err != nil {
+			return nil, err
+		}
+		deps.codex = client
+	}
+	return providerreport.New(providerreport.Options{
+		LocalTokenConfigured: cfg.HasLocalToken(), History: deps.history,
+		Anthropic: deps.anthropic, DeepSeek: deps.deepseek, DeepSeekAPIKey: cfg.DeepSeek.APIKey,
+		Codex: deps.codex, CodexSource: source, CacheTTL: cfg.Reporting.CacheTTL,
+		Timeout: cfg.Reporting.Timeout, ClaudePlan: cfg.Reporting.ClaudePlan,
+		ClaudePlanMultiplier: cfg.Reporting.ClaudePlanMultiplier,
+	}), nil
+}
+
+func deepSeekAccountBase(inferenceURL string) string {
+	u, err := url.Parse(inferenceURL)
+	if err != nil {
+		return inferenceURL
+	}
+	u.Path = strings.TrimSuffix(strings.TrimRight(u.Path, "/"), "/anthropic")
+	u.RawPath = ""
+	return strings.TrimRight(u.String(), "/")
 }
 
 // catalogWarmTimeout bounds the startup catalog fetch. It is generous, because
