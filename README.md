@@ -304,7 +304,7 @@ the client never notices.
 ```sh
 go build -o bin/utraque ./cmd/utraque
 (umask 077; openssl rand -hex 16 > ~/.utraque-token)
-deploy/install.sh --local-token-file ~/.utraque-token
+deploy/install.sh --local-token-file ~/.utraque-token --codex-executable codex
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.hughescr.utraque.plist
 ```
 

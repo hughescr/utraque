@@ -39,7 +39,7 @@ own `~/.codex/auth.json` and must run as you.
 
 ```sh
 go build -o bin/utraque ./cmd/utraque
-deploy/install.sh
+deploy/install.sh --codex-executable codex
 ```
 
 `install.sh` writes the plist and prints the `launchctl` command to run. It does
@@ -70,6 +70,7 @@ deploy/install.sh \
   --node localhost \
   --idle 1h \
   --local-token-file ~/.utraque-token \
+  --codex-executable codex \
   --log-level info --log-format json
 ```
 
@@ -94,7 +95,8 @@ chmod 600 ~/.config/utraque/deepseek.key
 
 deploy/install.sh \
   --local-token-file ~/.utraque-token \
-  --deepseek-api-key-file ~/.config/utraque/deepseek.key
+  --deepseek-api-key-file ~/.config/utraque/deepseek.key \
+  --codex-executable codex
 ```
 
 The installer checks that the file exists and is readable, then records only
