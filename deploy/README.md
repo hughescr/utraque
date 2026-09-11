@@ -119,20 +119,23 @@ shell's `PATH` and stores the absolute path in `UTRAQUE_CCUSAGE_RUNNER` or
 `UTRAQUE_CODEX_EXECUTABLE`. The application defaults remain `bunx` and `codex`
 when these options are omitted.
 
-Current ccusage releases also provide a native Rust executable. To use an
-installed native copy without Bun, configure it directly:
+Current ccusage releases also provide a native Rust executable. The recommended
+macOS setup uses the [Homebrew ccusage formula](https://formulae.brew.sh/formula/ccusage),
+which does not need Bun or Node at runtime:
 
 ```sh
+brew install ccusage
+
 deploy/install.sh \
   --local-token-file ~/.utraque-token \
-  --ccusage-executable ccusage \
+  --ccusage-executable "$(brew --prefix)/bin/ccusage" \
   --codex-executable codex
 ```
 
 This records `UTRAQUE_CCUSAGE_EXECUTABLE`; it takes precedence over
 `UTRAQUE_CCUSAGE_RUNNER` when both are configured. utraque does not download or
 update that binary, so its installed version remains under your normal package
-management.
+management. Update it separately when intended with `brew upgrade ccusage`.
 
 Some installed commands are wrappers with `#!/usr/bin/env node` or launch
 other programs. Their absolute path does not help `/usr/bin/env` find those
