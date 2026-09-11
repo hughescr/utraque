@@ -1,5 +1,5 @@
 // Package providerreport assembles live provider quota observations and local
-// ccusage history into an authenticated, cache-safe reporting document.
+// ccusage history into a loopback-only, cache-safe reporting document.
 package providerreport
 
 import (

@@ -36,7 +36,7 @@ const (
 	// HealthPath is the local health endpoint.
 	HealthPath = "/healthz"
 
-	// ProviderReportPath is the authenticated local reporting endpoint.
+	// ProviderReportPath is the loopback-only provider reporting endpoint.
 	ProviderReportPath = "/v1/utraque/providers"
 )
 

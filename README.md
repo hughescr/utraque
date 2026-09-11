@@ -647,10 +647,12 @@ keychain.
 
 ```sh
 curl -sS \
-  -H 'X-Utraque-Token: <local-token>' \
   -H 'Authorization: Bearer <claude-oauth-token>' \
   http://127.0.0.1:8317/v1/utraque/providers
 ```
+
+Add `-H 'X-Utraque-Token: <local-token>'` when `UTRAQUE_LOCAL_TOKEN` is
+configured.
 
 Every response is `Cache-Control: no-store`. Collection is paired: utraque
 reads live quota, collects 30 inclusive UTC dates of local `ccusage` history,
@@ -692,8 +694,8 @@ An abbreviated response looks like this:
 ```
 
 The endpoint returns `200` even when one provider is partial or unavailable;
-each provider carries its own status and classified errors. It returns `503`
-the normal local-auth `401` for a missing or wrong `X-Utraque-Token` when that
+each provider carries its own status and classified errors. It returns the
+normal local-auth `401` for a missing or wrong `X-Utraque-Token` when that
 optional protection is configured, `403` for a non-loopback caller, and
 `405` for methods other than GET or HEAD. Times are RFC 3339 UTC, durations and ages are seconds, percentages use
 `percent_0_100`, token fields are counts, and provider balances retain decimal

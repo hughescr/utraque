@@ -292,7 +292,7 @@ type Log struct {
 	Format string // UTRAQUE_LOG_FORMAT: json|text
 }
 
-// Reporting configures the authenticated local provider report. External
+// Reporting configures the loopback-only provider report. External
 // helper availability is checked only when the endpoint is requested, so a
 // missing helper can never prevent inference from starting.
 type Reporting struct {
