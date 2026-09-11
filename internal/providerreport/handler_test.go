@@ -44,6 +44,19 @@ type sourceFunc func(context.Context) (auth.Credential, error)
 func (f sourceFunc) Get(c context.Context) (auth.Credential, error) { return f(c) }
 func (sourceFunc) Invalidate(auth.Credential)                       {}
 
+type switchingSource struct {
+	mu   sync.Mutex
+	cred auth.Credential
+}
+
+func (s *switchingSource) Get(context.Context) (auth.Credential, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.cred, nil
+}
+func (*switchingSource) Invalidate(auth.Credential) {}
+func (s *switchingSource) set(cred auth.Credential) { s.mu.Lock(); s.cred = cred; s.mu.Unlock() }
+
 func TestEndpointRequiresLocalTokenConfigurationAndReservesMethods(t *testing.T) {
 	h := New(Options{})
 	for _, tc := range []struct {
@@ -169,9 +182,17 @@ func TestConcurrentRequestsCoalesceAndFailedRefreshRetainsSeparateSnapshot(t *te
 	if calls.Load() != 1 {
 		t.Fatalf("coalesced history calls=%d", calls.Load())
 	}
+	first := request()
+	var originalEnd time.Time
+	for _, p := range first.Providers {
+		if p.Provider == "deepseek" && p.Paired != nil {
+			originalEnd = p.Paired.EndedAt
+		}
+	}
 	now = now.Add(2 * time.Second)
 	failing = true
 	report := request()
+	var age1 float64
 	for _, p := range report.Providers {
 		if p.Provider == "deepseek" {
 			if p.LastComplete == nil {
@@ -180,15 +201,133 @@ func TestConcurrentRequestsCoalesceAndFailedRefreshRetainsSeparateSnapshot(t *te
 			if !p.LastComplete.Freshness.Stale {
 				t.Fatal("deepseek previous snapshot not stale")
 			}
+			if p.LastComplete.Paired == nil || !p.LastComplete.Paired.EndedAt.Equal(originalEnd) {
+				t.Fatal("original pair timestamp changed")
+			}
+			age1 = p.LastComplete.Freshness.AgeSeconds
+		}
+	}
+	if age1 == 0 {
+		t.Fatal("deepseek provider missing")
+	}
+	now = now.Add(2 * time.Second)
+	report = request()
+	for _, p := range report.Providers {
+		if p.Provider == "deepseek" {
+			if p.LastComplete == nil || p.LastComplete.Freshness.AgeSeconds <= age1 {
+				t.Fatalf("age did not increase: before=%v after=%+v", age1, p.LastComplete)
+			}
+			if !p.LastComplete.Paired.EndedAt.Equal(originalEnd) {
+				t.Fatal("repeated failure changed original pair")
+			}
 			return
 		}
 	}
-	t.Fatal("deepseek provider missing")
+	t.Fatal("deepseek provider missing after repeated failure")
+}
+
+func TestCodexAccountSwitchDuringCollectionCannotReplaceNewAccount(t *testing.T) {
+	now := time.Date(2026, 9, 11, 12, 0, 0, 0, time.UTC)
+	source := &switchingSource{cred: auth.Credential{AccessToken: "token-a", AccountID: "account-a"}}
+	firstStarted := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	var historyCalls atomic.Int64
+	history := historyFunc(func(context.Context, time.Time, time.Time) (usagehistory.Report, error) {
+		if historyCalls.Add(1) == 1 {
+			close(firstStarted)
+			<-releaseFirst
+		}
+		return sampleHistory(now), nil
+	})
+	codex := codexFunc(func(_ context.Context, _ auth.CredentialSource, cred auth.Credential) (providerquota.Observation, error) {
+		pct := 10.0
+		if cred.AccountID == "account-b" {
+			pct = 20
+		}
+		return providerquota.Observation{Source: providerquota.ProviderCodex, CollectedAt: now, Quotas: []providerquota.Quota{{ID: "primary", UsedPercent: pct}}}, nil
+	})
+	h := New(Options{LocalTokenConfigured: true, History: history, Codex: codex, CodexSource: source, Now: func() time.Time { return now }})
+	request := func() Report {
+		r := httptest.NewRequest(http.MethodGet, "/v1/utraque/providers", nil)
+		r.RemoteAddr = "127.0.0.1:4000"
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		var out Report
+		_ = json.Unmarshal(w.Body.Bytes(), &out)
+		return out
+	}
+	aDone := make(chan Report, 1)
+	go func() { aDone <- request() }()
+	<-firstStarted
+	source.set(auth.Credential{AccessToken: "token-b", AccountID: "account-b"})
+	b := request()
+	close(releaseFirst)
+	a := <-aDone
+	findCodex := func(r Report) *ProviderReport {
+		for i := range r.Providers {
+			if r.Providers[i].Provider == "codex" {
+				return &r.Providers[i]
+			}
+		}
+		return nil
+	}
+	bp := findCodex(b)
+	if bp == nil || bp.QuotaAfter == nil || bp.QuotaAfter.Quotas[0].UsedPercent != 20 {
+		t.Fatalf("new account report=%+v", bp)
+	}
+	ap := findCodex(a)
+	if ap == nil || ap.QuotaAfter != nil || ap.Paired != nil || ap.LastComplete != nil {
+		t.Fatalf("switched old account leaked=%+v", ap)
+	}
+	bCached := findCodex(request())
+	if bCached == nil || bCached.QuotaAfter == nil || bCached.QuotaAfter.Quotas[0].UsedPercent != 20 {
+		t.Fatalf("late A replaced B cache: %+v", bCached)
+	}
+	if historyCalls.Load() != 2 {
+		t.Fatalf("history calls=%d want 2", historyCalls.Load())
+	}
+}
+
+func TestCanceledCoalescedCallerDoesNotCancelSharedCollection(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var calls atomic.Int64
+	history := historyFunc(func(context.Context, time.Time, time.Time) (usagehistory.Report, error) {
+		calls.Add(1)
+		close(started)
+		<-release
+		return sampleHistory(time.Now().UTC()), nil
+	})
+	h := New(Options{LocalTokenConfigured: true, History: history, Timeout: 2 * time.Second})
+	do := func(ctx context.Context) int {
+		r := httptest.NewRequest(http.MethodGet, "/v1/utraque/providers", nil).WithContext(ctx)
+		r.RemoteAddr = "127.0.0.1:4000"
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w.Code
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	first := make(chan int, 1)
+	go func() { first <- do(ctx) }()
+	<-started
+	second := make(chan int, 1)
+	go func() { second <- do(context.Background()) }()
+	cancel()
+	if status := <-first; status != http.StatusGatewayTimeout {
+		t.Fatalf("canceled status=%d", status)
+	}
+	close(release)
+	if status := <-second; status != http.StatusOK {
+		t.Fatalf("coalesced status=%d", status)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("history calls=%d", calls.Load())
+	}
 }
 
 func TestCalibrationRejectsMixedProviderAndComputesExactClaudeBlock(t *testing.T) {
 	start := time.Date(2026, 9, 11, 10, 0, 0, 0, time.UTC)
-	reset := start.Add(6 * time.Hour)
+	reset := start.Add(5 * time.Hour)
 	q := providerquota.Quota{ID: "five_hour", UsedPercent: 25, DurationSeconds: ptr(int64(18000)), ResetsAt: &reset}
 	pair := &PairedMeasurement{StartedAt: start, EndedAt: start.Add(time.Hour), Before: providerquota.Observation{CollectedAt: start, Quotas: []providerquota.Quota{q}}, After: providerquota.Observation{CollectedAt: start.Add(time.Hour), Quotas: []providerquota.Quota{q}}}
 	block := usagehistory.BlockSummary{StartTime: reset.Add(-5 * time.Hour), EndTime: reset, ActualEndTime: ptr(start.Add(30 * time.Minute)), TotalTokens: 100, Models: []usagehistory.BlockModel{{Model: "claude-sonnet", Provider: usagehistory.ProviderAnthropic}}}
@@ -229,6 +368,12 @@ func TestCalibrationRejectsScopedZeroAndDriftingQuota(t *testing.T) {
 	if got := calibrateAnthropic(pair, history).UnavailableReason; got != "five_hour_quota_unavailable" {
 		t.Fatalf("scoped reason=%q", got)
 	}
+	pair.Before.Quotas[0].Scope, pair.After.Quotas[0].Scope = nil, nil
+	inactive := false
+	pair.Before.Quotas[0].Active, pair.After.Quotas[0].Active = &inactive, &inactive
+	if got := calibrateAnthropic(pair, history).UnavailableReason; got != "five_hour_quota_unavailable" {
+		t.Fatalf("inactive reason=%q", got)
+	}
 }
 
 func TestDeepSeekEstimateWeightsSourcesAndHandlesCurrencyAndPricing(t *testing.T) {
@@ -267,6 +412,21 @@ func TestCachedWindowPastResetIsStaleAndHasNoEstimate(t *testing.T) {
 	report.GeneratedAt = now
 	markFreshness(&report, true, false, 2*time.Second)
 	if !report.Providers[0].SourceFreshness.Stale || report.Providers[0].Calibration.UnavailableReason != "quota_window_reset_after_collection" {
+		t.Fatalf("provider=%+v", report.Providers[0])
+	}
+}
+
+func TestInactivePastResetDoesNotInvalidateActiveFutureWindow(t *testing.T) {
+	now := time.Date(2026, 9, 11, 12, 0, 0, 0, time.UTC)
+	future := now.Add(time.Hour)
+	past := now.Add(-time.Hour)
+	active, inactive := true, false
+	report := Report{GeneratedAt: now, Providers: []ProviderReport{{Provider: "anthropic", QuotaAfter: &providerquota.Observation{Quotas: []providerquota.Quota{
+		{ID: "session", Active: &active, ResetsAt: &future},
+		{ID: "weekly_scoped", Active: &inactive, ResetsAt: &past, Scope: &providerquota.Scope{Model: &providerquota.ScopeLabel{ID: "claude-opus"}}},
+	}}, Calibration: &Calibration{ConditionalRemaining: ptr(10.0)}}}}
+	markFreshness(&report, true, false, time.Second)
+	if report.Providers[0].SourceFreshness.Stale || report.Providers[0].Calibration.ConditionalRemaining == nil {
 		t.Fatalf("provider=%+v", report.Providers[0])
 	}
 }

@@ -138,6 +138,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				if oldErr == nil && newErr == nil && oldScope != newScope {
 					markCodexScopeChanged(&attempt)
 				}
+			} else {
+				markCodexScopeUnverified(&attempt)
 			}
 		}
 		return h.storeAttempt(key, attempt), nil
@@ -164,13 +166,23 @@ func isLoopback(remoteAddr string) bool {
 }
 
 func markCodexScopeChanged(r *Report) {
+	markCodexUnavailable(r, "account_scope_changed", "Codex account scope changed during collection")
+}
+
+func markCodexScopeUnverified(r *Report) {
+	markCodexUnavailable(r, "account_scope_unverified", "Codex account scope could not be verified after collection")
+}
+
+func markCodexUnavailable(r *Report, code, message string) {
 	for i := range r.Providers {
 		p := &r.Providers[i]
 		if p.Provider != "codex" {
 			continue
 		}
 		p.QuotaBefore, p.QuotaAfter, p.Paired = nil, nil, nil
-		p.Errors = append(p.Errors, ReportError{Section: "paired_measurement", Code: "account_scope_changed", Retryable: true, Message: "Codex account scope changed during collection"})
+		p.LastComplete = nil
+		p.discardPrevious = true
+		p.Errors = append(p.Errors, ReportError{Section: "paired_measurement", Code: code, Retryable: true, Message: message})
 		if p.History != nil {
 			p.Status = "partial"
 		} else {
@@ -231,7 +243,7 @@ func (h *Handler) storeAttempt(key string, attempt Report) Report {
 	defer h.mu.Unlock()
 	if old := h.cache[key]; old != nil {
 		for i := range attempt.Providers {
-			if attempt.Providers[i].Status == "ok" {
+			if attempt.Providers[i].Status == "ok" || attempt.Providers[i].discardPrevious {
 				continue
 			}
 			for _, previous := range old.report.Providers {
@@ -321,7 +333,7 @@ func observationResetPassed(obs *providerquota.Observation, now time.Time) bool 
 		return false
 	}
 	for _, q := range obs.Quotas {
-		if q.ResetsAt != nil && !q.ResetsAt.After(now) {
+		if (q.Active == nil || *q.Active) && q.ResetsAt != nil && !q.ResetsAt.After(now) {
 			return true
 		}
 	}

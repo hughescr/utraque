@@ -59,6 +59,7 @@ type ProviderReport struct {
 	Remaining       []RemainingEstimate        `json:"conditional_remaining_token_estimates,omitempty"`
 	ConfiguredPlan  *ConfiguredPlan            `json:"configured_plan,omitempty"`
 	LastComplete    *ProviderSnapshot          `json:"last_complete_snapshot,omitempty"`
+	discardPrevious bool
 }
 
 // ProviderSnapshot preserves a previously successful, internally coherent

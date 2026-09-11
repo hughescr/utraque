@@ -243,14 +243,14 @@ func calibrateAnthropic(pair *PairedMeasurement, history *HistorySummary) *Calib
 	var qb, qa *providerquota.Quota
 	for i := range pair.Before.Quotas {
 		q := &pair.Before.Quotas[i]
-		if q.DurationSeconds != nil && *q.DurationSeconds == 5*60*60 && q.Scope == nil {
+		if q.DurationSeconds != nil && *q.DurationSeconds == 5*60*60 && q.Scope == nil && (q.Active == nil || *q.Active) {
 			qb = q
 			break
 		}
 	}
 	for i := range pair.After.Quotas {
 		q := &pair.After.Quotas[i]
-		if q.DurationSeconds != nil && *q.DurationSeconds == 5*60*60 && q.Scope == nil && qb != nil && q.ID == qb.ID && q.Slot == qb.Slot && q.Kind == qb.Kind && q.Group == qb.Group {
+		if q.DurationSeconds != nil && *q.DurationSeconds == 5*60*60 && q.Scope == nil && (q.Active == nil || *q.Active) && qb != nil && q.ID == qb.ID && q.Slot == qb.Slot && q.Kind == qb.Kind && q.Group == qb.Group {
 			qa = q
 			break
 		}
