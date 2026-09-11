@@ -31,8 +31,8 @@ scripts. If you touch `deploy/*.sh`, run `shellcheck` locally too.
 
 `go test ./...` is hermetic by design: every upstream is an `httptest` server
 and every credential is a throwaway written under `t.TempDir()`. The real
-`chatgpt.com`, `auth.openai.com`, `api.anthropic.com` and your own
-`~/.codex/auth.json` are never read, written, or contacted.
+`chatgpt.com`, `auth.openai.com`, `api.anthropic.com`, `api.deepseek.com` and
+your own `~/.codex/auth.json` are never read, written, or contacted.
 
 The tests that *do* talk to the real backends are behind a build tag and need
 your own subscription credentials:

@@ -311,8 +311,11 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.hughescr.utraque.pli
 `--local-token-file` is optional (as is `--local-token`, which takes the value
 directly) and writes `UTRAQUE_LOCAL_TOKEN` into the plist; pair it with
 `ANTHROPIC_CUSTOM_HEADERS` as shown above, and if you omit it understand what
-you are choosing — without it any local process can spend both subscriptions
-through the loopback port.
+you are choosing — without it any local process can spend the configured Codex
+subscription or DeepSeek prepaid balance and read whatever local usage history
+and available provider quota or balance data the provider report can collect.
+Anthropic requests and live Anthropic usage readings still require the caller's
+own bearer credential.
 
 `deploy/install.sh` writes `~/Library/LaunchAgents/com.hughescr.utraque.plist`,
 creates `~/Library/LaunchAgents` and `~/Library/Logs/utraque` if they are
@@ -341,7 +344,7 @@ This is the whole surface.
 | Variable | Default | What it does |
 | --- | --- | --- |
 | `UTRAQUE_LISTEN` | `127.0.0.1:8317` | The `host:port` to bind. Also the address `ANTHROPIC_BASE_URL` must name. |
-| `UTRAQUE_LOCAL_TOKEN` | *(none)* | Optional loopback shared secret, required in `X-Utraque-Token` on every request except `/healthz`. Recommended on, since any local process could otherwise spend both subscriptions through the loopback port. |
+| `UTRAQUE_LOCAL_TOKEN` | *(none)* | Optional loopback shared secret, required in `X-Utraque-Token` on every request except `/healthz`. Recommended on: without it, any local process can spend the configured Codex subscription or DeepSeek balance and read whatever provider-report data is available. Anthropic operations still require the caller's own bearer credential. |
 | `UTRAQUE_MAX_BODY_BYTES` | `67108864` (64 MiB) | Largest request body accepted. |
 | `UTRAQUE_UPSTREAM_IDLE_TIMEOUT` | `120s` | Bounds the wait for an upstream's first byte **and** silence within a stream, so a stalled SSE response cannot pin a request forever. There is deliberately no overall request timeout: a legitimate stream can run for many minutes. |
 | `UTRAQUE_LOG_LEVEL` | `info` | `debug` \| `info` \| `warn` \| `error`. |
@@ -375,6 +378,11 @@ This is the whole surface.
 | `UTRAQUE_CODEX_TRANSPORT` | `auto` | `auto` \| `std` \| `utls`. See *Transport* below. A typo is a startup error, never a silent fallback. |
 | `UTRAQUE_CODEX_CLIENT_VERSION` | detected from `UTRAQUE_CODEX_EXECUTABLE --version` | Sent as the `client_version` query parameter on every model-catalog request. Discovery is bounded and requires `codex-cli <semantic-version>` on stdout; startup fails if discovery cannot supply a real version, because stale versions can hide newly released models. Set this explicitly to bypass executable discovery. |
 
+The discovered Codex version is fixed for the life of the utraque process. A
+Codex CLI upgrade is reflected the next time utraque starts; an explicit
+`UTRAQUE_CODEX_CLIENT_VERSION` bypasses discovery and remains in force until the
+override is changed or removed.
+
 ### Routing
 
 | Variable | Default | What it does |
@@ -406,8 +414,9 @@ remains `bunx ccusage@latest` for installations that do not set a native path.
 ccusage availability is checked on the report request. Codex availability is
 checked at startup unless `UTRAQUE_CODEX_CLIENT_VERSION` is set explicitly.
 This startup requirement applies even when you intend to use only non-Codex
-routes; set the explicit version override if that host deliberately has no
-Codex executable.
+routes. A launchd host that deliberately has no Codex executable must add the
+explicit override to the generated plist as described in
+[`deploy/README.md`](deploy/README.md#codex-free-launchd-hosts).
 
 ### Observability
 
@@ -606,7 +615,7 @@ always route regardless.
 
 ## Health
 
-`GET /healthz` is answered locally and never contacts either upstream. It
+`GET /healthz` is answered locally and never contacts any upstream. It
 reports process status, version and uptime, plus, for the Codex leg:
 
 - `codex_auth` — the credential state (`ok` / `stale` / `missing`) and the
@@ -811,9 +820,10 @@ go test -race ./...          # the whole suite; hermetic
 **The default suite contacts nothing.** Every upstream in it is an
 `httptest` server and every credential is a throwaway written under
 `t.TempDir()`. The real `chatgpt.com`, the real `auth.openai.com`, the real
-`api.anthropic.com` and the real `~/.codex/auth.json` are never read, written or
-contacted by `go test ./...`, and the leak test drives the production logger at
-`debug` to prove no token-shaped material reaches a log line.
+`api.anthropic.com`, the real `api.deepseek.com` and the real
+`~/.codex/auth.json` are never read, written or contacted by `go test ./...`,
+and the leak test drives the production logger at `debug` to prove no
+token-shaped material reaches a log line.
 
 ### The live contract test
 

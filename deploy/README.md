@@ -79,11 +79,14 @@ the port launchd binds. `--node localhost` binds both loopback families.
 `--idle` takes a Go duration, and `0` means never self-exit.
 
 A shared secret is strongly recommended. Without one, **any** local process can
-spend both of your subscriptions through the loopback port. With one, callers
-must send `X-Utraque-Token`, and the plist — which holds the secret — is written
-mode `600`. Prefer `--local-token-file` (or `-` to read stdin, or the
-`UTRAQUE_LOCAL_TOKEN` environment variable): `--local-token` still works, but an
-argv value is visible in `ps` for as long as the script runs.
+spend the configured Codex subscription or DeepSeek prepaid balance and read
+whatever local usage history and available provider quota or balance data the
+provider report can collect. Anthropic requests and live Anthropic usage
+readings still require the caller's own bearer credential. With a shared secret,
+callers must send `X-Utraque-Token`, and the plist — which holds the secret — is
+written mode `600`. Prefer `--local-token-file` (or `-` to read stdin, or the
+`UTRAQUE_LOCAL_TOKEN` environment variable): `--local-token` still works, but
+an argv value is visible in `ps` for as long as the script runs.
 
 ### DeepSeek and usage reporting
 
@@ -121,6 +124,31 @@ When given a command name, the installer resolves it through the current
 shell's `PATH` and stores the absolute path in `UTRAQUE_CCUSAGE_RUNNER` or
 `UTRAQUE_CODEX_EXECUTABLE`. The application defaults remain `bunx` and `codex`
 when these options are omitted.
+
+A Codex CLI upgrade changes the automatically discovered catalog client version
+the next time utraque starts. An explicit `UTRAQUE_CODEX_CLIENT_VERSION`
+override bypasses discovery and does not track later CLI upgrades.
+
+#### Codex-free launchd hosts
+
+The installer has no arbitrary-environment or client-version option. If a host
+deliberately has no Codex executable, first run the installer, then insert an
+exact semantic version accepted by the Codex catalog into the generated plist
+(do not use the literal word `latest`):
+
+```sh
+codex_client_version=0.153.4 # replace with an accepted version
+plist="$HOME/Library/LaunchAgents/com.hughescr.utraque.plist"
+plutil -insert EnvironmentVariables.UTRAQUE_CODEX_CLIENT_VERSION \
+  -string "$codex_client_version" "$plist"
+launchctl bootout gui/$(id -u)/com.hughescr.utraque 2>/dev/null || true
+launchctl bootstrap gui/$(id -u) "$plist"
+```
+
+Use `plutil -replace` instead of `-insert` when changing an existing entry.
+launchd reads job environment only when the job is loaded, so editing the plist
+requires the bootout/bootstrap shown above. Re-running `install.sh` regenerates
+the plist and drops this manual entry; add it again before loading the job.
 
 Current ccusage releases also provide a native Rust executable. The recommended
 macOS setup uses the [Homebrew ccusage formula](https://formulae.brew.sh/formula/ccusage),
@@ -162,10 +190,13 @@ need no local-auth header.
 `--node localhost` makes launchd bind both `127.0.0.1` and `[::1]`, so it does
 not matter which one the client resolves to; utraque serves every descriptor
 launchd hands over. Use `--node 127.0.0.1` for IPv4 only. Anything off loopback
-— `0.0.0.0` above all — exposes both subscriptions to your network, so
-`install.sh` refuses it outright unless you also supply a shared secret, and
-warns even then. An IPv6 literal is accepted in bare form and bracketed for you
-where it has to be.
+— `0.0.0.0` above all — exposes the inference routes to your network. A remote
+caller with the shared secret can spend the configured Codex subscription or
+DeepSeek balance; Anthropic still requires that caller's own bearer credential.
+The provider-report endpoint continues to reject non-loopback callers.
+`install.sh` refuses a non-loopback address unless you also supply a shared
+secret, and warns even then. An IPv6 literal is accepted in bare form and
+bracketed for you where it has to be.
 
 ## Verify
 
