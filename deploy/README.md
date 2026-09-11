@@ -151,8 +151,10 @@ deploy/install.sh \
 ```
 
 This writes `PATH` into the plist only when `--path` is supplied. Reporting is
-authenticated even on loopback: clients must send the same
-`X-Utraque-Token` configured by `--local-token-file`.
+restricted to loopback. `--local-token-file` remains recommended; when it is
+configured, report clients send the same `X-Utraque-Token` as every other
+non-health request. Without a configured local token, loopback report requests
+need no local-auth header.
 
 `--node localhost` makes launchd bind both `127.0.0.1` and `[::1]`, so it does
 not matter which one the client resolves to; utraque serves every descriptor

@@ -25,7 +25,6 @@ const (
 )
 
 type Options struct {
-	LocalTokenConfigured bool
 	History              HistoryCollector
 	Anthropic            AnthropicReader
 	DeepSeek             DeepSeekReader
@@ -45,7 +44,6 @@ type cacheEntry struct {
 }
 
 type Handler struct {
-	configured     bool
 	history        HistoryCollector
 	anthropic      AnthropicReader
 	deepseek       DeepSeekReader
@@ -72,7 +70,7 @@ func New(opts Options) *Handler {
 	if opts.Now == nil {
 		opts.Now = time.Now
 	}
-	return &Handler{configured: opts.LocalTokenConfigured, history: opts.History,
+	return &Handler{history: opts.History,
 		anthropic: opts.Anthropic, deepseek: opts.DeepSeek, deepseekKey: opts.DeepSeekAPIKey,
 		codex: opts.Codex, codexSource: opts.CodexSource, ttl: opts.CacheTTL, timeout: opts.Timeout,
 		planLabel: opts.ClaudePlan, planMultiplier: opts.ClaudePlanMultiplier, now: opts.Now,
@@ -89,10 +87,6 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if !isLoopback(r.RemoteAddr) {
 		writeJSON(w, http.StatusForbidden, map[string]any{"error": map[string]string{"type": "permission_error", "message": "provider reporting is available only to loopback clients"}}, r.Method == http.MethodHead)
-		return
-	}
-	if !h.configured {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": map[string]string{"type": "configuration_error", "message": "UTRAQUE_LOCAL_TOKEN must be configured to enable provider reporting"}}, r.Method == http.MethodHead)
 		return
 	}
 	if h.history == nil {

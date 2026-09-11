@@ -75,12 +75,14 @@ func (s *sequenceSource) Get(context.Context) (auth.Credential, error) {
 }
 func (*sequenceSource) Invalidate(auth.Credential) {}
 
-func TestEndpointRequiresLocalTokenConfigurationAndReservesMethods(t *testing.T) {
-	h := New(Options{})
+func TestUnauthenticatedLoopbackEndpointAndReservedMethods(t *testing.T) {
+	h := New(Options{History: historyFunc(func(context.Context, time.Time, time.Time) (usagehistory.Report, error) {
+		return usagehistory.Report{}, nil
+	})})
 	for _, tc := range []struct {
 		method string
 		status int
-	}{{http.MethodGet, 503}, {http.MethodPost, 405}, {http.MethodDelete, 405}} {
+	}{{http.MethodGet, 200}, {http.MethodPost, 405}, {http.MethodDelete, 405}} {
 		r := httptest.NewRequest(tc.method, "/v1/utraque/providers", nil)
 		r.RemoteAddr = "127.0.0.1:4000"
 		w := httptest.NewRecorder()
@@ -95,7 +97,7 @@ func TestEndpointRequiresLocalTokenConfigurationAndReservesMethods(t *testing.T)
 }
 
 func TestEndpointRejectsNonLoopbackCaller(t *testing.T) {
-	h := New(Options{LocalTokenConfigured: true, History: historyFunc(func(context.Context, time.Time, time.Time) (usagehistory.Report, error) {
+	h := New(Options{History: historyFunc(func(context.Context, time.Time, time.Time) (usagehistory.Report, error) {
 		t.Fatal("collection must not run")
 		return usagehistory.Report{}, nil
 	})})
@@ -119,7 +121,7 @@ func TestReportUsesCallerBearerOnlyForAnthropicAndCachesCoherently(t *testing.T)
 	obs := func(p providerquota.Provider) providerquota.Observation {
 		return providerquota.Observation{Source: p, CollectedAt: now}
 	}
-	h := New(Options{LocalTokenConfigured: true, History: history,
+	h := New(Options{History: history,
 		Anthropic: anthropicFunc(func(_ context.Context, token string) (providerquota.Observation, error) {
 			anthToken = token
 			return obs(providerquota.ProviderAnthropic), nil
@@ -181,7 +183,7 @@ func TestConcurrentRequestsCoalesceAndFailedRefreshRetainsSeparateSnapshot(t *te
 		}
 		return providerquota.Observation{Source: providerquota.ProviderDeepSeek, CollectedAt: now}, nil
 	})
-	h := New(Options{LocalTokenConfigured: true, History: history, DeepSeek: reader, CacheTTL: time.Second, Now: func() time.Time { return now }})
+	h := New(Options{History: history, DeepSeek: reader, CacheTTL: time.Second, Now: func() time.Time { return now }})
 	request := func() Report {
 		r := httptest.NewRequest(http.MethodGet, "/v1/utraque/providers", nil)
 		r.RemoteAddr = "127.0.0.1:4000"
@@ -264,7 +266,7 @@ func TestCodexAccountSwitchDuringCollectionCannotReplaceNewAccount(t *testing.T)
 		}
 		return providerquota.Observation{Source: providerquota.ProviderCodex, CollectedAt: now, Quotas: []providerquota.Quota{{ID: "primary", UsedPercent: pct}}}, nil
 	})
-	h := New(Options{LocalTokenConfigured: true, History: history, Codex: codex, CodexSource: source, Now: func() time.Time { return now }})
+	h := New(Options{History: history, Codex: codex, CodexSource: source, Now: func() time.Time { return now }})
 	request := func() Report {
 		r := httptest.NewRequest(http.MethodGet, "/v1/utraque/providers", nil)
 		r.RemoteAddr = "127.0.0.1:4000"
@@ -316,7 +318,7 @@ func TestCanceledCoalescedCallerDoesNotCancelSharedCollection(t *testing.T) {
 		<-release
 		return sampleHistory(time.Now().UTC()), nil
 	})
-	h := New(Options{LocalTokenConfigured: true, History: history, Timeout: 2 * time.Second})
+	h := New(Options{History: history, Timeout: 2 * time.Second})
 	do := func(ctx context.Context) int {
 		r := httptest.NewRequest(http.MethodGet, "/v1/utraque/providers", nil).WithContext(ctx)
 		r.RemoteAddr = "127.0.0.1:4000"
@@ -355,7 +357,7 @@ func TestMalformedFinalCodexScopeCannotRestorePreviousSnapshot(t *testing.T) {
 			codex := codexFunc(func(context.Context, auth.CredentialSource, auth.Credential) (providerquota.Observation, error) {
 				return providerquota.Observation{Source: providerquota.ProviderCodex, CollectedAt: now}, nil
 			})
-			h := New(Options{LocalTokenConfigured: true, History: history, Codex: codex, CodexSource: source, CacheTTL: time.Second, Now: func() time.Time { return now }})
+			h := New(Options{History: history, Codex: codex, CodexSource: source, CacheTTL: time.Second, Now: func() time.Time { return now }})
 			request := func() Report {
 				r := httptest.NewRequest(http.MethodGet, "/v1/utraque/providers", nil)
 				r.RemoteAddr = "127.0.0.1:4000"

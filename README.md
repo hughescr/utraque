@@ -636,9 +636,11 @@ reports process status, version and uptime, plus, for the Codex leg:
 ## Provider report
 
 `GET /v1/utraque/providers` returns schema version 1 JSON for Anthropic,
-Codex, and DeepSeek. It is available only when `UTRAQUE_LOCAL_TOKEN` is
-configured and the request passes the ordinary `X-Utraque-Token` check. The
-caller must also supply its Claude OAuth bearer credential for the Anthropic
+Codex, and DeepSeek. It is restricted to loopback clients. When
+`UTRAQUE_LOCAL_TOKEN` is configured, the ordinary server middleware also
+requires the matching `X-Utraque-Token`; without that optional setting, a
+loopback caller needs no local-auth header. The caller must supply its Claude
+OAuth bearer credential for the Anthropic
 usage reading; utraque sends that bearer only to Anthropic's official usage
 endpoint and does not capture it from OAuth files, the environment, or a
 keychain.
@@ -691,8 +693,8 @@ An abbreviated response looks like this:
 
 The endpoint returns `200` even when one provider is partial or unavailable;
 each provider carries its own status and classified errors. It returns `503`
-when local-token protection is not configured, the normal local-auth `401` for
-a missing or wrong `X-Utraque-Token`, `403` for a non-loopback caller, and
+the normal local-auth `401` for a missing or wrong `X-Utraque-Token` when that
+optional protection is configured, `403` for a non-loopback caller, and
 `405` for methods other than GET or HEAD. Times are RFC 3339 UTC, durations and ages are seconds, percentages use
 `percent_0_100`, token fields are counts, and provider balances retain decimal
 strings plus their three-letter currency.

@@ -433,7 +433,7 @@ func newProviderReport(cfg config.Config, source auth.CredentialSource, deps *re
 		deps.codex = client
 	}
 	return providerreport.New(providerreport.Options{
-		LocalTokenConfigured: cfg.HasLocalToken(), History: deps.history,
+		History:   deps.history,
 		Anthropic: deps.anthropic, DeepSeek: deps.deepseek, DeepSeekAPIKey: cfg.DeepSeek.APIKey,
 		Codex: deps.codex, CodexSource: source, CacheTTL: cfg.Reporting.CacheTTL,
 		Timeout: cfg.Reporting.Timeout, ClaudePlan: cfg.Reporting.ClaudePlan,
