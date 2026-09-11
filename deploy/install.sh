@@ -26,6 +26,18 @@
 #                        keep Codex somewhere other than ~/.codex -- otherwise
 #                        the agent reads ~/.codex/auth.json and reports a
 #                        missing credential (default: omitted)
+#   --deepseek-api-key-file PATH
+#                        write this path as UTRAQUE_DEEPSEEK_API_KEY_FILE. The
+#                        key file is never read or copied by this installer
+#   --ccusage-runner PATH resolve and write UTRAQUE_CCUSAGE_RUNNER (the
+#                        application default is bunx)
+#   --ccusage-executable PATH
+#                        resolve and write UTRAQUE_CCUSAGE_EXECUTABLE for a
+#                        native ccusage binary; this takes precedence over bunx
+#   --codex-executable PATH
+#                        resolve and write UTRAQUE_CODEX_EXECUTABLE (the
+#                        application default is codex)
+#   --path PATH          PATH for launchd-started subprocesses (default: omitted)
 #   --log-level LEVEL    debug|info|warn|error (default: info)
 #   --log-format FORMAT  json|text (default: json)
 #   --load               after writing, run the launchctl bootstrap for you
@@ -54,6 +66,11 @@ idle="1h"
 local_token=""
 local_token_file=""
 codex_home=""
+deepseek_api_key_file=""
+ccusage_runner=""
+ccusage_executable=""
+codex_executable=""
+service_path=""
 log_level="info"
 log_format="json"
 do_load=0
@@ -73,6 +90,21 @@ while [ $# -gt 0 ]; do
 		--local-token) local_token="${2:-}"; shift 2 ;;
 		--local-token-file) local_token_file="${2:-}"; shift 2 ;;
 		--codex-home)  codex_home="${2:-}"; shift 2 ;;
+		--deepseek-api-key-file)
+			[ $# -ge 2 ] && [ -n "$2" ] || die "--deepseek-api-key-file requires a path"
+			deepseek_api_key_file="$2"; shift 2 ;;
+		--ccusage-runner)
+			[ $# -ge 2 ] && [ -n "$2" ] || die "--ccusage-runner requires a path or command name"
+			ccusage_runner="$2"; shift 2 ;;
+		--ccusage-executable)
+			[ $# -ge 2 ] && [ -n "$2" ] || die "--ccusage-executable requires a path or command name"
+			ccusage_executable="$2"; shift 2 ;;
+		--codex-executable)
+			[ $# -ge 2 ] && [ -n "$2" ] || die "--codex-executable requires a path or command name"
+			codex_executable="$2"; shift 2 ;;
+		--path)
+			[ $# -ge 2 ] && [ -n "$2" ] || die "--path requires a value"
+			service_path="$2"; shift 2 ;;
 		--log-level)   log_level="${2:-}"; shift 2 ;;
 		--log-format)  log_format="${2:-}"; shift 2 ;;
 		--load)        do_load=1; shift ;;
@@ -83,6 +115,41 @@ while [ $# -gt 0 ]; do
 done
 
 [ -f "$template" ] || die "template not found: $template"
+
+expand_home_path() {
+	case "$1" in
+		\~/*) printf '%s/%s\n' "$HOME" "${1:2}" ;;
+		*)   printf '%s\n' "$1" ;;
+	esac
+}
+
+absolute_path() {
+	local value dir base
+	value=$(expand_home_path "$1")
+	case "$value" in
+		/*) ;;
+		*) value="$PWD/$value" ;;
+	esac
+	dir=$(dirname -- "$value")
+	base=$(basename -- "$value")
+	[ -d "$dir" ] || die "directory does not exist for $2: $dir"
+	dir=$(cd -- "$dir" && pwd)
+	printf '%s/%s\n' "$dir" "$base"
+}
+
+resolve_executable() {
+	local value resolved
+	value=$(expand_home_path "$1")
+	[ -n "$value" ] || die "$2 must not be empty"
+	case "$value" in
+		*/*) resolved=$(absolute_path "$value" "$2") ;;
+		*)
+			resolved=$(command -v "$value" 2>/dev/null) || die "cannot find $2 executable: $value"
+			resolved=$(absolute_path "$resolved" "$2") ;;
+	esac
+	[ -f "$resolved" ] && [ -x "$resolved" ] || die "not an executable file for $2: $resolved"
+	printf '%s\n' "$resolved"
+}
 
 # Resolve the binary: an explicit path, then the repo build, then $PATH.
 if [ -z "$binary" ]; then
@@ -105,6 +172,24 @@ case "$binary" in
 	*)  binary="$(cd -- "$(dirname -- "$binary")" && pwd)/$(basename -- "$binary")" ;;
 esac
 [ -x "$binary" ] || die "not an executable file: $binary"
+
+if [ -n "$deepseek_api_key_file" ]; then
+	deepseek_api_key_file=$(absolute_path "$deepseek_api_key_file" "--deepseek-api-key-file")
+	[ -f "$deepseek_api_key_file" ] || die "not a file for --deepseek-api-key-file: $deepseek_api_key_file"
+	[ -r "$deepseek_api_key_file" ] || die "cannot read --deepseek-api-key-file: $deepseek_api_key_file"
+fi
+if [ -n "$ccusage_runner" ]; then
+	ccusage_runner=$(resolve_executable "$ccusage_runner" "--ccusage-runner")
+fi
+if [ -n "$ccusage_executable" ]; then
+	ccusage_executable=$(resolve_executable "$ccusage_executable" "--ccusage-executable")
+fi
+if [ -n "$codex_executable" ]; then
+	codex_executable=$(resolve_executable "$codex_executable" "--codex-executable")
+fi
+if [ -n "$service_path" ] && [[ "$service_path" == *$'\n'* ]]; then
+	die "--path must not contain a newline"
+fi
 
 # Every rendered value is validated HERE. utraque validates its own
 # configuration before it reaches launchd's socket, so a value launchd accepts
@@ -193,6 +278,11 @@ add_env() {
 }
 if [ -n "$local_token" ]; then add_env "UTRAQUE_LOCAL_TOKEN" "$local_token"; fi
 if [ -n "$codex_home" ]; then add_env "CODEX_HOME" "$codex_home"; fi
+if [ -n "$deepseek_api_key_file" ]; then add_env "UTRAQUE_DEEPSEEK_API_KEY_FILE" "$deepseek_api_key_file"; fi
+if [ -n "$ccusage_runner" ]; then add_env "UTRAQUE_CCUSAGE_RUNNER" "$ccusage_runner"; fi
+if [ -n "$ccusage_executable" ]; then add_env "UTRAQUE_CCUSAGE_EXECUTABLE" "$ccusage_executable"; fi
+if [ -n "$codex_executable" ]; then add_env "UTRAQUE_CODEX_EXECUTABLE" "$codex_executable"; fi
+if [ -n "$service_path" ]; then add_env "PATH" "$service_path"; fi
 
 template_text=$(cat "$template")
 rendered="$template_text"
@@ -223,6 +313,13 @@ if [ -n "$local_token" ]; then
 else
 	say "  local auth none — any local process can spend both subscriptions through this port"
 fi
+if [ -n "$deepseek_api_key_file" ]; then
+	say "  DeepSeek key file $deepseek_api_key_file (path only; key was not read)"
+fi
+if [ -n "$ccusage_runner" ]; then say "  ccusage runner $ccusage_runner"; fi
+if [ -n "$ccusage_executable" ]; then say "  native ccusage executable $ccusage_executable (takes precedence)"; fi
+if [ -n "$codex_executable" ]; then say "  Codex executable $codex_executable"; fi
+if [ -n "$service_path" ]; then say "  subprocess PATH is explicitly set"; fi
 say ""
 
 # Validate before touching anything installed: a malformed plist that launchd

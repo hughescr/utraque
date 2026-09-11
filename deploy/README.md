@@ -84,6 +84,73 @@ mode `600`. Prefer `--local-token-file` (or `-` to read stdin, or the
 `UTRAQUE_LOCAL_TOKEN` environment variable): `--local-token` still works, but an
 argv value is visible in `ps` for as long as the script runs.
 
+### DeepSeek and usage reporting
+
+DeepSeek uses a prepaid API key. Put the plain key in a private file, restrict
+that file to your account, and pass its path to the installer:
+
+```sh
+chmod 600 ~/.config/utraque/deepseek.key
+
+deploy/install.sh \
+  --local-token-file ~/.utraque-token \
+  --deepseek-api-key-file ~/.config/utraque/deepseek.key
+```
+
+The installer checks that the file exists and is readable, then records only
+its absolute path as `UTRAQUE_DEEPSEEK_API_KEY_FILE`. It never reads, prints, or
+copies the key. Keep the key file in place for the launchd agent; utraque reads
+it when launchd starts the process.
+
+Usage history runs `bunx ccusage@latest`, while live Codex quota uses `codex
+app-server`. launchd has a small system `PATH`, so record the executables you
+intend the service to use rather than relying on your interactive shell:
+
+```sh
+deploy/install.sh \
+  --local-token-file ~/.utraque-token \
+  --deepseek-api-key-file ~/.config/utraque/deepseek.key \
+  --ccusage-runner bunx \
+  --codex-executable codex
+```
+
+When given a command name, the installer resolves it through the current
+shell's `PATH` and stores the absolute path in `UTRAQUE_CCUSAGE_RUNNER` or
+`UTRAQUE_CODEX_EXECUTABLE`. The application defaults remain `bunx` and `codex`
+when these options are omitted.
+
+Current ccusage releases also provide a native Rust executable. To use an
+installed native copy without Bun, configure it directly:
+
+```sh
+deploy/install.sh \
+  --local-token-file ~/.utraque-token \
+  --ccusage-executable ccusage \
+  --codex-executable codex
+```
+
+This records `UTRAQUE_CCUSAGE_EXECUTABLE`; it takes precedence over
+`UTRAQUE_CCUSAGE_RUNNER` when both are configured. utraque does not download or
+update that binary, so its installed version remains under your normal package
+management.
+
+Some installed commands are wrappers with `#!/usr/bin/env node` or launch
+other programs. Their absolute path does not help `/usr/bin/env` find those
+dependencies. In that case, pass a minimal explicit subprocess path, for
+example:
+
+```sh
+deploy/install.sh \
+  --local-token-file ~/.utraque-token \
+  --ccusage-runner bunx \
+  --codex-executable codex \
+  --path "$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+```
+
+This writes `PATH` into the plist only when `--path` is supplied. Reporting is
+authenticated even on loopback: clients must send the same
+`X-Utraque-Token` configured by `--local-token-file`.
+
 `--node localhost` makes launchd bind both `127.0.0.1` and `[::1]`, so it does
 not matter which one the client resolves to; utraque serves every descriptor
 launchd hands over. Use `--node 127.0.0.1` for IPv4 only. Anything off loopback
