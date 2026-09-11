@@ -42,6 +42,30 @@ func isAnthropicName(lower string) bool {
 // check in Resolve.
 const anthropicCompatPrefix = "anthropic-compat."
 
+// deepSeekModels is intentionally exact. DeepSeek's Anthropic-compatible API
+// silently maps unknown model names to deepseek-flash, which would make a typo
+// spend money on a different model. Utraque accepts only the documented names
+// and canonicalizes the two retired Flash aliases before the request leaves.
+var deepSeekModels = map[string]string{
+	"deepseek-flash":               "deepseek-flash",
+	"deepseek-v4-flash":            "deepseek-flash",
+	"deepseek-v4-flash-vision-exp": "deepseek-flash",
+	"deepseek-v4-pro":              "deepseek-v4-pro",
+}
+
+func resolveDeepSeek(lower, clientModel string) (Decision, bool) {
+	upstream, ok := deepSeekModels[lower]
+	if !ok {
+		return Decision{}, false
+	}
+	return Decision{
+		Backend:       BackendDeepSeek,
+		UpstreamModel: upstream,
+		ClientModel:   clientModel,
+		EffortSource:  EffortSourceNone,
+	}, true
+}
+
 // effortLevels are the suffix tokens ParseEffortSuffix recognises as
 // reasoning-effort levels, drawn from the levels named across the plan
 // (sol up to ultra, luna up to max, gpt-5.4 up to xhigh).
@@ -146,6 +170,9 @@ func ResolveWith(reg *Registry, model string, betaHeader string) (Decision, erro
 	// contains "anthropic". Strip it and resolve the remainder as a Codex
 	// alias only — this namespace never means "route to Anthropic".
 	if rest, isCompat := strings.CutPrefix(lower, anthropicCompatPrefix); isCompat {
+		if dec, ok := resolveDeepSeek(rest, trimmed); ok {
+			return dec, nil
+		}
 		if dec, ok := resolveCodex(reg, rest, trimmed); ok {
 			return dec, nil
 		}
@@ -166,6 +193,10 @@ func ResolveWith(reg *Registry, model string, betaHeader string) (Decision, erro
 			ClientModel:  trimmed,
 			EffortSource: EffortSourceNone,
 		}, nil
+	}
+
+	if dec, ok := resolveDeepSeek(lower, trimmed); ok {
+		return dec, nil
 	}
 
 	if dec, ok := resolveCodex(reg, lower, trimmed); ok {
@@ -270,6 +301,6 @@ func resolveCodex(reg *Registry, lower string, clientModel string) (Decision, bo
 // a model Resolve couldn't place in any backend, listing the known route
 // families so the caller can see what would have worked.
 func unknownModelError(reg *Registry, model string) error {
-	families := append([]string{"claude-*", "anthropic-*", "gpt-*"}, reg.Families()...)
+	families := append([]string{"claude-*", "anthropic-*", "deepseek-flash", "deepseek-v4-pro", "gpt-*"}, reg.Families()...)
 	return apierr.UnknownModel(model, families)
 }

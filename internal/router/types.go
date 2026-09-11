@@ -9,11 +9,11 @@ import (
 // The two conditions every leg must be able to report to the dispatcher, and
 // which the dispatcher must never answer with an error envelope.
 //
-// They live here, in the vocabulary both legs share, rather than in either
-// leg's own package: the Anthropic passthrough and the Codex leg fail in the
-// same two ways, and the dispatcher should not have to import one leg to
-// understand the other. internal/anthropic re-exports these under its original
-// names, so errors.Is keeps matching either spelling.
+// They live here, in the vocabulary every leg shares, rather than in a
+// backend's own package: all upstreams fail in the same two ways, and the
+// dispatcher should not have to import one leg to understand another.
+// internal/anthropic re-exports these under its original names, so errors.Is
+// keeps matching either spelling.
 var (
 	// ErrResponseStarted wraps any failure that happens after the status line
 	// and headers have gone out. A caller must not try to render an error
@@ -45,13 +45,14 @@ var (
 // — does that cleanup in a defer, so unwinding past them loses nothing.
 func AbortResponse() { panic(http.ErrAbortHandler) }
 
-// Backend names one of the two upstream legs a request can be sent to.
+// Backend names one of the upstream legs a request can be sent to.
 type Backend string
 
 // The backends utraque can route to.
 const (
 	BackendAnthropic Backend = "anthropic"
 	BackendCodex     Backend = "codex"
+	BackendDeepSeek  Backend = "deepseek"
 )
 
 // String renders the backend name.
@@ -60,7 +61,7 @@ func (b Backend) String() string { return string(b) }
 // Valid reports whether b is one of the known backends.
 func (b Backend) Valid() bool {
 	switch b {
-	case BackendAnthropic, BackendCodex:
+	case BackendAnthropic, BackendCodex, BackendDeepSeek:
 		return true
 	default:
 		return false

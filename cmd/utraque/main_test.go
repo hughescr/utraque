@@ -563,6 +563,52 @@ func TestLocalTokenIsNotForwardedThroughTheFrontDoor(t *testing.T) {
 	}
 }
 
+func TestDeepSeekRoutesThroughProductionWiringWithoutCallerCredentials(t *testing.T) {
+	var gotModel, gotAPIKey, gotAuthorization string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			Model string `json:"model"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&request)
+		gotModel = request.Model
+		gotAPIKey = r.Header.Get("X-Api-Key")
+		gotAuthorization = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"msg_ds","type":"message","role":"assistant","model":"wrong","content":[],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`)
+	}))
+	defer upstream.Close()
+
+	cfg := config.Default()
+	cfg.DeepSeek.BaseURL = upstream.URL
+	cfg.DeepSeek.APIKey = "deepseek-test-key"
+	srv, err := newServer(cfg, slog.New(slog.DiscardHandler), nil)
+	if err != nil {
+		t.Fatalf("newServer: %v", err)
+	}
+	front := httptest.NewServer(srv)
+	defer front.Close()
+
+	resp := post(t, front.URL+"/v1/messages",
+		`{"model":"anthropic-compat.deepseek-flash","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}`,
+		func(h http.Header) { h.Set("Authorization", "Bearer claude-oauth-must-not-leave") })
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, body = %s", resp.StatusCode, body)
+	}
+	if gotModel != "deepseek-flash" || gotAPIKey != cfg.DeepSeek.APIKey || gotAuthorization != "" {
+		t.Errorf("upstream model/key/auth = %q/%q/%q", gotModel, gotAPIKey, gotAuthorization)
+	}
+	var answer struct {
+		Model string `json:"model"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&answer); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if answer.Model != "deepseek-flash" {
+		t.Errorf("response model = %q, want canonical deepseek-flash", answer.Model)
+	}
+}
+
 // TestIdleSelfExitIsOffByDefault: nothing restarts utraque in this build, so a
 // default self-exit would leave the next request with a connection refused.
 func TestIdleSelfExitIsOffByDefault(t *testing.T) {

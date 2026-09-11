@@ -652,6 +652,36 @@ func TestStaticModelListIsExactlyTheFourCurrentModels(t *testing.T) {
 	}
 }
 
+func TestDeepSeekRowsAppearOnlyWhenConfiguredAndSurviveRestart(t *testing.T) {
+	reg := router.NewRegistry()
+	h := mustHandler(t, discovery.Options{
+		CatalogMode: discovery.CatalogModeStatic,
+		DeepSeek:    true,
+		Registry:    reg,
+	})
+	resp := h.Models(t.Context(), testCred)
+	for _, id := range []string{"anthropic-compat.deepseek-flash", "anthropic-compat.deepseek-v4-pro"} {
+		if !hasID(resp, id) {
+			t.Errorf("configured catalog missing %q: %v", id, ids(resp))
+		}
+	}
+	reg.SetPickerRoutes(nil)
+	for _, id := range []string{"anthropic-compat.deepseek-flash", "anthropic-compat.deepseek-v4-pro"} {
+		dec, err := router.ResolveWith(reg, id, "")
+		if err != nil || dec.Backend != router.BackendDeepSeek {
+			t.Errorf("ResolveWith(%q) after restart = %+v, %v", id, dec, err)
+		}
+	}
+
+	off := mustHandler(t, discovery.Options{CatalogMode: discovery.CatalogModeStatic})
+	offResp := off.Models(t.Context(), testCred)
+	for _, id := range ids(offResp) {
+		if strings.Contains(id, "deepseek") {
+			t.Errorf("unconfigured catalog advertised %q", id)
+		}
+	}
+}
+
 // TestNoOneMRowIsEverEmitted pins down the removal of the long-context
 // picker-row feature across every catalog mode: given an upstream catalog
 // that carries no long-context row of its own, utraque never synthesizes one

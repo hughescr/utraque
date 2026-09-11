@@ -1,7 +1,7 @@
 // Command utraque is a local HTTP proxy that lets one Claude Code session
-// reach two subscriptions: Anthropic models pass through to api.anthropic.com
-// on the caller's own OAuth credential, and GPT models route to the Codex
-// backend on the credential the Codex CLI already holds. Both legs are live;
+// reach multiple backends: Anthropic models pass through on the caller's own
+// OAuth credential, GPT models use the Codex subscription, and DeepSeek models
+// use the operator's prepaid API key. All legs are live;
 // this file only assembles them, so the wiring stays readable and every
 // behaviour is testable in the package that owns it.
 package main
@@ -30,6 +30,7 @@ import (
 	"github.com/hughescr/utraque/internal/codex/responses"
 	cschema "github.com/hughescr/utraque/internal/codex/schema"
 	"github.com/hughescr/utraque/internal/config"
+	"github.com/hughescr/utraque/internal/deepseek"
 	"github.com/hughescr/utraque/internal/discovery"
 	"github.com/hughescr/utraque/internal/idle"
 	"github.com/hughescr/utraque/internal/launchd"
@@ -217,6 +218,18 @@ func newApp(cfg config.Config, log *slog.Logger, activity server.ActivityTracker
 		return nil, err
 	}
 
+	var deepSeekLeg router.Leg
+	if cfg.DeepSeek.Configured() {
+		deepSeekLeg, err = deepseek.New(cfg.DeepSeek.BaseURL, cfg.DeepSeek.APIKey, tr,
+			deepseek.WithLogger(log),
+			deepseek.WithMaxBodyBytes(cfg.Limits.MaxBodyBytes),
+			deepseek.WithUpstreamIdleTimeout(cfg.Limits.UpstreamIdleTimeout),
+		)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	// Codex auth + catalog. The auth source is only built when a credential
 	// file path is configured. LoadFrom always resolves one; a bare
 	// config.Default() (used by tests) leaves it empty, in which case the codex
@@ -320,7 +333,7 @@ func newApp(cfg config.Config, log *slog.Logger, activity server.ActivityTracker
 		return nil, err
 	}
 
-	d := &dispatcher{anthropic: passthrough, codex: codexLeg}
+	d := &dispatcher{anthropic: passthrough, codex: codexLeg, deepseek: deepSeekLeg}
 
 	hr := &healthReporter{
 		cat: cat, catState: catState, obs: obsv,
@@ -472,6 +485,7 @@ func newDiscovery(cfg config.Config, tr transport.Transport, cat *catalog.Client
 	return discovery.New(discovery.Options{
 		Anthropic: anthCat,
 		Codex:     codexCat,
+		DeepSeek:  cfg.DeepSeek.Configured(),
 		Registry:  router.DefaultRegistry,
 		Logger:    log,
 	})
@@ -840,6 +854,7 @@ func roundSeconds(s float64) float64 { return math.Round(s*1000) / 1000 }
 type dispatcher struct {
 	anthropic router.Leg
 	codex     router.Leg
+	deepseek  router.Leg
 }
 
 // peeked is the minimal shape the dispatcher needs out of a Messages or
@@ -932,6 +947,15 @@ func (d *dispatcher) dispatch(w http.ResponseWriter, r *http.Request, call legCa
 			return
 		}
 		if err := call(d.codex, w, r, rq); err != nil {
+			d.fail(w, r, err)
+		}
+	case router.BackendDeepSeek:
+		if d.deepseek == nil {
+			_ = apierr.Write(w, apierr.WithStatus(http.StatusServiceUnavailable, apierr.TypeAPI,
+				"deepseek leg is not configured; set DEEPSEEK_API_KEY or UTRAQUE_DEEPSEEK_API_KEY_FILE"))
+			return
+		}
+		if err := call(d.deepseek, w, r, rq); err != nil {
 			d.fail(w, r, err)
 		}
 	default:

@@ -1,8 +1,8 @@
 # utraque
 
 A local HTTP proxy that lets one Claude Code session use a Claude Max
-subscription for Anthropic models and a ChatGPT/Codex subscription for OpenAI
-GPT models, side by side.
+subscription for Anthropic models, a ChatGPT/Codex subscription for OpenAI GPT
+models, and a prepaid DeepSeek API balance side by side.
 
 *One communicant, both subscriptions.*
 
@@ -12,16 +12,18 @@ GPT models, side by side.
 name: pick an Anthropic model and the request goes to `api.anthropic.com`
 billed against your Claude Max subscription; pick an OpenAI GPT model
 (native names `sol`, `terra`, `luna`) and the request goes to OpenAI billed
-against your ChatGPT/Codex subscription. Both legs are addressed by native
-model names inside a single Claude Code session — no metered pay-per-token
-API key is used on either leg.
+against your ChatGPT/Codex subscription; pick `deepseek-flash` or
+`deepseek-v4-pro` and the request uses your prepaid DeepSeek API key. All three
+backends are addressed by native model names inside one Claude Code session.
 
 ## Status
 
-**Both legs are implemented and verified against the real backends.** A `sol`
+**The subscription legs are implemented and verified against the real
+backends.** A `sol`
 request returned a real OpenAI answer billed to the Codex subscription, and a
 Claude request streamed a correct Anthropic SSE sequence, through one proxy in
-one session.
+one session. The DeepSeek leg is covered by hermetic contract tests; it has not
+yet been included in the live-backend tripwire.
 
 - **Anthropic leg.** A transparent passthrough: the request, including Claude
   Code's own OAuth credential, is forwarded byte-for-byte. The transport is
@@ -32,6 +34,12 @@ one session.
   `stream:false` — billed against your Codex subscription. `GET /v1/models`
   serves the merged picker catalog, and `POST /v1/messages/count_tokens` is
   answered locally for GPT-routed models.
+- **DeepSeek leg.** Uses DeepSeek's documented Anthropic-compatible endpoint
+  with a separately configured API key. It accepts only documented model names,
+  canonicalizes retired Flash aliases to `deepseek-flash`, and never forwards
+  the caller's Anthropic OAuth credential, cookies, or local utraque token.
+  `count_tokens` is estimated locally because DeepSeek does not document that
+  endpoint.
 - A missing Codex credential makes a GPT request answer `503`. Run `codex
   login`, or point `UTRAQUE_CODEX_AUTH_FILE` at a file that holds a token. A
   request racing the idle exit can also see `503`; under launchd a retry
@@ -80,6 +88,21 @@ so it never clobbers the Codex CLI's own state), and uses it to call OpenAI's
 backend on your behalf. This bills usage against your ChatGPT/Codex
 subscription, not a separate API key.
 
+**DeepSeek leg.** This leg owns a prepaid API key and sends it only to
+DeepSeek's documented Anthropic-format endpoint. Set `DEEPSEEK_API_KEY` for a
+manually started process, or put the plain key in a private file and set
+`UTRAQUE_DEEPSEEK_API_KEY_FILE` to its path. The explicit file wins over the
+environment value and a missing, unreadable, or empty file is a startup error.
+DeepSeek does not publish a standard `~/.deepseek.json` credential location,
+so utraque does not guess one.
+
+The compatibility endpoint documents some Anthropic fields as ignored. Utraque
+allows performance hints such as `cache_control` and thinking
+`budget_tokens`, but rejects requirements whose meaning would otherwise be
+silently lost: unsupported content blocks, Pro image input, `top_k`,
+non-default `service_tier`, MCP/container requests, structured `output_config`, forced
+serial tool calls, text citations, and `tool_result.is_error=true`.
+
 ## Install & run
 
 ### Prerequisites
@@ -94,6 +117,8 @@ subscription, not a separate API key.
 - **The Codex CLI**, signed in to the ChatGPT/Codex account the GPT leg should
   bill. Run `codex login` before the first GPT request, or it answers `503`:
   `utraque` holds no credential of its own to fall back on.
+- **A DeepSeek API key** is optional. Without one, DeepSeek models are not
+  advertised in `/v1/models` and a typed DeepSeek request returns `503`.
 - **No Anthropic API key in the environment.** An `ANTHROPIC_API_KEY` or
   `ANTHROPIC_AUTH_TOKEN` left in a shell profile displaces the subscription
   OAuth credential and quietly bills metered API usage instead — the one thing
@@ -302,8 +327,8 @@ would be there to bring it back.
 ## Configuration
 
 Configuration is environment variables only — every one `UTRAQUE_`-prefixed,
-except the Codex CLI's own `CODEX_HOME`, which is read unprefixed on purpose so
-both tools find the one `auth.json`. An empty value counts as unset, so a
+except the Codex CLI's own `CODEX_HOME` and DeepSeek's conventional
+`DEEPSEEK_API_KEY`. An empty value counts as unset, so a
 default cannot be overridden to the empty string. Anything invalid fails at
 startup with a named error rather than being quietly ignored.
 
@@ -325,6 +350,14 @@ This is the whole surface.
 | Variable | Default | What it does |
 | --- | --- | --- |
 | `UTRAQUE_ANTHROPIC_BASE_URL` | `https://api.anthropic.com` | Where the passthrough forwards. Rejected at startup if it carries userinfo, a query or a fragment — a credential must never ride in a configured URL. |
+
+### DeepSeek leg
+
+| Variable | Default | What it does |
+| --- | --- | --- |
+| `DEEPSEEK_API_KEY` | *(none)* | Conventional DeepSeek API key variable. Never forwarded from the incoming request and never rendered in config or logs. |
+| `UTRAQUE_DEEPSEEK_API_KEY_FILE` | *(none)* | Path to a plain private key file. A leading `~/` is expanded. When set, it wins over `DEEPSEEK_API_KEY` and any read failure is fatal rather than falling back to a different credential. For launchd, add this variable to the plist because launchd does not inherit the shell environment. |
+| `UTRAQUE_DEEPSEEK_BASE_URL` | `https://api.deepseek.com/anthropic` | DeepSeek's documented Anthropic-format endpoint. The override exists for hermetic testing and private compatible gateways; in normal use, leave it alone. Credential-bearing URLs are rejected. |
 
 ### Codex/GPT leg
 
@@ -584,8 +617,8 @@ reports process status, version and uptime, plus, for the Codex leg:
 ## The model picker (merged `/v1/models`)
 
 `utraque` serves its own `GET /v1/models`, merging Anthropic's model list with
-the Codex models it can route to, so both subscriptions show up in Claude
-Code's `/model` picker. Set `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1` in
+the Codex models it can route to and, when configured, two static DeepSeek rows.
+Set `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1` in
 the client's environment to turn discovery on — but note that it has no effect
 while `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL` is set, which the Claude leg
 needs. *Using a GPT route* explains the trade; this section describes what is
@@ -648,6 +681,16 @@ Four emission strategies, alias emission **on by default**:
 
 An id template that could not produce a filter-passing id is rejected at
 startup rather than silently yielding a picker with no GPT rows in it.
+
+### DeepSeek models
+
+When a DeepSeek key is configured, discovery adds
+`anthropic-compat.deepseek-flash` and
+`anthropic-compat.deepseek-v4-pro`. The prefix exists solely to survive Claude
+Code's model filter; the router sends the canonical model name upstream and
+puts that same canonical name in non-stream responses and streamed
+`message_start` events. These ids also resolve without the in-memory picker
+registry, so a chosen model remains usable after the daemon restarts.
 
 ## Tests
 

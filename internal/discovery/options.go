@@ -170,6 +170,12 @@ type Options struct {
 	// Codex is the Codex-side model source. Nil means no Codex rows.
 	Codex CodexCatalog
 
+	// DeepSeek advertises the two currently billable DeepSeek models under
+	// Claude-Code-visible ids. It should be true only when the process has a
+	// DeepSeek credential; the rows are static because DeepSeek has no model
+	// catalog endpoint in its documented Anthropic-compatible API.
+	DeepSeek bool
+
 	// Alias governs Codex row emission.
 	Alias AliasOptions
 

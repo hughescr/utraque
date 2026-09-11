@@ -3,6 +3,7 @@ package config_test
 import (
 	"bytes"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -35,6 +36,9 @@ func TestDefaults(t *testing.T) {
 	if c.Anthropic.BaseURL != config.DefaultAnthropicBaseURL {
 		t.Errorf("BaseURL = %q", c.Anthropic.BaseURL)
 	}
+	if c.DeepSeek.BaseURL != config.DefaultDeepSeekBaseURL || c.DeepSeek.Configured() {
+		t.Errorf("DeepSeek default = %+v", c.DeepSeek)
+	}
 	if c.Idle.Timeout != config.DefaultIdleTimeout {
 		t.Errorf("Idle.Timeout = %s", c.Idle.Timeout)
 	}
@@ -46,6 +50,64 @@ func TestDefaults(t *testing.T) {
 	}
 	if config.Default().Listen != c.Listen {
 		t.Error("Default() disagrees with LoadFrom(empty)")
+	}
+}
+
+func TestDeepSeekKeyFileWinsAndFailuresAreFatal(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "deepseek.key")
+	if err := os.WriteFile(path, []byte("  file-key-value\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := config.LoadFrom(envFrom(map[string]string{
+		"HOME":                       "/home/tester",
+		config.EnvDeepSeekAPIKey:     "environment-key-value",
+		config.EnvDeepSeekAPIKeyFile: path,
+		config.EnvDeepSeekBaseURL:    "http://deepseek.test/anthropic/",
+	}))
+	if err != nil {
+		t.Fatalf("LoadFrom: %v", err)
+	}
+	if c.DeepSeek.APIKey != "file-key-value" || c.DeepSeek.APIKeyFile != path {
+		t.Errorf("DeepSeek credential = %+v, want explicit file contents", c.DeepSeek)
+	}
+	if c.DeepSeek.BaseURL != "http://deepseek.test/anthropic" {
+		t.Errorf("DeepSeek.BaseURL = %q", c.DeepSeek.BaseURL)
+	}
+
+	for name, file := range map[string]string{
+		"missing": filepath.Join(t.TempDir(), "missing"),
+		"empty":   filepath.Join(t.TempDir(), "empty"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if name == "empty" {
+				if err := os.WriteFile(file, []byte(" \n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			_, err := config.LoadFrom(envFrom(map[string]string{
+				"HOME":                       "/home/tester",
+				config.EnvDeepSeekAPIKey:     "fallback-must-not-be-used",
+				config.EnvDeepSeekAPIKeyFile: file,
+			}))
+			if err == nil {
+				t.Fatal("explicit unreadable/empty key file silently fell back")
+			}
+		})
+	}
+}
+
+func TestDeepSeekKeyNeverAppearsInConfigRendering(t *testing.T) {
+	c := config.Default()
+	c.DeepSeek.APIKey = "sk-deepseek-rendering-secret"
+	c.DeepSeek.APIKeyFile = "/private/path/deepseek.key"
+	if got := c.String(); strings.Contains(got, c.DeepSeek.APIKey) || !strings.Contains(got, "deepseek.configured=true") {
+		t.Fatalf("String() mishandled DeepSeek credential: %s", got)
+	}
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, nil))
+	log.Info("config", "cfg", c)
+	if strings.Contains(buf.String(), c.DeepSeek.APIKey) {
+		t.Fatalf("LogValue leaked DeepSeek key: %s", buf.String())
 	}
 }
 

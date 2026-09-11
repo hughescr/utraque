@@ -86,6 +86,7 @@ type Handler struct {
 	anth     anthropic.Catalog
 	static   []anthropic.CatalogModel
 	codex    CodexCatalog
+	deepseek bool
 	alias    AliasOptions
 	reg      *router.Registry
 	log      *slog.Logger
@@ -105,6 +106,7 @@ func New(opts Options) (*Handler, error) {
 		anth:     opts.Anthropic,
 		static:   opts.staticModels(),
 		codex:    opts.Codex,
+		deepseek: opts.DeepSeek,
 		alias:    opts.Alias,
 		reg:      opts.Registry,
 		log:      opts.Logger,
@@ -206,7 +208,7 @@ func (h *Handler) Models(ctx context.Context, cred anthropic.Credential) Respons
 	}()
 	wg.Wait()
 
-	rows := make([]Model, 0, len(anthModels)+len(codexList)*2)
+	rows := make([]Model, 0, len(anthModels)+len(codexList)*2+len(deepSeekPickerModels))
 	routes := make(map[string]router.PickerRoute)
 	seen := make(map[string]struct{})
 
@@ -244,6 +246,12 @@ func (h *Handler) Models(ctx context.Context, cred anthropic.Credential) Respons
 			base.DisplayName = base.ID
 		}
 		add(base, router.PickerRoute{}, false)
+	}
+
+	if h.deepseek {
+		for _, m := range deepSeekPickerModels {
+			add(m.model, m.route, true)
+		}
 	}
 
 	for _, row := range h.codexRows(codexList) {

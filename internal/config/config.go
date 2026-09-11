@@ -24,6 +24,7 @@ const (
 	DefaultMaxBodyBytes        = 64 << 20 // 64 MiB
 	DefaultUpstreamIdleTimeout = 120 * time.Second
 	DefaultAnthropicBaseURL    = "https://api.anthropic.com"
+	DefaultDeepSeekBaseURL     = "https://api.deepseek.com/anthropic"
 
 	// DefaultIdleTimeout is 0 — self-exit off — on purpose. Idle self-exit
 	// only makes sense once something can bring the daemon back: launchd
@@ -117,6 +118,8 @@ const (
 	EnvMaxBodyBytes        = EnvPrefix + "MAX_BODY_BYTES"
 	EnvUpstreamIdleTimeout = EnvPrefix + "UPSTREAM_IDLE_TIMEOUT"
 	EnvAnthropicBaseURL    = EnvPrefix + "ANTHROPIC_BASE_URL"
+	EnvDeepSeekBaseURL     = EnvPrefix + "DEEPSEEK_BASE_URL"
+	EnvDeepSeekAPIKeyFile  = EnvPrefix + "DEEPSEEK_API_KEY_FILE"
 	EnvIdleTimeout         = EnvPrefix + "IDLE_TIMEOUT"
 	EnvLaunchdSocketName   = EnvPrefix + "LAUNCHD_SOCKET"
 	EnvLogLevel            = EnvPrefix + "LOG_LEVEL"
@@ -139,6 +142,10 @@ const (
 	// UTRAQUE_-prefixed: pointing utraque at the same CODEX_HOME the CLI uses
 	// keeps both reading the one auth.json.
 	EnvCodexHome = "CODEX_HOME"
+
+	// EnvDeepSeekAPIKey is DeepSeek's conventional SDK variable. It is read
+	// unprefixed so one credential can be shared with the vendor's own tools.
+	EnvDeepSeekAPIKey = "DEEPSEEK_API_KEY"
 )
 
 // Limits bounds what a single request may cost us.
@@ -151,6 +158,18 @@ type Limits struct {
 type Anthropic struct {
 	BaseURL string // UTRAQUE_ANTHROPIC_BASE_URL
 }
+
+// DeepSeek configures the dedicated Anthropic-compatible API leg. APIKey is a
+// secret and is never rendered by String or LogValue. APIKeyFile records only
+// the source path when the explicit file setting was used.
+type DeepSeek struct {
+	BaseURL    string // UTRAQUE_DEEPSEEK_BASE_URL
+	APIKey     string // DEEPSEEK_API_KEY or the contents of APIKeyFile
+	APIKeyFile string // UTRAQUE_DEEPSEEK_API_KEY_FILE
+}
+
+// Configured reports whether the DeepSeek leg has a usable credential.
+func (d DeepSeek) Configured() bool { return d.APIKey != "" }
 
 // Idle configures launchd-friendly self-exit. A Timeout of 0 disables it.
 type Idle struct {
@@ -266,6 +285,7 @@ type Config struct {
 	LocalToken string // UTRAQUE_LOCAL_TOKEN (secret)
 	Limits     Limits
 	Anthropic  Anthropic
+	DeepSeek   DeepSeek
 	Codex      Codex
 	Routing    Routing
 	Idle       Idle
@@ -287,6 +307,7 @@ func Default() Config {
 			UpstreamIdleTimeout: DefaultUpstreamIdleTimeout,
 		},
 		Anthropic: Anthropic{BaseURL: DefaultAnthropicBaseURL},
+		DeepSeek:  DeepSeek{BaseURL: DefaultDeepSeekBaseURL},
 		Codex: Codex{
 			// AuthFile is intentionally empty here: a bare Default() performs no
 			// environment or filesystem lookups. LoadFrom resolves it.
@@ -324,6 +345,7 @@ func LoadFrom(getenv func(string) string) (Config, error) {
 	setString(EnvListen, &c.Listen)
 	setString(EnvLocalToken, &c.LocalToken)
 	setString(EnvAnthropicBaseURL, &c.Anthropic.BaseURL)
+	setString(EnvDeepSeekBaseURL, &c.DeepSeek.BaseURL)
 	setString(EnvCodexBaseURL, &c.Codex.BaseURL)
 	setString(EnvCodexTokenURL, &c.Codex.TokenURL)
 	setString(EnvCodexTransport, &c.Codex.Transport)
@@ -334,6 +356,19 @@ func LoadFrom(getenv func(string) string) (Config, error) {
 
 	c.Codex.AuthFile = resolveCodexAuthFile(getenv)
 	c.Codex.CachePath = resolveCodexCacheFile(getenv)
+	if v, ok := lookup(getenv, EnvDeepSeekAPIKeyFile); ok {
+		c.DeepSeek.APIKeyFile = expandHome(strings.TrimSpace(v), getenv)
+		key, err := os.ReadFile(c.DeepSeek.APIKeyFile)
+		if err != nil {
+			return Config{}, fmt.Errorf("config: %s: %w", EnvDeepSeekAPIKeyFile, err)
+		}
+		c.DeepSeek.APIKey = strings.TrimSpace(string(key))
+		if c.DeepSeek.APIKey == "" {
+			return Config{}, fmt.Errorf("config: %s names an empty key file", EnvDeepSeekAPIKeyFile)
+		}
+	} else if v, ok := lookup(getenv, EnvDeepSeekAPIKey); ok {
+		c.DeepSeek.APIKey = strings.TrimSpace(v)
+	}
 
 	if v, ok := lookup(getenv, EnvRoutingAliasOverrides); ok {
 		overrides, err := parseAliasOverrides(v)
@@ -391,6 +426,7 @@ func LoadFrom(getenv func(string) string) (Config, error) {
 	c.Log.Level = strings.ToLower(strings.TrimSpace(c.Log.Level))
 	c.Log.Format = strings.ToLower(strings.TrimSpace(c.Log.Format))
 	c.Anthropic.BaseURL = strings.TrimRight(strings.TrimSpace(c.Anthropic.BaseURL), "/")
+	c.DeepSeek.BaseURL = strings.TrimRight(strings.TrimSpace(c.DeepSeek.BaseURL), "/")
 
 	if err := c.Validate(); err != nil {
 		return Config{}, err
@@ -561,6 +597,9 @@ func (c Config) Validate() error {
 	if u.Fragment != "" {
 		return fmt.Errorf("config: %s must not contain a fragment", EnvAnthropicBaseURL)
 	}
+	if err := validateEndpoint(EnvDeepSeekBaseURL, c.DeepSeek.BaseURL); err != nil {
+		return err
+	}
 
 	if c.Codex.RefreshSkew < 0 {
 		return fmt.Errorf("config: %s must not be negative, got %s", EnvCodexRefreshSkew, c.Codex.RefreshSkew)
@@ -672,6 +711,9 @@ func (c Config) String() string {
 	fmt.Fprintf(&b, " max_body_bytes=%d", c.Limits.MaxBodyBytes)
 	fmt.Fprintf(&b, " upstream_idle_timeout=%s", c.Limits.UpstreamIdleTimeout)
 	fmt.Fprintf(&b, " anthropic.base_url=%s", RedactURL(c.Anthropic.BaseURL))
+	fmt.Fprintf(&b, " deepseek.base_url=%s", RedactURL(c.DeepSeek.BaseURL))
+	fmt.Fprintf(&b, " deepseek.configured=%t", c.DeepSeek.Configured())
+	fmt.Fprintf(&b, " deepseek.api_key_file=%s", c.DeepSeek.APIKeyFile)
 	fmt.Fprintf(&b, " codex.base_url=%s", RedactURL(c.Codex.BaseURL))
 	fmt.Fprintf(&b, " codex.auth_file=%s", c.Codex.AuthFile)
 	fmt.Fprintf(&b, " codex.cache_file=%s", c.Codex.CachePath)
@@ -698,6 +740,9 @@ func (c Config) LogValue() slog.Value {
 		slog.Int64("max_body_bytes", c.Limits.MaxBodyBytes),
 		slog.Duration("upstream_idle_timeout", c.Limits.UpstreamIdleTimeout),
 		slog.String("anthropic.base_url", RedactURL(c.Anthropic.BaseURL)),
+		slog.String("deepseek.base_url", RedactURL(c.DeepSeek.BaseURL)),
+		slog.Bool("deepseek.configured", c.DeepSeek.Configured()),
+		slog.String("deepseek.api_key_file", c.DeepSeek.APIKeyFile),
 		slog.String("codex.base_url", RedactURL(c.Codex.BaseURL)),
 		slog.String("codex.auth_file", c.Codex.AuthFile),
 		slog.String("codex.cache_file", c.Codex.CachePath),
