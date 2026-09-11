@@ -181,4 +181,74 @@ func TestCodexRateLimitPresenceAndStableOrder(t *testing.T) {
 	}
 }
 
+func TestCodexSpendControlReachedPreservesTrueFalseAndMissing(t *testing.T) {
+	reached, clear := true, false
+	buckets := map[string]codexSnapshot{
+		"a_reached": {SpendControlReached: &reached},
+		"b_clear":   {SpendControlReached: &clear},
+		"c_missing": {},
+	}
+	var observation Observation
+	if err := normalizeCodexLimits(&observation, codexRateLimitsResponse{RateLimitsByID: &buckets}, fixedNow); err != nil {
+		t.Fatal(err)
+	}
+	if len(observation.Quotas) != 0 {
+		t.Fatalf("unexpected synthesized quotas: %+v", observation.Quotas)
+	}
+	if len(observation.SpendControls) != 2 {
+		t.Fatalf("spend controls = %+v", observation.SpendControls)
+	}
+	if got := observation.SpendControls[0]; got.ScopeID != "a_reached" || !got.Reached {
+		t.Errorf("true flag = %+v", got)
+	}
+	if got := observation.SpendControls[1]; got.ScopeID != "b_clear" || got.Reached {
+		t.Errorf("false flag = %+v", got)
+	}
+}
+
 func floatPtr(v float64) *float64 { return &v }
+
+func TestCodexSubprocessOutputBounds(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		opts CodexOptions
+		code ErrorCode
+	}{
+		{
+			name: "stdout line",
+			body: `while IFS= read -r line; do printf '%s\n' 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'; done`,
+			opts: CodexOptions{MaxLineBytes: 32, MaxOutputBytes: 1024},
+			code: CodeTooLarge,
+		},
+		{
+			name: "stderr stream",
+			body: `printf '%s' 'stderr-private-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx' >&2
+while IFS= read -r line; do :; done`,
+			opts: CodexOptions{MaxStderrBytes: 16, Timeout: 2 * time.Second},
+			code: CodeTimeout,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tt.opts.Command = []string{writeFakeAppServer(t, tt.body)}
+			client, err := NewCodexClient(tt.opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			source := &fakeCredentialSource{cred: auth.Credential{AccessToken: "token", AccountID: "account"}}
+			started := time.Now()
+			_, err = client.Read(context.Background(), source)
+			var qerr *Error
+			if !errors.As(err, &qerr) || qerr.Code != tt.code {
+				t.Fatalf("error = %v, want %s", err, tt.code)
+			}
+			if time.Since(started) > time.Second {
+				t.Fatalf("output-bound shutdown took %s", time.Since(started))
+			}
+			if strings.Contains(err.Error(), "stderr-private") {
+				t.Fatalf("stderr leaked in error: %v", err)
+			}
+		})
+	}
+}

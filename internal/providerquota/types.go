@@ -27,15 +27,16 @@ const (
 // intentionally unexported: it is available for account-safe cache matching,
 // but cannot leak through encoding/json.
 type Observation struct {
-	Source       Provider      `json:"source"`
-	CollectedAt  time.Time     `json:"collected_at"`
-	Quotas       []Quota       `json:"quotas,omitempty"`
-	Balances     []Balance     `json:"balances,omitempty"`
-	Plan         *PlanInfo     `json:"plan,omitempty"`
-	ExtraUsage   *ExtraUsage   `json:"extra_usage,omitempty"`
-	ResetCredits *ResetCredits `json:"reset_credits,omitempty"`
-	Available    *bool         `json:"available,omitempty"`
-	cacheScope   string
+	Source        Provider       `json:"source"`
+	CollectedAt   time.Time      `json:"collected_at"`
+	Quotas        []Quota        `json:"quotas,omitempty"`
+	Balances      []Balance      `json:"balances,omitempty"`
+	SpendControls []SpendControl `json:"spend_controls,omitempty"`
+	Plan          *PlanInfo      `json:"plan,omitempty"`
+	ExtraUsage    *ExtraUsage    `json:"extra_usage,omitempty"`
+	ResetCredits  *ResetCredits  `json:"reset_credits,omitempty"`
+	Available     *bool          `json:"available,omitempty"`
+	cacheScope    string
 }
 
 // CacheScope returns a non-secret, provider-scoped discriminator suitable for
@@ -86,6 +87,13 @@ type Balance struct {
 type BalanceComponent struct {
 	Name   string `json:"name"`
 	Amount string `json:"amount"`
+}
+
+// SpendControl preserves the backend's independent per-bucket restriction
+// state. A missing backend flag produces no entry; Reached=false is retained.
+type SpendControl struct {
+	ScopeID string `json:"scope_id"`
+	Reached bool   `json:"reached"`
 }
 
 // ExtraUsage retains only the documented, non-identifying fields returned by

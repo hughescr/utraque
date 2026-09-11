@@ -39,3 +39,27 @@ func TestDeepSeekPreservesTotalAndComponents(t *testing.T) {
 		t.Errorf("JSON leaked private scope: %s", wire)
 	}
 }
+
+func TestDeepSeekMissingOrNullBalancesDoNotBecomeZero(t *testing.T) {
+	for _, body := range []string{
+		`{"is_available":true}`,
+		`{"is_available":true,"balance_infos":null}`,
+	} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte(body))
+		}))
+		client, err := NewDeepSeekClient(DeepSeekOptions{BaseURL: server.URL, APIKey: "key"})
+		if err != nil {
+			server.Close()
+			t.Fatal(err)
+		}
+		got, err := client.Read(context.Background())
+		server.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Balances != nil {
+			t.Errorf("body %s produced balances %+v", body, got.Balances)
+		}
+	}
+}

@@ -252,6 +252,7 @@ func parseDaily(data []byte, since, until time.Time) ([]DailyModelUsage, error) 
 	}
 
 	acc := make(map[dailyKey]*dailyAccumulator)
+	var reportDays tokenVector
 	for dayIndex, day := range *raw.Daily {
 		path := fmt.Sprintf("daily[%d]", dayIndex)
 		if day.Agent == nil || *day.Agent != "all" || day.Period == nil || day.Agents == nil || day.ModelsUsed == nil {
@@ -267,6 +268,7 @@ func parseDaily(data []byte, since, until time.Time) ([]DailyModelUsage, error) 
 		if date.Before(since) || date.After(until) {
 			return nil, fmt.Errorf("%s.period is outside requested range", path)
 		}
+		var dayAgents tokenVector
 		for agentIndex, agent := range *day.Agents {
 			agentPath := fmt.Sprintf("%s.agents[%d]", path, agentIndex)
 			if agent.Agent == nil || agent.ModelBreakdowns == nil || agent.ModelsUsed == nil {
@@ -275,38 +277,37 @@ func parseDaily(data []byte, since, until time.Time) ([]DailyModelUsage, error) 
 			if err := validateTotals(agentPath, &agent.rawTokenTotals); err != nil {
 				return nil, err
 			}
-			source := strings.ToLower(*agent.Agent)
-			if source != "claude" && source != "codex" {
-				continue
+			source := *agent.Agent
+			if source == "" || strings.TrimSpace(source) != source {
+				return nil, fmt.Errorf("%s.agent must be a nonempty source label", agentPath)
 			}
-			var breakdownInput, breakdownOutput, breakdownCreation, breakdownRead uint64
+			var agentModels tokenVector
 			for modelIndex, model := range *agent.ModelBreakdowns {
 				modelPath := fmt.Sprintf("%s.modelBreakdowns[%d]", agentPath, modelIndex)
 				if err := addDailyModel(acc, date, source, model, modelPath); err != nil {
 					return nil, err
 				}
-				breakdownInput, err = addUint(breakdownInput, *model.InputTokens)
-				if err != nil {
-					return nil, fmt.Errorf("%s model input token sum overflows", agentPath)
-				}
-				breakdownOutput, err = addUint(breakdownOutput, *model.OutputTokens)
-				if err != nil {
-					return nil, fmt.Errorf("%s model output token sum overflows", agentPath)
-				}
-				breakdownCreation, err = addUint(breakdownCreation, *model.CacheCreationTokens)
-				if err != nil {
-					return nil, fmt.Errorf("%s model cache creation token sum overflows", agentPath)
-				}
-				breakdownRead, err = addUint(breakdownRead, *model.CacheReadTokens)
-				if err != nil {
-					return nil, fmt.Errorf("%s model cache read token sum overflows", agentPath)
+				if err := agentModels.add(modelTokenVector(model)); err != nil {
+					return nil, fmt.Errorf("%s model token totals overflow", agentPath)
 				}
 			}
-			if breakdownInput != *agent.InputTokens || breakdownOutput != *agent.OutputTokens ||
-				breakdownCreation != *agent.CacheCreationTokens || breakdownRead != *agent.CacheReadTokens {
+			if !agentModels.equal(totalsTokenVector(&agent.rawTokenTotals)) {
 				return nil, fmt.Errorf("%s model breakdown tokens do not equal agent totals", agentPath)
 			}
+			if err := dayAgents.add(totalsTokenVector(&agent.rawTokenTotals)); err != nil {
+				return nil, fmt.Errorf("%s agent token totals overflow", path)
+			}
 		}
+		dayTotals := totalsTokenVector(&day.rawTokenTotals)
+		if !dayAgents.equal(dayTotals) {
+			return nil, fmt.Errorf("%s agent token totals do not equal day totals", path)
+		}
+		if err := reportDays.add(dayTotals); err != nil {
+			return nil, fmt.Errorf("daily token totals overflow")
+		}
+	}
+	if !reportDays.equal(totalsTokenVector(raw.Totals)) {
+		return nil, fmt.Errorf("daily token totals do not equal report totals")
 	}
 
 	rows := make([]DailyModelUsage, 0, len(acc))
@@ -392,6 +393,43 @@ func validateTotals(path string, raw *rawTokenTotals) error {
 		return fmt.Errorf("%s.totalTokens does not equal its token categories", path)
 	}
 	return nil
+}
+
+type tokenVector struct {
+	input, output, cacheCreation, cacheRead, total uint64
+}
+
+func totalsTokenVector(raw *rawTokenTotals) tokenVector {
+	return tokenVector{
+		input: *raw.InputTokens, output: *raw.OutputTokens,
+		cacheCreation: *raw.CacheCreationTokens, cacheRead: *raw.CacheReadTokens,
+		total: *raw.TotalTokens,
+	}
+}
+
+func modelTokenVector(raw rawModelBreakdown) tokenVector {
+	return tokenVector{
+		input: *raw.InputTokens, output: *raw.OutputTokens,
+		cacheCreation: *raw.CacheCreationTokens, cacheRead: *raw.CacheReadTokens,
+		total: *raw.InputTokens + *raw.OutputTokens + *raw.CacheCreationTokens + *raw.CacheReadTokens,
+	}
+}
+
+func (v *tokenVector) add(other tokenVector) error {
+	values := [5]*uint64{&v.input, &v.output, &v.cacheCreation, &v.cacheRead, &v.total}
+	addends := [5]uint64{other.input, other.output, other.cacheCreation, other.cacheRead, other.total}
+	for index := range values {
+		next, err := addUint(*values[index], addends[index])
+		if err != nil {
+			return err
+		}
+		*values[index] = next
+	}
+	return nil
+}
+
+func (v tokenVector) equal(other tokenVector) bool {
+	return v == other
 }
 
 type rawBlockTokenCounts struct {

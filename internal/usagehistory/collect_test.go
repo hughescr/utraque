@@ -18,10 +18,10 @@ import (
 const representativeDaily = `{
   "daily": [{
     "agent": "all", "period": "2026-09-12",
-    "inputTokens": 23, "outputTokens": 11, "cacheCreationTokens": 6, "cacheReadTokens": 9,
-    "totalTokens": 49, "totalCost": 1.95,
-    "modelsUsed": ["claude-sonnet-4-5", "gpt-5.6-sol", "deepseek-chat", "mystery-model"],
-    "modelBreakdowns": [{"modelName":"outer-must-not-be-counted","inputTokens":23,"outputTokens":11,"cacheCreationTokens":6,"cacheReadTokens":9,"cost":1.95}],
+    "inputTokens": 27, "outputTokens": 13, "cacheCreationTokens": 6, "cacheReadTokens": 10,
+    "totalTokens": 56, "totalCost": 2.25,
+    "modelsUsed": ["claude-sonnet-4-5", "gpt-5.6-sol", "deepseek-chat", "mystery-model", "deepseek-reasoner"],
+    "modelBreakdowns": [{"modelName":"outer-must-not-be-counted","inputTokens":27,"outputTokens":13,"cacheCreationTokens":6,"cacheReadTokens":10,"cost":2.25}],
     "agents": [
       {"agent":"claude","inputTokens":15,"outputTokens":8,"cacheCreationTokens":3,"cacheReadTokens":4,"totalTokens":30,"totalCost":1.25,
        "modelsUsed":["claude-sonnet-4-5","gpt-5.6-sol"],
@@ -35,11 +35,16 @@ const representativeDaily = `{
          {"modelName":"deepseek-chat","inputTokens":7,"outputTokens":1,"cacheCreationTokens":2,"cacheReadTokens":3,"cost":0.5},
          {"modelName":"mystery-model","inputTokens":1,"outputTokens":2,"cacheCreationTokens":1,"cacheReadTokens":2,"cost":0.2}
        ]},
+      {"agent":"opencode","inputTokens":4,"outputTokens":2,"cacheCreationTokens":0,"cacheReadTokens":1,"totalTokens":7,"totalCost":0.30,
+       "modelsUsed":["deepseek-reasoner"],
+       "modelBreakdowns":[
+         {"modelName":"deepseek-reasoner","inputTokens":4,"outputTokens":2,"cacheCreationTokens":0,"cacheReadTokens":1,"cost":0.3}
+       ]},
       {"agent":"other","inputTokens":0,"outputTokens":0,"cacheCreationTokens":0,"cacheReadTokens":0,"totalTokens":0,"totalCost":0,
        "modelsUsed":[],"modelBreakdowns":[]}
     ]
   }],
-  "totals": {"inputTokens":23,"outputTokens":11,"cacheCreationTokens":6,"cacheReadTokens":9,"totalTokens":49,"totalCost":1.95}
+  "totals": {"inputTokens":27,"outputTokens":13,"cacheCreationTokens":6,"cacheReadTokens":10,"totalTokens":56,"totalCost":2.25}
 }`
 
 const representativeBlocks = `{
@@ -148,8 +153,8 @@ func TestCollectNormalizesHistoryAndUsesControlledCommands(t *testing.T) {
 	if !report.SinceDate.Equal(wantDate) || !report.UntilDate.Equal(wantDate) {
 		t.Fatalf("UTC range = %s..%s, want %s", report.SinceDate, report.UntilDate, wantDate)
 	}
-	if len(report.Daily) != 4 {
-		t.Fatalf("daily rows = %d, want 4: %#v", len(report.Daily), report.Daily)
+	if len(report.Daily) != 5 {
+		t.Fatalf("daily rows = %d, want 5: %#v", len(report.Daily), report.Daily)
 	}
 	if slices.ContainsFunc(report.Daily, func(row DailyModelUsage) bool { return row.Model == "outer-must-not-be-counted" }) {
 		t.Fatal("outer unified breakdown was double-counted")
@@ -159,8 +164,12 @@ func TestCollectNormalizesHistoryAndUsesControlledCommands(t *testing.T) {
 		rows[row.Model] = row
 	}
 	if rows["claude-sonnet-4-5"].Provider != ProviderAnthropic || rows["gpt-5.6-sol"].Provider != ProviderCodex ||
-		rows["deepseek-chat"].Provider != ProviderDeepSeek || rows["mystery-model"].Provider != ProviderUnknown {
+		rows["deepseek-chat"].Provider != ProviderDeepSeek || rows["deepseek-reasoner"].Provider != ProviderDeepSeek ||
+		rows["mystery-model"].Provider != ProviderUnknown {
 		t.Fatalf("provider classification = %#v", rows)
+	}
+	if row := rows["deepseek-reasoner"]; row.Source != "opencode" {
+		t.Fatalf("additional ccusage agent source was not preserved: %#v", row)
 	}
 	if row := rows["gpt-5.6-sol"]; row.TotalTokens != 11 || row.CostUSD != nil || row.CostStatus != CostUnavailableOrUnpriced {
 		t.Fatalf("zero-priced positive usage = %#v", row)
@@ -294,7 +303,7 @@ func TestDailySchemaAndNumericValidation(t *testing.T) {
 	tests := map[string]string{
 		"absent cost is not zero": strings.Replace(representativeDaily, `,"cost":0}`, `}`, 1),
 		"negative unsigned token": strings.Replace(representativeDaily, `"inputTokens":10`, `"inputTokens":-1`, 1),
-		"inconsistent total":      strings.Replace(representativeDaily, `"totalTokens":49`, `"totalTokens":50`, 1),
+		"inconsistent total":      strings.Replace(representativeDaily, `"totalTokens":56`, `"totalTokens":57`, 1),
 		"trailing JSON":           representativeDaily + ` {}`,
 	}
 	for name, input := range tests {
@@ -303,6 +312,35 @@ func TestDailySchemaAndNumericValidation(t *testing.T) {
 				t.Fatal("expected incompatible data error")
 			}
 		})
+	}
+}
+
+func TestDailyReconcilesEveryHierarchyLevel(t *testing.T) {
+	since := time.Date(2026, 9, 12, 0, 0, 0, 0, time.UTC)
+	until := time.Date(2026, 9, 13, 0, 0, 0, 0, time.UTC)
+	nonzeroTotals := `"inputTokens":1,"outputTokens":0,"cacheCreationTokens":0,"cacheReadTokens":0,"totalTokens":1,"totalCost":0`
+	cacheReadTotals := `"inputTokens":0,"outputTokens":0,"cacheCreationTokens":0,"cacheReadTokens":1,"totalTokens":1,"totalCost":0`
+	tests := map[string]string{
+		"report totals without days":              `{"daily":[],"totals":{` + nonzeroTotals + `}}`,
+		"day totals without agents":               `{"daily":[{"agent":"all","period":"2026-09-12",` + nonzeroTotals + `,"modelsUsed":[],"agents":[]}],"totals":{` + nonzeroTotals + `}}`,
+		"agent category differs with same total":  `{"daily":[{"agent":"all","period":"2026-09-12",` + nonzeroTotals + `,"modelsUsed":["gpt-test"],"agents":[{"agent":"new-agent",` + nonzeroTotals + `,"modelsUsed":["gpt-test"],"modelBreakdowns":[{"modelName":"gpt-test","inputTokens":0,"outputTokens":1,"cacheCreationTokens":0,"cacheReadTokens":0,"cost":0}]}]}],"totals":{` + nonzeroTotals + `}}`,
+		"report category differs with same total": `{"daily":[{"agent":"all","period":"2026-09-12",` + cacheReadTotals + `,"modelsUsed":["gpt-test"],"agents":[{"agent":"new-agent",` + cacheReadTotals + `,"modelsUsed":["gpt-test"],"modelBreakdowns":[{"modelName":"gpt-test","inputTokens":0,"outputTokens":0,"cacheCreationTokens":0,"cacheReadTokens":1,"cost":0}]}]}],"totals":{` + nonzeroTotals + `}}`,
+	}
+	for name, input := range tests {
+		t.Run(name, func(t *testing.T) {
+			if _, err := parseDaily([]byte(input), since, until); err == nil {
+				t.Fatal("inconsistent hierarchy was accepted")
+			}
+		})
+	}
+
+	const max = `18446744073709551615`
+	day := func(period string) string {
+		return `{"agent":"all","period":"` + period + `","inputTokens":` + max + `,"outputTokens":0,"cacheCreationTokens":0,"cacheReadTokens":0,"totalTokens":` + max + `,"totalCost":0,"modelsUsed":["gpt-test"],"agents":[{"agent":"new-agent","inputTokens":` + max + `,"outputTokens":0,"cacheCreationTokens":0,"cacheReadTokens":0,"totalTokens":` + max + `,"totalCost":0,"modelsUsed":["gpt-test"],"modelBreakdowns":[{"modelName":"gpt-test","inputTokens":` + max + `,"outputTokens":0,"cacheCreationTokens":0,"cacheReadTokens":0,"cost":0}]}]}`
+	}
+	overflow := `{"daily":[` + day("2026-09-12") + `,` + day("2026-09-13") + `],"totals":{"inputTokens":` + max + `,"outputTokens":0,"cacheCreationTokens":0,"cacheReadTokens":0,"totalTokens":` + max + `,"totalCost":0}}`
+	if _, err := parseDaily([]byte(overflow), since, until); err == nil || !strings.Contains(err.Error(), "overflow") {
+		t.Fatalf("cross-day overflow error = %v", err)
 	}
 }
 

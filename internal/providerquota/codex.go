@@ -330,6 +330,9 @@ func normalizeCodexLimits(o *Observation, response codexRateLimitsResponse, now 
 		if !validNonemptyLabel(id) || item.s.LimitName != nil && !validLabel(*item.s.LimitName) || item.s.ReachedType != nil && !validLabel(*item.s.ReachedType) {
 			return quotaError(ProviderCodex, CodeInvalidData, false)
 		}
+		if item.s.SpendControlReached != nil {
+			o.SpendControls = append(o.SpendControls, SpendControl{ScopeID: id, Reached: *item.s.SpendControlReached})
+		}
 		for _, windowItem := range []struct {
 			slot   string
 			window *codexWindow
@@ -499,7 +502,11 @@ func startJSONLines(ctx context.Context, r io.Reader, maxLine int, maxOutput int
 	go func() {
 		defer close(ch)
 		scanner := bufio.NewScanner(r)
-		scanner.Buffer(make([]byte, 4096), maxLine)
+		initialBuffer := 4096
+		if maxLine < initialBuffer {
+			initialBuffer = maxLine
+		}
+		scanner.Buffer(make([]byte, initialBuffer), maxLine)
 		var total int64
 		for scanner.Scan() {
 			line := append([]byte(nil), scanner.Bytes()...)

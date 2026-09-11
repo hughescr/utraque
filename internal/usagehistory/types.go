@@ -97,9 +97,11 @@ type Report struct {
 	Issues                     []Issue           `json:"issues"`
 }
 
-// DailyModelUsage is one model, UTC date, and local log source. Token
-// categories are counted exactly once; output tokens already include any
-// reasoning-token subset reported by a provider.
+// DailyModelUsage is one model, UTC date, and ccusage local-log source. Source
+// is an agent label such as "claude", "codex", or "opencode"; it does not
+// identify a provider billing account. Token categories are counted exactly
+// once; output tokens already include any reasoning-token subset reported by a
+// provider.
 type DailyModelUsage struct {
 	Date                time.Time  `json:"date"`
 	Source              string     `json:"source"`
