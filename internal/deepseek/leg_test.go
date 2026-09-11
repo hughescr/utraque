@@ -61,7 +61,7 @@ func TestMessagesOwnsCredentialAndCanonicalizesLegacyFlash(t *testing.T) {
 		_ = json.Unmarshal(body, &obj)
 		gotCh <- captured{path: r.URL.Path, header: r.Header.Clone(), body: obj}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"id":"msg_1","type":"message","role":"assistant","model":"vendor-internal-name","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":11,"output_tokens":2}}`)
+		_, _ = io.WriteString(w, `{"id":"msg_1","type":"message","role":"assistant","model":"deepseek-v4-flash","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":11,"output_tokens":2}}`)
 	}))
 	defer upstream.Close()
 
@@ -192,6 +192,72 @@ func TestCountTokensIsEstimatedLocallyBecauseUpstreamDoesNotDocumentIt(t *testin
 	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil || response.InputTokens <= 0 {
 		t.Errorf("body = %s, err = %v", rec.Body.String(), err)
 	}
+	if got := rec.Header().Get(TokenCountMethodHeader); got != "estimated; estimator=chars/4" {
+		t.Errorf("%s = %q, want explicit local-estimate method", TokenCountMethodHeader, got)
+	}
+}
+
+func TestToolResultErrorsAreMarkedAndRemainReplayable(t *testing.T) {
+	gotBody := make(chan []byte, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		gotBody <- body
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"msg_1","type":"message","role":"assistant","model":"deepseek-flash","content":[{"type":"text","text":"recovered"}],"stop_reason":"end_turn","usage":{"input_tokens":8,"output_tokens":1}}`)
+	}))
+	defer upstream.Close()
+
+	body := `{"model":"deepseek-flash","max_tokens":16,"messages":[` +
+		`{"role":"assistant","content":[{"type":"tool_use","id":"tool_1","name":"read","input":{}}]},` +
+		`{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool_1","is_error":true,"content":"file missing"}]},` +
+		`{"role":"assistant","content":[{"type":"tool_use","id":"tool_2","name":"read","input":{}}]},` +
+		`{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool_2","is_error":true,"content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"eA=="}},{"type":"text","text":"bad image"}]}]},` +
+		`{"role":"user","content":"continue after both failures"}]}`
+	if _, err := callLeg(t, testLeg(t, upstream.URL), "deepseek-flash", body, false, false, nil); err != nil {
+		t.Fatalf("Messages: %v", err)
+	}
+
+	var request struct {
+		Messages []struct {
+			Content json.RawMessage `json:"content"`
+		} `json:"messages"`
+	}
+	if raw := <-gotBody; json.Unmarshal(raw, &request) != nil {
+		t.Fatalf("invalid rewritten request: %s", raw)
+	}
+	if len(request.Messages) != 5 || string(request.Messages[4].Content) != `"continue after both failures"` {
+		t.Fatalf("subsequent turn was not preserved: %s", request.Messages[4].Content)
+	}
+
+	var first []map[string]json.RawMessage
+	if err := json.Unmarshal(request.Messages[1].Content, &first); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := first[0]["is_error"]; exists {
+		t.Fatal("is_error leaked to DeepSeek")
+	}
+	var firstText string
+	_ = json.Unmarshal(first[0]["content"], &firstText)
+	if firstText != toolErrorMarker+"\n\nfile missing" {
+		t.Errorf("string tool error = %q", firstText)
+	}
+
+	var second []map[string]json.RawMessage
+	if err := json.Unmarshal(request.Messages[3].Content, &second); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := second[0]["is_error"]; exists {
+		t.Fatal("array tool error retained is_error")
+	}
+	var nested []map[string]json.RawMessage
+	if err := json.Unmarshal(second[0]["content"], &nested); err != nil {
+		t.Fatal(err)
+	}
+	var marked string
+	_ = json.Unmarshal(nested[1]["text"], &marked)
+	if marked != toolErrorMarker+"\n\nbad image" {
+		t.Errorf("block-array tool error = %q", marked)
+	}
 }
 
 func TestTruncatedStreamAfterMessageStartIsNeverBlessedAsComplete(t *testing.T) {
@@ -206,6 +272,60 @@ func TestTruncatedStreamAfterMessageStartIsNeverBlessedAsComplete(t *testing.T) 
 	if !errors.Is(err, router.ErrResponseStarted) || !strings.Contains(err.Error(), "without message_stop or error") {
 		t.Fatalf("error = %v, want a started-response truncation error", err)
 	}
+}
+
+func TestTruncatedTerminalAndErrorFramesAreRejected(t *testing.T) {
+	for _, terminal := range []string{"message_stop", "error"} {
+		t.Run(terminal, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = io.WriteString(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"deepseek-flash\",\"content\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n")
+				_, _ = io.WriteString(w, "event: "+terminal+"\ndata: {\"type\":")
+			}))
+			defer upstream.Close()
+
+			body := `{"model":"deepseek-flash","max_tokens":8,"stream":true,"messages":[{"role":"user","content":"hello"}]}`
+			_, err := callLeg(t, testLeg(t, upstream.URL), "deepseek-flash", body, true, false, nil)
+			if !errors.Is(err, router.ErrResponseStarted) || !strings.Contains(err.Error(), "invalid deepseek stream") {
+				t.Fatalf("error = %v, want invalid started response", err)
+			}
+		})
+	}
+}
+
+func TestContradictoryKnownResponseModelIsRejected(t *testing.T) {
+	t.Run("JSON", func(t *testing.T) {
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"id":"msg_1","type":"message","role":"assistant","model":"deepseek-flash","content":[],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`)
+		}))
+		defer upstream.Close()
+		body := `{"model":"deepseek-v4-pro","max_tokens":8,"messages":[{"role":"user","content":"hello"}]}`
+		rec, err := callLeg(t, testLeg(t, upstream.URL), "deepseek-v4-pro", body, false, false, nil)
+		var ae *apierr.Error
+		if !errors.As(err, &ae) || ae.HTTPStatus() != http.StatusBadGateway || !strings.Contains(err.Error(), "contradicts") {
+			t.Fatalf("error = %v, want model-mismatch 502", err)
+		}
+		if rec.Body.Len() != 0 {
+			t.Fatalf("contradictory response was forwarded: %s", rec.Body.String())
+		}
+	})
+
+	t.Run("SSE", func(t *testing.T) {
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = io.WriteString(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"deepseek-flash\",\"content\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+		}))
+		defer upstream.Close()
+		body := `{"model":"deepseek-v4-pro","max_tokens":8,"stream":true,"messages":[{"role":"user","content":"hello"}]}`
+		rec, err := callLeg(t, testLeg(t, upstream.URL), "deepseek-v4-pro", body, true, false, nil)
+		if !errors.Is(err, router.ErrResponseStarted) || !strings.Contains(err.Error(), "contradicts") {
+			t.Fatalf("error = %v, want started model-mismatch error", err)
+		}
+		if rec.Body.Len() != 0 {
+			t.Fatalf("contradictory message_start was forwarded: %s", rec.Body.String())
+		}
+	})
 }
 
 func TestUnsupportedContentIsRejectedBeforeSpending(t *testing.T) {

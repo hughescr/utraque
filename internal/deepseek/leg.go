@@ -36,6 +36,9 @@ const (
 	copyBufferSize                = 32 << 10
 )
 
+// TokenCountMethodHeader identifies how CountTokens obtained its result.
+const TokenCountMethodHeader = "X-Utraque-Token-Count-Method"
+
 // Option configures a Leg.
 type Option func(*Leg)
 
@@ -145,6 +148,7 @@ func (l *Leg) CountTokens(w http.ResponseWriter, r *http.Request, rq *router.Req
 		"estimator", l.estimator.Name(), "bytes", len(rq.Raw))
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set(TokenCountMethodHeader, "estimated; estimator="+l.estimator.Name())
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(body)
 	return nil
@@ -277,21 +281,21 @@ func (l *Leg) streamResponse(w http.ResponseWriter, r *http.Request, idle *idleG
 	sawStart, sawTerminal, sawError := false, false, false
 	for scanner.Scan() {
 		frame := scanner.Frame()
-		data, isStart, err := rewriteStreamFrame(frame, canonical)
+		data, eventType, err := rewriteStreamFrame(frame, canonical)
 		if err != nil {
 			return fmt.Errorf("%w: invalid deepseek stream: %w", router.ErrResponseStarted, err)
 		}
-		if isStart {
+		if eventType == schema.EventMessageStart {
 			sawStart = true
 		}
-		switch streamEventType(frame.Event, data) {
+		switch eventType {
 		case schema.EventMessageStop:
 			sawTerminal = true
 		case schema.EventError:
 			sawTerminal = true
 			sawError = true
 		}
-		observeStreamFrame(r.Context(), frame.Event, data)
+		observeStreamFrame(r.Context(), eventType, data)
 		if err := writer.WriteFrame(frame.Event, data); err != nil {
 			return fmt.Errorf("%w: writing deepseek stream: %w", router.ErrResponseStarted, err)
 		}
@@ -396,17 +400,6 @@ func mediaType(h http.Header) string {
 		return ""
 	}
 	return strings.ToLower(t)
-}
-
-func streamEventType(event string, data []byte) string {
-	if event != "" {
-		return event
-	}
-	var envelope struct {
-		Type string `json:"type"`
-	}
-	_ = json.Unmarshal(data, &envelope)
-	return envelope.Type
 }
 
 func observeMessage(ctx context.Context, b []byte) {

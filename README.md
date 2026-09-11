@@ -101,7 +101,9 @@ allows performance hints such as `cache_control` and thinking
 `budget_tokens`, but rejects requirements whose meaning would otherwise be
 silently lost: unsupported content blocks, Pro image input, `top_k`,
 non-default `service_tier`, MCP/container requests, structured `output_config`, forced
-serial tool calls, text citations, and `tool_result.is_error=true`.
+serial tool calls, and text citations. Because DeepSeek ignores
+`tool_result.is_error`, utraque removes that flag and prefixes failed tool output
+with `[tool error]` so ordinary tool failures keep their meaning across turns.
 
 ## Install & run
 
