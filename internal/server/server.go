@@ -271,7 +271,19 @@ func (s *Server) chain(h http.Handler) http.Handler {
 	h = s.withRecover(h)
 	h = s.withObserve(h)
 	h = s.withRequestID(h)
+	h = withProviderReportNoStore(h)
 	return h
+}
+
+// withProviderReportNoStore applies before authentication so even a rejected
+// report request cannot be cached by an HTTP intermediary.
+func withProviderReportNoStore(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r != nil && r.URL != nil && r.URL.Path == ProviderReportPath {
+			w.Header().Set("Cache-Control", "no-store")
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // Handler returns the fully wrapped handler.

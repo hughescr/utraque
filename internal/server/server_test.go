@@ -351,6 +351,10 @@ func TestProviderReportPathNeverFallsThrough(t *testing.T) {
 	if reports != 4 || relays != 0 {
 		t.Fatalf("reports=%d relays=%d", reports, relays)
 	}
+	unauthorized := httptest.NewRequest(http.MethodGet, server.ProviderReportPath, nil)
+	if w := do(t, s, unauthorized); w.Code != http.StatusUnauthorized || w.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("unauthorized report status=%d Cache-Control=%q", w.Code, w.Header().Get("Cache-Control"))
+	}
 }
 
 func TestBodyLimitDeclaredContentLength(t *testing.T) {
