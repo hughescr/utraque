@@ -100,13 +100,14 @@ func (f *fakeRunner) Run(_ context.Context, spec commandSpec) ([]byte, error) {
 }
 
 func commandOperation(args []string) string {
-	if len(args) >= 2 && args[1] == "--version" {
+	if (len(args) >= 1 && args[0] == "--version") || (len(args) >= 2 && args[1] == "--version") {
 		return "version"
 	}
-	if len(args) >= 2 && args[1] == "daily" {
+	if (len(args) >= 1 && args[0] == "daily") || (len(args) >= 2 && args[1] == "daily") {
 		return "daily"
 	}
-	if len(args) >= 3 && args[1] == "claude" && args[2] == "blocks" {
+	if (len(args) >= 2 && args[0] == "claude" && args[1] == "blocks") ||
+		(len(args) >= 3 && args[1] == "claude" && args[2] == "blocks") {
 		return "blocks"
 	}
 	return "unknown"
@@ -145,7 +146,7 @@ func TestCollectNormalizesHistoryAndUsesControlledCommands(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if report.ToolVersion != "20.0.20" || report.Source != SourceCCUsage || report.Coverage != CoverageLocalOnly ||
+	if report.ToolVersion != "20.0.20" || report.InvocationMode != InvocationBunx || report.Source != SourceCCUsage || report.Coverage != CoverageLocalOnly ||
 		report.CostBasis != CostBasisCalculatedAPIReference || report.UnitPriceUnavailableReason != UnitPriceUnavailableCCUsage {
 		t.Fatalf("report provenance = version %q source %q coverage %q", report.ToolVersion, report.Source, report.Coverage)
 	}
@@ -233,6 +234,76 @@ func TestCollectNormalizesHistoryAndUsesControlledCommands(t *testing.T) {
 	}
 	if len(report.Issues) != 0 || !report.StartedAt.Equal(times[0].UTC()) || !report.FinishedAt.Equal(times[1].UTC()) {
 		t.Fatalf("report envelope = %#v", report)
+	}
+}
+
+func TestCollectNativeExecutableUsesDirectArgv(t *testing.T) {
+	runner := &fakeRunner{responses: map[string]fakeResponse{
+		"version": {output: []byte("20.0.20")},
+		"daily":   {output: []byte(`{"daily":[],"totals":{"inputTokens":0,"outputTokens":0,"cacheCreationTokens":0,"cacheReadTokens":0,"totalTokens":0,"totalCost":0}}`)},
+		"blocks":  {output: []byte(`{"blocks":[]}`)},
+	}}
+	collector, err := New(Options{
+		NativeExecutable: "/opt/local/bin/ccusage",
+		Executable:       "bunx-must-not-run",
+		Package:          "--ignored-in-native-mode",
+		Version:          "ignored version",
+		runner:           runner,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	date := time.Date(2026, 9, 12, 0, 0, 0, 0, time.UTC)
+	report, err := collector.Collect(context.Background(), date, date)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.InvocationMode != InvocationNative || report.ToolVersion != "20.0.20" {
+		t.Fatalf("native provenance = %#v", report)
+	}
+
+	runner.mu.Lock()
+	specs := slices.Clone(runner.specs)
+	runner.mu.Unlock()
+	if len(specs) != 3 {
+		t.Fatalf("native command count = %d", len(specs))
+	}
+	for _, spec := range specs {
+		if spec.name != "/opt/local/bin/ccusage" {
+			t.Fatalf("native executable fell back to %q", spec.name)
+		}
+		switch commandOperation(spec.args) {
+		case "version":
+			if !reflect.DeepEqual(spec.args, []string{"--version"}) {
+				t.Fatalf("native version argv = %#v", spec.args)
+			}
+		case "daily":
+			if spec.args[0] != "daily" {
+				t.Fatalf("native daily argv has package prefix: %#v", spec.args)
+			}
+		case "blocks":
+			if !slices.Equal(spec.args[:2], []string{"claude", "blocks"}) {
+				t.Fatalf("native blocks argv has package prefix: %#v", spec.args)
+			}
+		default:
+			t.Fatalf("unknown native argv: %#v", spec.args)
+		}
+	}
+}
+
+func TestNativeExecutableStartFailureDoesNotFallBack(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing-ccusage")
+	collector, err := New(Options{NativeExecutable: missing, Executable: "bunx"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := collector.Collect(context.Background(), time.Now(), time.Now())
+	var collectionErr *CollectError
+	if !errors.As(err, &collectionErr) || collectionErr.Section != "version" || collectionErr.Kind != ErrorCommand {
+		t.Fatalf("native start failure = %#v", err)
+	}
+	if report.InvocationMode != InvocationNative || report.ToolVersion != "" || len(report.Issues) != 1 {
+		t.Fatalf("native failure provenance = %#v", report)
 	}
 }
 

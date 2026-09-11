@@ -55,9 +55,25 @@ const (
 	CostUnavailableOrUnpriced CostStatus = "unavailable_or_unpriced"
 )
 
+// InvocationMode records whether ccusage ran through bunx or as an explicitly
+// configured native executable.
+type InvocationMode string
+
+const (
+	InvocationBunx   InvocationMode = "bunx"
+	InvocationNative InvocationMode = "native"
+)
+
 // Options configures a Collector. The zero value runs bunx ccusage@latest.
 type Options struct {
-	Executable     string
+	// NativeExecutable directly invokes an already installed ccusage native
+	// binary. When set it takes precedence over Executable, Package, and
+	// Version. The collector never installs, updates, or falls back from it.
+	NativeExecutable string
+	// Executable is the package runner for bunx mode. Empty means bunx.
+	Executable string
+	// Package and Version form the package specifier in bunx mode. Empty means
+	// ccusage@latest.
 	Package        string
 	Version        string
 	Timeout        time.Duration
@@ -75,6 +91,7 @@ type Collector struct {
 	packageArg       string
 	timeout          time.Duration
 	maxOutput        int64
+	invocationMode   InvocationMode
 	runner           commandRunner
 	now              func() time.Time
 }
@@ -88,6 +105,7 @@ type Report struct {
 	SinceDate                  time.Time         `json:"since_date"`
 	UntilDate                  time.Time         `json:"until_date"`
 	ToolVersion                string            `json:"tool_version"`
+	InvocationMode             InvocationMode    `json:"invocation_mode"`
 	Source                     string            `json:"source"`
 	Coverage                   string            `json:"coverage"`
 	CostBasis                  string            `json:"cost_basis"`
@@ -190,27 +208,33 @@ var (
 
 // New validates opts and constructs a collector without starting a process.
 func New(opts Options) (*Collector, error) {
-	executable := opts.Executable
+	executable := opts.NativeExecutable
+	invocationMode := InvocationNative
+	pkg, version, packageArg := "", "", ""
 	if executable == "" {
-		executable = DefaultExecutable
+		invocationMode = InvocationBunx
+		executable = opts.Executable
+		if executable == "" {
+			executable = DefaultExecutable
+		}
+		pkg = opts.Package
+		if pkg == "" {
+			pkg = DefaultPackage
+		}
+		version = opts.Version
+		if version == "" {
+			version = DefaultVersion
+		}
+		if !packagePattern.MatchString(pkg) || strings.HasPrefix(pkg, "-") || strings.HasPrefix(pkg, ".") {
+			return nil, fmt.Errorf("usagehistory: invalid package name %q", pkg)
+		}
+		if !versionPattern.MatchString(version) {
+			return nil, fmt.Errorf("usagehistory: invalid package version %q", version)
+		}
+		packageArg = pkg + "@" + version
 	}
 	if strings.TrimSpace(executable) != executable || strings.ContainsRune(executable, 0) {
 		return nil, fmt.Errorf("usagehistory: executable must not have surrounding whitespace or NUL")
-	}
-
-	pkg := opts.Package
-	if pkg == "" {
-		pkg = DefaultPackage
-	}
-	version := opts.Version
-	if version == "" {
-		version = DefaultVersion
-	}
-	if !packagePattern.MatchString(pkg) || strings.HasPrefix(pkg, "-") || strings.HasPrefix(pkg, ".") {
-		return nil, fmt.Errorf("usagehistory: invalid package name %q", pkg)
-	}
-	if !versionPattern.MatchString(version) {
-		return nil, fmt.Errorf("usagehistory: invalid package version %q", version)
 	}
 
 	timeout := opts.Timeout
@@ -239,9 +263,10 @@ func New(opts Options) (*Collector, error) {
 		executable:       executable,
 		packageName:      pkg,
 		requestedVersion: version,
-		packageArg:       pkg + "@" + version,
+		packageArg:       packageArg,
 		timeout:          timeout,
 		maxOutput:        maxOutput,
+		invocationMode:   invocationMode,
 		runner:           runner,
 		now:              now,
 	}, nil

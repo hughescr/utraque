@@ -26,6 +26,7 @@ func (c *Collector) Collect(ctx context.Context, since, until time.Time) (Report
 		StartedAt:                  c.now().UTC(),
 		SinceDate:                  utcDate(since),
 		UntilDate:                  utcDate(until),
+		InvocationMode:             c.invocationMode,
 		Source:                     SourceCCUsage,
 		Coverage:                   CoverageLocalOnly,
 		CostBasis:                  CostBasisCalculatedAPIReference,
@@ -60,7 +61,10 @@ func (c *Collector) Collect(ctx context.Context, since, until time.Time) (Report
 		maxOutput: c.maxOutput,
 	}
 	versionSpec := base
-	versionSpec.args = []string{c.packageArg, "--version"}
+	versionSpec.args = []string{"--version"}
+	if c.invocationMode == InvocationBunx {
+		versionSpec.args = append([]string{c.packageArg}, versionSpec.args...)
+	}
 	versionOutput, err := c.runner.Run(ctx, versionSpec)
 	if err != nil {
 		finish()
@@ -79,24 +83,30 @@ func (c *Collector) Collect(ctx context.Context, since, until time.Time) (Report
 	// version. This keeps a release appearing between subprocesses from mixing
 	// schemas within one collection while future collections still refresh it.
 	reportPackageArg := c.packageArg
-	if c.requestedVersion == DefaultVersion {
+	if c.invocationMode == InvocationBunx && c.requestedVersion == DefaultVersion {
 		reportPackageArg = c.packageName + "@" + report.ToolVersion
 	}
 
 	dailySpec := base
 	dailySpec.args = []string{
-		reportPackageArg, "daily", "--json", "--by-agent", "--timezone", "UTC",
+		"daily", "--json", "--by-agent", "--timezone", "UTC",
 		"--since", report.SinceDate.Format("2006-01-02"),
 		"--until", report.UntilDate.Format("2006-01-02"),
 		"--no-offline", "--config", configPath,
 	}
+	if c.invocationMode == InvocationBunx {
+		dailySpec.args = append([]string{reportPackageArg}, dailySpec.args...)
+	}
 	blocksSpec := base
 	blocksSpec.args = []string{
-		reportPackageArg, "claude", "blocks", "--json", "--mode", "calculate",
+		"claude", "blocks", "--json", "--mode", "calculate",
 		"--timezone", "UTC", "--session-length", "5",
 		"--since", report.SinceDate.Format("20060102"),
 		"--until", report.UntilDate.Format("20060102"),
 		"--config", configPath,
+	}
+	if c.invocationMode == InvocationBunx {
+		blocksSpec.args = append([]string{reportPackageArg}, blocksSpec.args...)
 	}
 
 	var dailyOutput, blocksOutput []byte
