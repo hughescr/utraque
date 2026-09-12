@@ -31,6 +31,7 @@ func rewriteRequest(raw []byte, canonical string) ([]byte, error) {
 }
 
 func validateContent(obj map[string]json.RawMessage, canonical string) error {
+	toolSchemas := declaredToolSchemas(obj["tools"])
 	for _, field := range []string{"container", "mcp_servers", "top_k"} {
 		if present(obj[field]) {
 			return apierr.InvalidRequest("deepseek ignores %q, so utraque cannot honor that request", field)
@@ -62,7 +63,7 @@ func validateContent(obj map[string]json.RawMessage, canonical string) error {
 		}
 	}
 	if raw := obj["system"]; len(raw) > 0 {
-		rewritten, changed, err := rewriteContentValue(raw, canonical, "system")
+		rewritten, changed, err := rewriteContentValue(raw, canonical, "system", toolSchemas, false)
 		if err != nil {
 			return err
 		}
@@ -77,7 +78,7 @@ func validateContent(obj map[string]json.RawMessage, canonical string) error {
 		}
 		changed := false
 		for i, message := range messages {
-			rewritten, contentChanged, err := rewriteContentValue(message["content"], canonical, fmt.Sprintf("messages[%d].content", i))
+			rewritten, contentChanged, err := rewriteContentValue(message["content"], canonical, fmt.Sprintf("messages[%d].content", i), toolSchemas, false)
 			if err != nil {
 				return err
 			}
@@ -97,7 +98,25 @@ func validateContent(obj map[string]json.RawMessage, canonical string) error {
 	return nil
 }
 
-func rewriteContentValue(raw json.RawMessage, canonical, field string) (json.RawMessage, bool, error) {
+func declaredToolSchemas(raw json.RawMessage) map[string]struct{} {
+	var tools []map[string]json.RawMessage
+	if !present(raw) || json.Unmarshal(raw, &tools) != nil {
+		return nil
+	}
+	declared := make(map[string]struct{}, len(tools))
+	for _, tool := range tools {
+		var name string
+		var inputSchema map[string]json.RawMessage
+		if json.Unmarshal(tool["name"], &name) != nil || strings.TrimSpace(name) == "" ||
+			json.Unmarshal(tool["input_schema"], &inputSchema) != nil || inputSchema == nil {
+			continue
+		}
+		declared[name] = struct{}{}
+	}
+	return declared
+}
+
+func rewriteContentValue(raw json.RawMessage, canonical, field string, toolSchemas map[string]struct{}, inToolResult bool) (json.RawMessage, bool, error) {
 	raw = bytes.TrimSpace(raw)
 	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) || raw[0] == '"' {
 		return raw, false, nil
@@ -140,7 +159,7 @@ func rewriteContentValue(raw json.RawMessage, canonical, field string) (json.Raw
 				changed = true
 			}
 			if nested := block["content"]; len(nested) > 0 {
-				rewritten, nestedChanged, err := rewriteContentValue(nested, canonical, fmt.Sprintf("%s[%d].content", field, i))
+				rewritten, nestedChanged, err := rewriteContentValue(nested, canonical, fmt.Sprintf("%s[%d].content", field, i), toolSchemas, true)
 				if err != nil {
 					return nil, false, err
 				}
@@ -149,6 +168,25 @@ func rewriteContentValue(raw json.RawMessage, canonical, field string) (json.Raw
 					changed = true
 				}
 			}
+		case "tool_reference":
+			// Anthropic expands references into top-level deferred tool definitions.
+			// DeepSeek documents ordinary tool schemas but not this content block, so
+			// retain the discovery result as text only when the callable schema is
+			// independently present in the same request.
+			if !inToolResult {
+				return nil, false, apierr.InvalidRequest("deepseek compatibility for %q content blocks is unknown", kind)
+			}
+			var toolName string
+			if err := json.Unmarshal(block["tool_name"], &toolName); err != nil || strings.TrimSpace(toolName) == "" {
+				return nil, false, apierr.InvalidRequest("deepseek %s[%d] has no valid tool_name", field, i)
+			}
+			if _, ok := toolSchemas[toolName]; !ok {
+				return nil, false, apierr.InvalidRequest("deepseek cannot preserve discovered tool %q without its top-level input_schema", toolName)
+			}
+			marker, _ := json.Marshal(fmt.Sprintf("[tool available: %q]", toolName))
+			blockType, _ := json.Marshal("text")
+			blocks[i] = map[string]json.RawMessage{"type": blockType, "text": marker}
+			changed = true
 		case "document", "search_result", "redacted_thinking", "code_execution_tool_result",
 			"mcp_tool_use", "mcp_tool_result", "container_upload":
 			return nil, false, apierr.InvalidRequest("deepseek does not support %q content blocks", kind)

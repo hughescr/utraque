@@ -104,6 +104,13 @@ non-default `service_tier`, MCP/container requests, structured `output_config`, 
 serial tool calls, and text citations. Because DeepSeek ignores
 `tool_result.is_error`, utraque removes that flag and prefixes failed tool output
 with `[tool error]` so ordinary tool failures keep their meaning across turns.
+Claude Code's client-side tool search returns discovered names as nested
+`tool_reference` blocks, which [DeepSeek's compatibility table](https://api-docs.deepseek.com/guides/anthropic_api/)
+does not document. Utraque rewrites each reference as an explicit text marker
+only when the same request still includes that tool's supported top-level
+`input_schema`; the model therefore receives both the discovery result and the
+callable definition. Missing definitions and unknown content-block types remain
+request errors rather than being forwarded.
 
 ## Install & run
 

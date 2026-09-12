@@ -1,0 +1,10 @@
+[
+  {
+    "type": "tool_result",
+    "tool_use_id": "call_00_q0GdFBXOSD1d3nfaTZ4V8104",
+    "content": [
+      { "type": "tool_reference", "tool_name": "WebSearch" },
+      { "type": "tool_reference", "tool_name": "WebFetch" }
+    ]
+  }
+]

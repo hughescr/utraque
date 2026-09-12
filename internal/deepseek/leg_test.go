@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -260,6 +261,72 @@ func TestToolResultErrorsAreMarkedAndRemainReplayable(t *testing.T) {
 	}
 }
 
+func TestToolReferencesBecomeTextWhenSchemasRemainAvailable(t *testing.T) {
+	// The fixture is the exact tool_result content recorded from Claude Code.
+	// Its transcript does not expose the surrounding request, so this test adds
+	// the tool definitions whose continued presence the rewrite requires.
+	observedContent, err := os.ReadFile("testdata/tool_search_result_content.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	gotBody := make(chan []byte, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		gotBody <- body
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"msg_1","type":"message","role":"assistant","model":"deepseek-flash","content":[{"type":"text","text":"searching"}],"stop_reason":"tool_use","usage":{"input_tokens":8,"output_tokens":1}}`)
+	}))
+	defer upstream.Close()
+
+	body := `{"model":"deepseek-flash","max_tokens":16,"tools":[` +
+		`{"name":"ToolSearch","description":"Find tools","input_schema":{"type":"object","properties":{"query":{"type":"string"}}}},` +
+		`{"name":"WebSearch","description":"Search the web","input_schema":{"type":"object","properties":{"query":{"type":"string"}}}},` +
+		`{"name":"WebFetch","description":"Fetch a URL","input_schema":{"type":"object","properties":{"url":{"type":"string"}}}}],` +
+		`"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"call_00_q0GdFBXOSD1d3nfaTZ4V8104","name":"ToolSearch","input":{"query":"select:WebSearch,WebFetch"}}]},` +
+		`{"role":"user","content":` + string(observedContent) + `}]}`
+	if _, err := callLeg(t, testLeg(t, upstream.URL), "deepseek-flash", body, false, false, nil); err != nil {
+		t.Fatalf("Messages: %v", err)
+	}
+
+	var request struct {
+		Tools []struct {
+			Name        string                     `json:"name"`
+			InputSchema map[string]json.RawMessage `json:"input_schema"`
+		} `json:"tools"`
+		Messages []struct {
+			Content json.RawMessage `json:"content"`
+		} `json:"messages"`
+	}
+	if raw := <-gotBody; json.Unmarshal(raw, &request) != nil {
+		t.Fatalf("invalid rewritten request: %s", raw)
+	}
+	if len(request.Tools) != 3 || request.Tools[1].Name != "WebSearch" || request.Tools[1].InputSchema == nil ||
+		request.Tools[2].Name != "WebFetch" || request.Tools[2].InputSchema == nil {
+		t.Fatalf("discovered tool schemas did not reach DeepSeek: %+v", request.Tools)
+	}
+
+	var outer []struct {
+		Type    string `json:"type"`
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal(request.Messages[1].Content, &outer); err != nil {
+		t.Fatal(err)
+	}
+	if len(outer) != 1 || outer[0].Type != "tool_result" || len(outer[0].Content) != 2 {
+		t.Fatalf("rewritten discovery result = %+v", outer)
+	}
+	if got := outer[0].Content[0]; got.Type != "text" || got.Text != `[tool available: "WebSearch"]` {
+		t.Errorf("first discovered tool = %+v", got)
+	}
+	if got := outer[0].Content[1]; got.Type != "text" || got.Text != `[tool available: "WebFetch"]` {
+		t.Errorf("second discovered tool = %+v", got)
+	}
+}
+
 func TestTruncatedStreamAfterMessageStartIsNeverBlessedAsComplete(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -342,6 +409,9 @@ func TestUnsupportedContentIsRejectedBeforeSpending(t *testing.T) {
 		{"document", "deepseek-flash", `[{"type":"document","source":{"type":"base64","data":"x"}}]`},
 		{"redacted thinking", "deepseek-flash", `[{"type":"redacted_thinking","data":"x"}]`},
 		{"pro image", "deepseek-v4-pro", `[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"x"}}]`},
+		{"unresolved nested tool reference", "deepseek-flash", `[{"type":"tool_result","tool_use_id":"tool_1","content":[{"type":"tool_reference","tool_name":"WebSearch"}]}]`},
+		{"top-level tool reference", "deepseek-flash", `[{"type":"tool_reference","tool_name":"WebSearch"}]`},
+		{"unknown nested tool result block", "deepseek-flash", `[{"type":"tool_result","tool_use_id":"tool_1","content":[{"type":"future_tool_result"}]}]`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
