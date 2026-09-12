@@ -166,6 +166,49 @@ func TestReportUsesCallerBearerOnlyForAnthropicAndCachesCoherently(t *testing.T)
 	}
 }
 
+func TestRateLimitedQuotaReportsRetryTimeAndActualAttempt(t *testing.T) {
+	now := time.Date(2026, 9, 11, 12, 5, 0, 0, time.UTC)
+	attempted := now.Add(-time.Minute)
+	retryAt := now.Add(4 * time.Minute)
+	h := New(Options{
+		History: historyFunc(func(context.Context, time.Time, time.Time) (usagehistory.Report, error) {
+			return sampleHistory(now), nil
+		}),
+		Anthropic: anthropicFunc(func(context.Context, string) (providerquota.Observation, error) {
+			return providerquota.Observation{}, &providerquota.Error{Provider: providerquota.ProviderAnthropic, Code: providerquota.CodeRateLimited, Retryable: true, RetryAt: &retryAt, AttemptedAt: attempted}
+		}),
+		Now: func() time.Time { return now },
+	})
+	r := httptest.NewRequest(http.MethodGet, "/v1/utraque/providers", nil)
+	r.RemoteAddr = "127.0.0.1:4000"
+	r.Header.Set("Authorization", "Bearer token")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	p := providerNamed(decodeReport(t, w), "anthropic")
+	if p == nil || !p.LastAttempt.Equal(attempted) || len(p.Errors) == 0 {
+		t.Fatalf("provider=%+v", p)
+	}
+	err := p.Errors[0]
+	if err.Section != "quota_after" || err.Code != "rate_limited" || !err.Retryable || err.RetryAt == nil || !err.RetryAt.Equal(retryAt) {
+		t.Fatalf("report error=%+v", err)
+	}
+	if p.Calibration == nil || p.Calibration.UnavailableReason != "paired_quota_measurement_unavailable" {
+		t.Fatalf("calibration=%+v", p.Calibration)
+	}
+}
+
+func decodeReport(t *testing.T, w *httptest.ResponseRecorder) Report {
+	t.Helper()
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var report Report
+	if err := json.Unmarshal(w.Body.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	return report
+}
+
 func TestConcurrentRequestsCoalesceAndFailedRefreshRetainsSeparateSnapshot(t *testing.T) {
 	now := time.Date(2026, 9, 11, 12, 0, 0, 0, time.UTC)
 	failing := false
@@ -203,10 +246,10 @@ func TestConcurrentRequestsCoalesceAndFailedRefreshRetainsSeparateSnapshot(t *te
 		t.Fatalf("coalesced history calls=%d", calls.Load())
 	}
 	first := request()
-	var originalEnd time.Time
+	var originalCollected time.Time
 	for _, p := range first.Providers {
-		if p.Provider == "deepseek" && p.Paired != nil {
-			originalEnd = p.Paired.EndedAt
+		if p.Provider == "deepseek" && p.QuotaAfter != nil {
+			originalCollected = p.QuotaAfter.CollectedAt
 		}
 	}
 	now = now.Add(2 * time.Second)
@@ -221,8 +264,8 @@ func TestConcurrentRequestsCoalesceAndFailedRefreshRetainsSeparateSnapshot(t *te
 			if !p.LastComplete.Freshness.Stale {
 				t.Fatal("deepseek previous snapshot not stale")
 			}
-			if p.LastComplete.Paired == nil || !p.LastComplete.Paired.EndedAt.Equal(originalEnd) {
-				t.Fatal("original pair timestamp changed")
+			if p.LastComplete.QuotaAfter == nil || !p.LastComplete.QuotaAfter.CollectedAt.Equal(originalCollected) {
+				t.Fatal("original observation timestamp changed")
 			}
 			age1 = p.LastComplete.Freshness.AgeSeconds
 		}
@@ -237,8 +280,8 @@ func TestConcurrentRequestsCoalesceAndFailedRefreshRetainsSeparateSnapshot(t *te
 			if p.LastComplete == nil || p.LastComplete.Freshness.AgeSeconds <= age1 {
 				t.Fatalf("age did not increase: before=%v after=%+v", age1, p.LastComplete)
 			}
-			if !p.LastComplete.Paired.EndedAt.Equal(originalEnd) {
-				t.Fatal("repeated failure changed original pair")
+			if p.LastComplete.QuotaAfter == nil || !p.LastComplete.QuotaAfter.CollectedAt.Equal(originalCollected) {
+				t.Fatal("repeated failure changed original observation")
 			}
 			return
 		}
@@ -368,7 +411,7 @@ func TestMalformedFinalCodexScopeCannotRestorePreviousSnapshot(t *testing.T) {
 				return out
 			}
 			first := request()
-			if p := providerNamed(first, "codex"); p == nil || p.Paired == nil || p.Status != "ok" {
+			if p := providerNamed(first, "codex"); p == nil || p.QuotaAfter == nil || p.Paired != nil || p.Status != "ok" {
 				t.Fatalf("initial snapshot=%+v", p)
 			}
 			now = now.Add(2 * time.Second)

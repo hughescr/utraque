@@ -20,8 +20,9 @@ type DeepSeekOptions struct {
 }
 
 type DeepSeekClient struct {
-	http   httpSettings
-	apiKey string
+	http       httpSettings
+	apiKey     string
+	cacheScope string
 }
 
 // DeepSeekCacheScope derives the same non-secret discriminator returned by
@@ -46,7 +47,11 @@ func NewDeepSeekClient(opts DeepSeekOptions) (*DeepSeekClient, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &DeepSeekClient{http: h, apiKey: opts.APIKey}, nil
+	cacheScope, err := DeepSeekCacheScope(opts.APIKey)
+	if err != nil {
+		return nil, err
+	}
+	return &DeepSeekClient{http: h, apiKey: opts.APIKey, cacheScope: cacheScope}, nil
 }
 
 type deepSeekBalance struct {
@@ -66,7 +71,7 @@ func (c *DeepSeekClient) Read(ctx context.Context) (Observation, error) {
 		return Observation{}, quotaError(ProviderDeepSeek, CodeConfiguration, false)
 	}
 	var payload deepSeekResponse
-	if err := c.http.getJSON(ctx, ProviderDeepSeek, map[string]string{
+	if err := c.http.getJSON(ctx, ProviderDeepSeek, c.cacheScope, map[string]string{
 		"Accept":        "application/json",
 		"Authorization": "Bearer " + c.apiKey,
 	}, &payload); err != nil {

@@ -178,7 +178,7 @@ func markCodexUnavailable(r *Report, code, message string) {
 		p.QuotaBefore, p.QuotaAfter, p.Paired = nil, nil, nil
 		p.LastComplete = nil
 		p.discardPrevious = true
-		p.Errors = append(p.Errors, ReportError{Section: "paired_measurement", Code: code, Retryable: true, Message: message})
+		p.Errors = append(p.Errors, ReportError{Section: "quota_after", Code: code, Retryable: true, Message: message})
 		if p.History != nil {
 			p.Status = "partial"
 		} else {

@@ -110,7 +110,7 @@ func (c *AnthropicClient) Read(ctx context.Context, oauthToken string) (Observat
 		return Observation{}, quotaError(ProviderAnthropic, CodeCredential, false)
 	}
 	var payload anthropicResponse
-	err = c.http.getJSON(ctx, ProviderAnthropic, map[string]string{
+	err = c.http.getJSON(ctx, ProviderAnthropic, cacheScope, map[string]string{
 		"Accept":         "application/json",
 		"Authorization":  "Bearer " + oauthToken,
 		"anthropic-beta": "oauth-2025-04-20",

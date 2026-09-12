@@ -132,6 +132,11 @@ type Error struct {
 	Provider  Provider
 	Code      ErrorCode
 	Retryable bool
+	// RetryAt is populated for rate-limit responses and locally enforced
+	// cooldowns. AttemptedAt records the most recent real upstream attempt, so a
+	// suppressed read does not look like fresh network activity.
+	RetryAt     *time.Time
+	AttemptedAt time.Time
 }
 
 func (e *Error) Error() string {
@@ -143,6 +148,11 @@ func (e *Error) Error() string {
 
 func quotaError(provider Provider, code ErrorCode, retryable bool) error {
 	return &Error{Provider: provider, Code: code, Retryable: retryable}
+}
+
+func rateLimitError(provider Provider, retryAt, attemptedAt time.Time) error {
+	retry := retryAt.UTC()
+	return &Error{Provider: provider, Code: CodeRateLimited, Retryable: true, RetryAt: &retry, AttemptedAt: attemptedAt.UTC()}
 }
 
 func scopeHash(provider Provider, secret string) string {

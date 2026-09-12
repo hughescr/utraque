@@ -85,7 +85,7 @@ func TestProductionReportCompositionUsesAllInjectedSources(t *testing.T) {
 	if w.Code != 200 {
 		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 	}
-	if historyCalls.Load() != 1 || anthropicCalls.Load() != 2 || deepSeekCalls.Load() != 2 || codexCalls.Load() != 2 {
+	if historyCalls.Load() != 1 || anthropicCalls.Load() != 1 || deepSeekCalls.Load() != 1 || codexCalls.Load() != 1 {
 		t.Fatalf("calls history=%d anthropic=%d deepseek=%d codex=%d", historyCalls.Load(), anthropicCalls.Load(), deepSeekCalls.Load(), codexCalls.Load())
 	}
 	if w.Header().Get("Cache-Control") != "no-store" {

@@ -30,9 +30,8 @@ func (h *Handler) collect(ctx context.Context, creds credentials, since, until t
 	ctx, cancel := context.WithTimeout(ctx, h.timeout)
 	defer cancel()
 
-	before := h.readQuotas(ctx, creds)
 	history, historyErr := h.history.Collect(ctx, since, until)
-	after := h.readQuotas(ctx, creds)
+	quotas := h.readQuotas(ctx, creds)
 	ended := h.now().UTC()
 
 	r := Report{SchemaVersion: SchemaVersion, GeneratedAt: ended,
@@ -43,7 +42,7 @@ func (h *Handler) collect(ctx context.Context, creds credentials, since, until t
 		kind usagehistory.Provider
 	}{{"anthropic", usagehistory.ProviderAnthropic}, {"codex", usagehistory.ProviderCodex}, {"deepseek", usagehistory.ProviderDeepSeek}}
 	for _, p := range providers {
-		pr := h.buildProvider(p.name, p.kind, started, ended, before[p.name], after[p.name], history, historyErr, since, until)
+		pr := h.buildProvider(p.name, p.kind, ended, quotas[p.name], history, historyErr, since, until)
 		r.Providers = append(r.Providers, pr)
 	}
 	r.UnattributedHistory = aggregateModels(history.Daily, usagehistory.ProviderUnknown, since, until)
@@ -84,27 +83,18 @@ func (h *Handler) readQuotas(ctx context.Context, creds credentials) map[string]
 	return out
 }
 
-func (h *Handler) buildProvider(name string, kind usagehistory.Provider, started, ended time.Time, before, after quotaResult, history usagehistory.Report, historyErr error, since, until time.Time) ProviderReport {
+func (h *Handler) buildProvider(name string, kind usagehistory.Provider, ended time.Time, quota quotaResult, history usagehistory.Report, historyErr error, since, until time.Time) ProviderReport {
 	pr := ProviderReport{Provider: name, LastAttempt: ended, Errors: []ReportError{}}
-	if before.err == nil {
-		o := before.obs
-		pr.QuotaBefore = &o
+	var quotaErr *providerquota.Error
+	if errors.As(quota.err, &quotaErr) && !quotaErr.AttemptedAt.IsZero() {
+		pr.LastAttempt = quotaErr.AttemptedAt
 	}
-	if after.err == nil {
-		o := after.obs
+	if quota.err == nil {
+		o := quota.obs
 		pr.QuotaAfter = &o
 	}
-	if before.err != nil {
-		pr.Errors = append(pr.Errors, safeError("quota_before", before.err))
-	}
-	if after.err != nil {
-		pr.Errors = append(pr.Errors, safeError("quota_after", after.err))
-	}
-	if before.err == nil && after.err == nil && before.obs.CacheScope() == after.obs.CacheScope() {
-		pr.Paired = &PairedMeasurement{StartedAt: started, EndedAt: ended, Before: before.obs, After: after.obs}
-	} else if before.err == nil && after.err == nil {
-		pr.Errors = append(pr.Errors, ReportError{Section: "paired_measurement", Code: "account_scope_changed", Retryable: true, Message: "provider account scope changed during collection"})
-		pr.QuotaBefore, pr.QuotaAfter = nil, nil
+	if quota.err != nil {
+		pr.Errors = append(pr.Errors, safeError("quota_after", quota.err))
 	}
 
 	rows30 := aggregateModels(history.Daily, kind, since, until)
@@ -137,13 +127,13 @@ func (h *Handler) buildProvider(name string, kind usagehistory.Provider, started
 		pr.LastSuccess = &t
 	}
 	if name == "anthropic" {
-		pr.Calibration = calibrateAnthropic(pr.Paired, pr.History)
+		pr.Calibration = &Calibration{UnavailableReason: "paired_quota_measurement_unavailable"}
 		if h.planLabel != "" || h.planMultiplier != nil {
 			pr.ConfiguredPlan = &ConfiguredPlan{Label: h.planLabel, Multiplier: h.planMultiplier, Source: "configured"}
 		}
 	}
 	if name == "deepseek" {
-		pr.Remaining = estimateDeepSeek(after.obs, rows30)
+		pr.Remaining = estimateDeepSeek(quota.obs, rows30)
 	}
 	return pr
 }
@@ -151,7 +141,7 @@ func (h *Handler) buildProvider(name string, kind usagehistory.Provider, started
 func safeError(section string, err error) ReportError {
 	var pe *providerquota.Error
 	if errors.As(err, &pe) {
-		return ReportError{Section: section, Code: string(pe.Code), Retryable: pe.Retryable, Message: "provider reading unavailable"}
+		return ReportError{Section: section, Code: string(pe.Code), Retryable: pe.Retryable, RetryAt: pe.RetryAt, Message: "provider reading unavailable"}
 	}
 	var ce *usagehistory.CollectError
 	if errors.As(err, &ce) {

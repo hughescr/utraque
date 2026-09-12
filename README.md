@@ -404,7 +404,7 @@ override is changed or removed.
 | `UTRAQUE_CCUSAGE_RUNNER` | `bunx` | Package runner used when no native executable is set. |
 | `UTRAQUE_CCUSAGE_VERSION` | `latest` | `ccusage` package version requested through the runner. The resolved version is recorded in each report. |
 | `UTRAQUE_CODEX_EXECUTABLE` | `codex` | Codex executable queried once at startup for the model-catalog client version, then used for the report's isolated, short-lived app-server query. It uses the same credential source as inference. Under launchd, configure an absolute path because its `PATH` is intentionally narrow. |
-| `UTRAQUE_PROVIDER_CACHE_TTL` | `30s` | Lifetime of one coherent quota-before, local-history, quota-after snapshot. |
+| `UTRAQUE_PROVIDER_CACHE_TTL` | `30s` | Lifetime of one coherent local-history and live-quota snapshot. |
 | `UTRAQUE_PROVIDER_TIMEOUT` | `90s` | Overall deadline for an on-demand report collection. |
 | `UTRAQUE_CLAUDE_PLAN` | *(none)* | Optional operator-supplied Claude plan label. It is reported as configured metadata, not provider-confirmed data. |
 | `UTRAQUE_CLAUDE_PLAN_MULTIPLIER` | *(none)* | Optional positive operator-supplied plan multiplier. There is deliberately no assumed default. |
@@ -667,11 +667,10 @@ curl -sS \
 Add `-H 'X-Utraque-Token: <local-token>'` when `UTRAQUE_LOCAL_TOKEN` is
 configured.
 
-Every response is `Cache-Control: no-store`. Collection is paired: utraque
-reads live quota, collects 30 inclusive UTC dates of local `ccusage` history,
-then reads live quota again. Cached responses retain those original timestamps,
-identify cached and stale sources explicitly, and never combine a newer quota
-percentage with older token history. Providers fail independently, so a
+Every response is `Cache-Control: no-store`. Utraque collects 30 inclusive UTC
+dates of local `ccusage` history, then reads each provider's live quota once.
+Cached responses retain those original timestamps and identify cached and stale
+sources explicitly. Providers fail independently, so a
 DeepSeek balance can still be returned when local history fails, and local
 history can still be returned when a live provider reading fails. A previous
 complete snapshot may accompany a partial attempt as a separate stale object.
@@ -723,12 +722,15 @@ when any included usage is unpriced.
 Remaining-token figures are conditional estimates. A DeepSeek USD balance can
 be divided by a fully priced historical workload rate, with future price and
 workload assumptions stated in the result. Other currencies remain null. The
-Claude five-hour estimate is emitted only when an all-Anthropic five-hour log
-block exactly matches the unscoped provider window and both readings bracket
-the collection without a reset or material percentage change. A mixed-provider
-block, zero percentage, expired window, scoped quota, or stale cache produces a
-reason instead of a number. Mixed Claude models produce one observed-workload
-estimate; a model label appears only for a single-model block.
+routine report does not emit a Claude five-hour estimate because doing so would
+require a second live quota request to bracket local-history collection. Its
+calibration field instead reports `paired_quota_measurement_unavailable`; the
+schema retains the older paired-measurement fields for compatibility.
+
+When a provider quota endpoint returns `429`, utraque honors its `Retry-After`
+time for that provider account. During that cooldown, reports return the safe
+`rate_limited` classification and retry time without contacting the endpoint
+again. Missing or unusable retry guidance uses a bounded increasing backoff.
 
 `/healthz` remains network-free and contains none of this financial or usage
 detail. Report failures do not affect inference routes.

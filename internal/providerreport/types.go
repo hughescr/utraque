@@ -82,10 +82,11 @@ type Freshness struct {
 }
 
 type ReportError struct {
-	Section   string `json:"section"`
-	Code      string `json:"code"`
-	Retryable bool   `json:"retryable"`
-	Message   string `json:"message"`
+	Section   string     `json:"section"`
+	Code      string     `json:"code"`
+	Retryable bool       `json:"retryable"`
+	RetryAt   *time.Time `json:"retry_at,omitempty"`
+	Message   string     `json:"message"`
 }
 
 type PairedMeasurement struct {
