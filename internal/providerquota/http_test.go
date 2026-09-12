@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -233,6 +234,88 @@ func TestWaitingCallerCanCancelWithoutCancelingFlight(t *testing.T) {
 	close(release)
 	if err := <-leaderDone; err != nil {
 		t.Fatalf("leader was canceled with waiter: %v", err)
+	}
+}
+
+func TestLeaderCancellationIsSharedAndLaterCallRetries(t *testing.T) {
+	clock := &testClock{now: time.Date(2026, 9, 11, 12, 0, 0, 0, time.UTC)}
+	started := make(chan struct{})
+	var calls atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 {
+			close(started)
+			<-r.Context().Done()
+			return
+		}
+		_, _ = w.Write([]byte(`{"limits":[]}`))
+	}))
+	defer server.Close()
+	client, _ := NewAnthropicClient(AnthropicOptions{URL: server.URL, Now: clock.Now})
+	ctx, cancel := context.WithCancel(context.Background())
+	leaderDone := make(chan error, 1)
+	go func() {
+		_, err := client.Read(ctx, "same-token")
+		leaderDone <- err
+	}()
+	<-started
+	followerDone := make(chan error, 1)
+	go func() {
+		_, err := client.Read(context.Background(), "same-token")
+		followerDone <- err
+	}()
+	scope, _ := AnthropicCacheScope("same-token")
+	waitForFlightWaiter(t, client.http.state, scope)
+	cancel()
+	for name, done := range map[string]<-chan error{"leader": leaderDone, "follower": followerDone} {
+		var quotaErr *Error
+		if err := <-done; !errors.As(err, &quotaErr) || quotaErr.Code != CodeUnavailable {
+			t.Fatalf("%s error=%v, want shared unavailable", name, err)
+		}
+	}
+	if _, err := client.Read(context.Background(), "same-token"); err != nil {
+		t.Fatalf("later retry: %v", err)
+	}
+	if calls.Load() != 2 {
+		t.Fatalf("upstream calls=%d, want canceled attempt plus retry", calls.Load())
+	}
+}
+
+func waitForFlightWaiter(t *testing.T, state *httpState, scope string) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		state.mu.Lock()
+		entry := state.entries[scope]
+		waiting := entry != nil && entry.flight != nil && entry.flight.waiters > 0
+		state.mu.Unlock()
+		if waiting {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("follower did not join the in-flight request")
+}
+
+func TestCooldownCapacityNeverEvictsActiveEntry(t *testing.T) {
+	now := time.Date(2026, 9, 11, 12, 0, 0, 0, time.UTC)
+	state := &httpState{entries: make(map[string]*httpStateEntry)}
+	for i := range maxHTTPStateEntries {
+		scope := "active-" + strconv.Itoa(i)
+		state.entries[scope] = &httpStateEntry{retryAt: now.Add(time.Hour), lastAttempt: now, touchedAt: now}
+	}
+	settings := httpSettings{now: func() time.Time { return now }, state: state}
+	_, _, err := settings.acquire(context.Background(), ProviderAnthropic, "new-scope")
+	var quotaErr *Error
+	if !errors.As(err, &quotaErr) || quotaErr.Code != CodeUnavailable {
+		t.Fatalf("capacity error=%v, want unavailable", err)
+	}
+	if len(state.entries) != maxHTTPStateEntries {
+		t.Fatalf("state entries=%d want %d", len(state.entries), maxHTTPStateEntries)
+	}
+	for i := range maxHTTPStateEntries {
+		if state.entries["active-"+strconv.Itoa(i)] == nil {
+			t.Fatalf("active cooldown %d was evicted", i)
+		}
 	}
 }
 

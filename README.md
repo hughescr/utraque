@@ -668,8 +668,10 @@ Add `-H 'X-Utraque-Token: <local-token>'` when `UTRAQUE_LOCAL_TOKEN` is
 configured.
 
 Every response is `Cache-Control: no-store`. Utraque collects 30 inclusive UTC
-dates of local `ccusage` history, then reads each provider's live quota once.
-Cached responses retain those original timestamps and identify cached and stale
+dates of local `ccusage` history while reading each provider's live quota once.
+The schema-v1 field remains named `quota_after` for compatibility; the one live
+reading does not imply that it was taken after local-history collection. Cached
+responses retain each source's original timestamp and identify cached and stale
 sources explicitly. Providers fail independently, so a
 DeepSeek balance can still be returned when local history fails, and local
 history can still be returned when a live provider reading fails. A previous

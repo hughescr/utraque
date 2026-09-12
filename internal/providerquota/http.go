@@ -23,9 +23,10 @@ const (
 )
 
 type httpFlight struct {
-	done chan struct{}
-	body []byte
-	err  error
+	done    chan struct{}
+	body    []byte
+	err     error
+	waiters int
 }
 
 type httpStateEntry struct {
@@ -167,11 +168,17 @@ func (s httpSettings) acquire(ctx context.Context, provider Provider, scope stri
 		}
 		if entry != nil && entry.flight != nil {
 			flight := entry.flight
+			flight.waiters++
 			s.state.mu.Unlock()
+			// The leader owns the upstream request context. If it is canceled,
+			// current followers share that classified failure; the entry is then
+			// removed so a later call can retry immediately.
 			select {
 			case <-flight.done:
+				s.waiterDone(flight)
 				return flight, false, nil
 			case <-ctx.Done():
+				s.waiterDone(flight)
 				if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 					return nil, false, quotaError(provider, CodeTimeout, true)
 				}
@@ -192,6 +199,12 @@ func (s httpSettings) acquire(ctx context.Context, provider Provider, scope stri
 		s.state.mu.Unlock()
 		return flight, true, nil
 	}
+}
+
+func (s httpSettings) waiterDone(flight *httpFlight) {
+	s.state.mu.Lock()
+	flight.waiters--
+	s.state.mu.Unlock()
 }
 
 func (s httpSettings) makeRoomLocked(now time.Time) bool {

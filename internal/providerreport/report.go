@@ -30,8 +30,18 @@ func (h *Handler) collect(ctx context.Context, creds credentials, since, until t
 	ctx, cancel := context.WithTimeout(ctx, h.timeout)
 	defer cancel()
 
-	history, historyErr := h.history.Collect(ctx, since, until)
+	type historyResult struct {
+		report usagehistory.Report
+		err    error
+	}
+	historyDone := make(chan historyResult, 1)
+	go func() {
+		report, err := h.history.Collect(ctx, since, until)
+		historyDone <- historyResult{report: report, err: err}
+	}()
 	quotas := h.readQuotas(ctx, creds)
+	historyResultValue := <-historyDone
+	history, historyErr := historyResultValue.report, historyResultValue.err
 	ended := h.now().UTC()
 
 	r := Report{SchemaVersion: SchemaVersion, GeneratedAt: ended,

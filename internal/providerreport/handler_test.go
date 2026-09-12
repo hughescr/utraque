@@ -197,6 +197,40 @@ func TestRateLimitedQuotaReportsRetryTimeAndActualAttempt(t *testing.T) {
 	}
 }
 
+func TestSlowHistoryDoesNotDelayHealthyQuotaRead(t *testing.T) {
+	now := time.Date(2026, 9, 11, 12, 5, 0, 0, time.UTC)
+	historyStarted := make(chan struct{})
+	releaseHistory := make(chan struct{})
+	quotaRead := make(chan struct{})
+	h := New(Options{
+		History: historyFunc(func(context.Context, time.Time, time.Time) (usagehistory.Report, error) {
+			close(historyStarted)
+			<-releaseHistory
+			return sampleHistory(now), nil
+		}),
+		Anthropic: anthropicFunc(func(context.Context, string) (providerquota.Observation, error) {
+			close(quotaRead)
+			return providerquota.Observation{Source: providerquota.ProviderAnthropic, CollectedAt: now}, nil
+		}),
+		Now: func() time.Time { return now },
+	})
+	reportDone := make(chan Report, 1)
+	go func() {
+		reportDone <- h.collect(context.Background(), credentials{anthropicToken: "token"}, utcDate(now).AddDate(0, 0, -29), utcDate(now))
+	}()
+	<-historyStarted
+	select {
+	case <-quotaRead:
+	case <-time.After(time.Second):
+		t.Fatal("quota read waited for local history")
+	}
+	close(releaseHistory)
+	p := providerNamed(<-reportDone, "anthropic")
+	if p == nil || p.QuotaAfter == nil || p.QuotaBefore != nil || p.Paired != nil {
+		t.Fatalf("provider=%+v", p)
+	}
+}
+
 func decodeReport(t *testing.T, w *httptest.ResponseRecorder) Report {
 	t.Helper()
 	if w.Code != http.StatusOK {
