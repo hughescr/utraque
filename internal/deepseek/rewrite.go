@@ -32,6 +32,7 @@ func rewriteRequest(raw []byte, canonical string) ([]byte, error) {
 
 func validateContent(obj map[string]json.RawMessage, canonical string) error {
 	toolSchemas := declaredToolSchemas(obj["tools"])
+	referencedTools := make(map[string]struct{})
 	for _, field := range []string{"container", "mcp_servers", "top_k"} {
 		if present(obj[field]) {
 			return apierr.InvalidRequest("deepseek ignores %q, so utraque cannot honor that request", field)
@@ -63,7 +64,7 @@ func validateContent(obj map[string]json.RawMessage, canonical string) error {
 		}
 	}
 	if raw := obj["system"]; len(raw) > 0 {
-		rewritten, changed, err := rewriteContentValue(raw, canonical, "system", toolSchemas, false)
+		rewritten, changed, err := rewriteContentValue(raw, canonical, "system", toolSchemas, referencedTools, false)
 		if err != nil {
 			return err
 		}
@@ -78,7 +79,7 @@ func validateContent(obj map[string]json.RawMessage, canonical string) error {
 		}
 		changed := false
 		for i, message := range messages {
-			rewritten, contentChanged, err := rewriteContentValue(message["content"], canonical, fmt.Sprintf("messages[%d].content", i), toolSchemas, false)
+			rewritten, contentChanged, err := rewriteContentValue(message["content"], canonical, fmt.Sprintf("messages[%d].content", i), toolSchemas, referencedTools, false)
 			if err != nil {
 				return err
 			}
@@ -93,6 +94,15 @@ func validateContent(obj map[string]json.RawMessage, canonical string) error {
 				return apierr.Wrap(err, apierr.TypeInvalidRequest, "encode deepseek messages")
 			}
 			obj["messages"] = encoded
+		}
+	}
+	if len(referencedTools) > 0 {
+		rewritten, changed, err := enableReferencedTools(obj["tools"], referencedTools)
+		if err != nil {
+			return err
+		}
+		if changed {
+			obj["tools"] = rewritten
 		}
 	}
 	return nil
@@ -116,7 +126,36 @@ func declaredToolSchemas(raw json.RawMessage) map[string]struct{} {
 	return declared
 }
 
-func rewriteContentValue(raw json.RawMessage, canonical, field string, toolSchemas map[string]struct{}, inToolResult bool) (json.RawMessage, bool, error) {
+func enableReferencedTools(raw json.RawMessage, referenced map[string]struct{}) (json.RawMessage, bool, error) {
+	var tools []map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &tools); err != nil {
+		return nil, false, apierr.InvalidRequest("deepseek tools must be an array")
+	}
+	changed := false
+	for _, tool := range tools {
+		var name string
+		if json.Unmarshal(tool["name"], &name) != nil {
+			continue
+		}
+		if _, ok := referenced[name]; !ok {
+			continue
+		}
+		if _, ok := tool["defer_loading"]; ok {
+			delete(tool, "defer_loading")
+			changed = true
+		}
+	}
+	if !changed {
+		return raw, false, nil
+	}
+	encoded, err := json.Marshal(tools)
+	if err != nil {
+		return nil, false, apierr.Wrap(err, apierr.TypeInvalidRequest, "encode deepseek tools")
+	}
+	return encoded, true, nil
+}
+
+func rewriteContentValue(raw json.RawMessage, canonical, field string, toolSchemas, referencedTools map[string]struct{}, inToolResult bool) (json.RawMessage, bool, error) {
 	raw = bytes.TrimSpace(raw)
 	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) || raw[0] == '"' {
 		return raw, false, nil
@@ -159,7 +198,7 @@ func rewriteContentValue(raw json.RawMessage, canonical, field string, toolSchem
 				changed = true
 			}
 			if nested := block["content"]; len(nested) > 0 {
-				rewritten, nestedChanged, err := rewriteContentValue(nested, canonical, fmt.Sprintf("%s[%d].content", field, i), toolSchemas, true)
+				rewritten, nestedChanged, err := rewriteContentValue(nested, canonical, fmt.Sprintf("%s[%d].content", field, i), toolSchemas, referencedTools, true)
 				if err != nil {
 					return nil, false, err
 				}
@@ -169,10 +208,10 @@ func rewriteContentValue(raw json.RawMessage, canonical, field string, toolSchem
 				}
 			}
 		case "tool_reference":
-			// Anthropic expands references into top-level deferred tool definitions.
-			// DeepSeek documents ordinary tool schemas but not this content block, so
-			// retain the discovery result as text only when the callable schema is
-			// independently present in the same request.
+			// Anthropic uses this block to load a client-supplied deferred schema into
+			// the model context. DeepSeek documents ordinary tool schemas but neither
+			// this block nor deferral, so retain the result as text and make the
+			// independently supplied schema non-deferred.
 			if !inToolResult {
 				return nil, false, apierr.InvalidRequest("deepseek compatibility for %q content blocks is unknown", kind)
 			}
@@ -183,6 +222,7 @@ func rewriteContentValue(raw json.RawMessage, canonical, field string, toolSchem
 			if _, ok := toolSchemas[toolName]; !ok {
 				return nil, false, apierr.InvalidRequest("deepseek cannot preserve discovered tool %q without its top-level input_schema", toolName)
 			}
+			referencedTools[toolName] = struct{}{}
 			marker, _ := json.Marshal(fmt.Sprintf("[tool available: %q]", toolName))
 			blockType, _ := json.Marshal("text")
 			blocks[i] = map[string]json.RawMessage{"type": blockType, "text": marker}

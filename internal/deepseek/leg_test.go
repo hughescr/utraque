@@ -270,60 +270,74 @@ func TestToolReferencesBecomeTextWhenSchemasRemainAvailable(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	gotBody := make(chan []byte, 1)
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
-		gotBody <- body
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"id":"msg_1","type":"message","role":"assistant","model":"deepseek-flash","content":[{"type":"text","text":"searching"}],"stop_reason":"tool_use","usage":{"input_tokens":8,"output_tokens":1}}`)
-	}))
-	defer upstream.Close()
+	for _, model := range []string{"deepseek-flash", "deepseek-v4-pro"} {
+		t.Run(model, func(t *testing.T) {
+			gotBody := make(chan []byte, 1)
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				body, _ := io.ReadAll(r.Body)
+				gotBody <- body
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"id":"msg_1","type":"message","role":"assistant","model":"`+model+`","content":[{"type":"text","text":"searching"}],"stop_reason":"tool_use","usage":{"input_tokens":8,"output_tokens":1}}`)
+			}))
+			defer upstream.Close()
 
-	body := `{"model":"deepseek-flash","max_tokens":16,"tools":[` +
-		`{"name":"ToolSearch","description":"Find tools","input_schema":{"type":"object","properties":{"query":{"type":"string"}}}},` +
-		`{"name":"WebSearch","description":"Search the web","input_schema":{"type":"object","properties":{"query":{"type":"string"}}}},` +
-		`{"name":"WebFetch","description":"Fetch a URL","input_schema":{"type":"object","properties":{"url":{"type":"string"}}}}],` +
-		`"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"call_00_q0GdFBXOSD1d3nfaTZ4V8104","name":"ToolSearch","input":{"query":"select:WebSearch,WebFetch"}}]},` +
-		`{"role":"user","content":` + string(observedContent) + `}]}`
-	if _, err := callLeg(t, testLeg(t, upstream.URL), "deepseek-flash", body, false, false, nil); err != nil {
-		t.Fatalf("Messages: %v", err)
-	}
+			body := `{"model":"` + model + `","max_tokens":16,"tools":[` +
+				`{"name":"ToolSearch","description":"Find tools","input_schema":{"type":"object","properties":{"query":{"type":"string"}}}},` +
+				`{"name":"WebSearch","description":"Search the web","defer_loading":true,"input_schema":{"type":"object","properties":{"query":{"type":"string"}}}},` +
+				`{"name":"WebFetch","description":"Fetch a URL","defer_loading":true,"input_schema":{"type":"object","properties":{"url":{"type":"string"}}}}],` +
+				`"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"call_00_q0GdFBXOSD1d3nfaTZ4V8104","name":"ToolSearch","input":{"query":"select:WebSearch,WebFetch"}}]},` +
+				`{"role":"user","content":` + string(observedContent) + `}]}`
+			if _, err := callLeg(t, testLeg(t, upstream.URL), model, body, false, false, nil); err != nil {
+				t.Fatalf("Messages: %v", err)
+			}
 
-	var request struct {
-		Tools []struct {
-			Name        string                     `json:"name"`
-			InputSchema map[string]json.RawMessage `json:"input_schema"`
-		} `json:"tools"`
-		Messages []struct {
-			Content json.RawMessage `json:"content"`
-		} `json:"messages"`
-	}
-	if raw := <-gotBody; json.Unmarshal(raw, &request) != nil {
-		t.Fatalf("invalid rewritten request: %s", raw)
-	}
-	if len(request.Tools) != 3 || request.Tools[1].Name != "WebSearch" || request.Tools[1].InputSchema == nil ||
-		request.Tools[2].Name != "WebFetch" || request.Tools[2].InputSchema == nil {
-		t.Fatalf("discovered tool schemas did not reach DeepSeek: %+v", request.Tools)
-	}
+			var request struct {
+				Tools []struct {
+					Name         string          `json:"name"`
+					DeferLoading json.RawMessage `json:"defer_loading"`
+					InputSchema  struct {
+						Type       string `json:"type"`
+						Properties map[string]struct {
+							Type string `json:"type"`
+						} `json:"properties"`
+					} `json:"input_schema"`
+				} `json:"tools"`
+				Messages []struct {
+					Content json.RawMessage `json:"content"`
+				} `json:"messages"`
+			}
+			if raw := <-gotBody; json.Unmarshal(raw, &request) != nil {
+				t.Fatalf("invalid rewritten request: %s", raw)
+			}
+			if len(request.Tools) != 3 || request.Tools[1].Name != "WebSearch" || request.Tools[1].InputSchema.Type != "object" ||
+				request.Tools[1].InputSchema.Properties["query"].Type != "string" || request.Tools[2].Name != "WebFetch" ||
+				request.Tools[2].InputSchema.Type != "object" || request.Tools[2].InputSchema.Properties["url"].Type != "string" {
+				t.Fatalf("discovered tool schemas did not reach DeepSeek intact: %+v", request.Tools)
+			}
+			if len(request.Tools[1].DeferLoading) != 0 || len(request.Tools[2].DeferLoading) != 0 {
+				t.Fatalf("referenced tool remained deferred: %+v", request.Tools)
+			}
 
-	var outer []struct {
-		Type    string `json:"type"`
-		Content []struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
-		} `json:"content"`
-	}
-	if err := json.Unmarshal(request.Messages[1].Content, &outer); err != nil {
-		t.Fatal(err)
-	}
-	if len(outer) != 1 || outer[0].Type != "tool_result" || len(outer[0].Content) != 2 {
-		t.Fatalf("rewritten discovery result = %+v", outer)
-	}
-	if got := outer[0].Content[0]; got.Type != "text" || got.Text != `[tool available: "WebSearch"]` {
-		t.Errorf("first discovered tool = %+v", got)
-	}
-	if got := outer[0].Content[1]; got.Type != "text" || got.Text != `[tool available: "WebFetch"]` {
-		t.Errorf("second discovered tool = %+v", got)
+			var outer []struct {
+				Type    string `json:"type"`
+				Content []struct {
+					Type string `json:"type"`
+					Text string `json:"text"`
+				} `json:"content"`
+			}
+			if err := json.Unmarshal(request.Messages[1].Content, &outer); err != nil {
+				t.Fatal(err)
+			}
+			if len(outer) != 1 || outer[0].Type != "tool_result" || len(outer[0].Content) != 2 {
+				t.Fatalf("rewritten discovery result = %+v", outer)
+			}
+			if got := outer[0].Content[0]; got.Type != "text" || got.Text != `[tool available: "WebSearch"]` {
+				t.Errorf("first discovered tool = %+v", got)
+			}
+			if got := outer[0].Content[1]; got.Type != "text" || got.Text != `[tool available: "WebFetch"]` {
+				t.Errorf("second discovered tool = %+v", got)
+			}
+		})
 	}
 }
 
