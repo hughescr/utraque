@@ -31,6 +31,9 @@ type Options struct {
 	DeepSeekAPIKey       string
 	Codex                CodexReader
 	CodexSource          auth.CredentialSource
+	ReferencePrices      ReferencePriceReader
+	EligiblePriceModels  func(provider string) []string
+	NormalizePriceModel  func(provider, model string) string
 	CacheTTL             time.Duration
 	Timeout              time.Duration
 	ClaudePlan           string
@@ -50,6 +53,9 @@ type Handler struct {
 	deepseekKey    string
 	codex          CodexReader
 	codexSource    auth.CredentialSource
+	prices         ReferencePriceReader
+	eligiblePrices func(provider string) []string
+	normalizePrice func(provider, model string) string
 	ttl, timeout   time.Duration
 	planLabel      string
 	planMultiplier *float64
@@ -72,7 +78,9 @@ func New(opts Options) *Handler {
 	}
 	return &Handler{history: opts.History,
 		anthropic: opts.Anthropic, deepseek: opts.DeepSeek, deepseekKey: opts.DeepSeekAPIKey,
-		codex: opts.Codex, codexSource: opts.CodexSource, ttl: opts.CacheTTL, timeout: opts.Timeout,
+		codex: opts.Codex, codexSource: opts.CodexSource, prices: opts.ReferencePrices,
+		eligiblePrices: opts.EligiblePriceModels, normalizePrice: opts.NormalizePriceModel,
+		ttl: opts.CacheTTL, timeout: opts.Timeout,
 		planLabel: opts.ClaudePlan, planMultiplier: opts.ClaudePlanMultiplier, now: opts.Now,
 		cache: make(map[string]*cacheEntry), sem: make(chan struct{}, 4)}
 }

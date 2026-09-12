@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -11,6 +12,8 @@ import (
 	"github.com/hughescr/utraque/internal/codex/auth"
 	"github.com/hughescr/utraque/internal/config"
 	"github.com/hughescr/utraque/internal/providerquota"
+	"github.com/hughescr/utraque/internal/providerreport"
+	"github.com/hughescr/utraque/internal/referenceprice"
 	"github.com/hughescr/utraque/internal/server"
 	"github.com/hughescr/utraque/internal/usagehistory"
 )
@@ -37,6 +40,10 @@ func (f reportCodexFunc) ReadCredential(c context.Context, s auth.CredentialSour
 	return f(c, s, cr)
 }
 
+type reportPricesFunc func(context.Context) (referenceprice.Snapshot, error)
+
+func (f reportPricesFunc) Read(c context.Context) (referenceprice.Snapshot, error) { return f(c) }
+
 type reportSource struct{}
 
 func (reportSource) Get(context.Context) (auth.Credential, error) {
@@ -45,7 +52,7 @@ func (reportSource) Get(context.Context) (auth.Credential, error) {
 func (reportSource) Invalidate(auth.Credential) {}
 
 func TestProductionReportCompositionUsesAllInjectedSources(t *testing.T) {
-	var historyCalls, anthropicCalls, deepSeekCalls, codexCalls atomic.Int64
+	var historyCalls, anthropicCalls, deepSeekCalls, codexCalls, priceCalls atomic.Int64
 	now := time.Date(2026, 9, 11, 12, 0, 0, 0, time.UTC)
 	deps := &reportDependencies{
 		history: reportHistoryFunc(func(context.Context, time.Time, time.Time) (usagehistory.Report, error) {
@@ -63,6 +70,11 @@ func TestProductionReportCompositionUsesAllInjectedSources(t *testing.T) {
 		codex: reportCodexFunc(func(context.Context, auth.CredentialSource, auth.Credential) (providerquota.Observation, error) {
 			codexCalls.Add(1)
 			return providerquota.Observation{Source: providerquota.ProviderCodex, CollectedAt: now}, nil
+		}),
+		prices: reportPricesFunc(func(context.Context) (referenceprice.Snapshot, error) {
+			priceCalls.Add(1)
+			return referenceprice.Snapshot{Source: referenceprice.SourceModelsDev, ObservedAt: now, Unit: referenceprice.USDPerMillion,
+				Models: []referenceprice.ModelPrice{{Provider: "codex", Model: "gpt-5.6-sol", Input: 4, Output: 20}}}, nil
 		}),
 	}
 	cfg := config.Default()
@@ -85,12 +97,64 @@ func TestProductionReportCompositionUsesAllInjectedSources(t *testing.T) {
 	if w.Code != 200 {
 		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 	}
-	if historyCalls.Load() != 1 || anthropicCalls.Load() != 1 || deepSeekCalls.Load() != 1 || codexCalls.Load() != 1 {
-		t.Fatalf("calls history=%d anthropic=%d deepseek=%d codex=%d", historyCalls.Load(), anthropicCalls.Load(), deepSeekCalls.Load(), codexCalls.Load())
+	if historyCalls.Load() != 1 || anthropicCalls.Load() != 1 || deepSeekCalls.Load() != 1 || codexCalls.Load() != 1 || priceCalls.Load() != 1 {
+		t.Fatalf("calls history=%d anthropic=%d deepseek=%d codex=%d prices=%d", historyCalls.Load(), anthropicCalls.Load(), deepSeekCalls.Load(), codexCalls.Load(), priceCalls.Load())
 	}
 	if w.Header().Get("Cache-Control") != "no-store" {
 		t.Fatal("report response is cacheable")
 	}
+	var report providerreport.Report
+	if err := json.Unmarshal(w.Body.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	if codex := reportProviderNamed(report, "codex"); codex == nil || codex.ReferencePrices == nil || len(codex.ReferencePrices.Models) != 1 || !codex.ReferencePrices.Models[0].Eligible {
+		t.Fatalf("codex reference prices=%+v", codex)
+	}
+}
+
+func TestReferencePriceCandidatesAndHistoryNormalizationFollowRoutes(t *testing.T) {
+	cfg := config.Default()
+	anthropicModels := eligibleReferencePriceModels(cfg, "anthropic")
+	if !contains(anthropicModels, "claude-haiku-4-5") || contains(anthropicModels, "claude-3-haiku") {
+		t.Fatalf("anthropic candidates=%v", anthropicModels)
+	}
+	if codexModels := eligibleReferencePriceModels(cfg, "codex"); !contains(codexModels, "gpt-5.6-sol") {
+		t.Fatalf("codex candidates=%v", codexModels)
+	}
+	if got := eligibleReferencePriceModels(cfg, "deepseek"); len(got) != 0 {
+		t.Fatalf("unconfigured DeepSeek candidates=%v", got)
+	}
+	cfg.DeepSeek.APIKey = "configured"
+	if got := eligibleReferencePriceModels(cfg, "deepseek"); len(got) != 2 || !contains(got, "deepseek-flash") || !contains(got, "deepseek-v4-pro") {
+		t.Fatalf("DeepSeek candidates=%v", got)
+	}
+	for _, tc := range []struct {
+		provider string
+		model    string
+		want     string
+	}{{"codex", "sol", "gpt-5.6-sol"}, {"deepseek", "deepseek-v4-flash", "deepseek-flash"}, {"anthropic", "CLAUDE-SONNET-5", "claude-sonnet-5"}} {
+		if got := normalizeReferencePriceModel(tc.provider, tc.model); got != tc.want {
+			t.Errorf("normalizeReferencePriceModel(%q,%q)=%q want %q", tc.provider, tc.model, got, tc.want)
+		}
+	}
+}
+
+func contains(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
+func reportProviderNamed(report providerreport.Report, name string) *providerreport.ProviderReport {
+	for i := range report.Providers {
+		if report.Providers[i].Provider == name {
+			return &report.Providers[i]
+		}
+	}
+	return nil
 }
 
 func TestDeepSeekAccountBase(t *testing.T) {

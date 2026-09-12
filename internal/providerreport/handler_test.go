@@ -14,6 +14,7 @@ import (
 
 	"github.com/hughescr/utraque/internal/codex/auth"
 	"github.com/hughescr/utraque/internal/providerquota"
+	"github.com/hughescr/utraque/internal/referenceprice"
 	"github.com/hughescr/utraque/internal/usagehistory"
 )
 
@@ -38,6 +39,10 @@ type codexFunc func(context.Context, auth.CredentialSource, auth.Credential) (pr
 func (f codexFunc) ReadCredential(c context.Context, s auth.CredentialSource, cr auth.Credential) (providerquota.Observation, error) {
 	return f(c, s, cr)
 }
+
+type priceFunc func(context.Context) (referenceprice.Snapshot, error)
+
+func (f priceFunc) Read(c context.Context) (referenceprice.Snapshot, error) { return f(c) }
 
 type sourceFunc func(context.Context) (auth.Credential, error)
 
@@ -228,6 +233,105 @@ func TestSlowHistoryDoesNotDelayHealthyQuotaRead(t *testing.T) {
 	p := providerNamed(<-reportDone, "anthropic")
 	if p == nil || p.QuotaAfter == nil || p.QuotaBefore != nil || p.Paired != nil {
 		t.Fatalf("provider=%+v", p)
+	}
+}
+
+func TestReferencePricesUseCanonicalCandidatesAndObservedHistory(t *testing.T) {
+	now := time.Date(2026, 9, 11, 12, 5, 0, 0, time.UTC)
+	cacheRead, cacheWrite := .4, 5.0
+	history := sampleHistory(now)
+	history.Daily = append(history.Daily,
+		usagehistory.DailyModelUsage{Date: utcDate(now), Source: "claude", Model: "old-gpt", Provider: usagehistory.ProviderCodex, TotalTokens: 10},
+		usagehistory.DailyModelUsage{Date: utcDate(now), Source: "claude", Model: "sol", Provider: usagehistory.ProviderCodex, TotalTokens: 10})
+	h := New(Options{
+		History: historyFunc(func(context.Context, time.Time, time.Time) (usagehistory.Report, error) { return history, nil }),
+		ReferencePrices: priceFunc(func(context.Context) (referenceprice.Snapshot, error) {
+			return referenceprice.Snapshot{Source: referenceprice.SourceModelsDev, ObservedAt: now, Unit: referenceprice.USDPerMillion,
+				Models: []referenceprice.ModelPrice{
+					{Provider: "codex", Model: "gpt-5.6-sol", Input: 4, Output: 20, CacheRead: &cacheRead, CacheWrite: &cacheWrite, HasHigherTier: true},
+					{Provider: "codex", Model: "old-gpt", Input: 1, Output: 2},
+					{Provider: "codex", Model: "unseen-gpt", Input: .1, Output: .2},
+					{Provider: "anthropic", Model: "claude-sonnet-5", Input: 2, Output: 10},
+				}}, nil
+		}),
+		EligiblePriceModels: func(provider string) []string {
+			if provider == "codex" {
+				return []string{"gpt-5.6-sol"}
+			}
+			return nil
+		},
+		NormalizePriceModel: func(provider, model string) string {
+			if provider == "codex" && model == "sol" {
+				return "gpt-5.6-sol"
+			}
+			return model
+		},
+		Now: func() time.Time { return now },
+	})
+	p := providerNamed(h.collect(context.Background(), credentials{}, utcDate(now).AddDate(0, 0, -29), utcDate(now)), "codex")
+	if p == nil || p.ReferencePrices == nil || len(p.ReferencePrices.Models) != 2 {
+		t.Fatalf("prices=%+v", p)
+	}
+	if got := p.ReferencePrices.Models[0]; got.Model != "gpt-5.6-sol" || !got.Eligible || got.CacheRead == nil || got.CacheWrite == nil {
+		t.Fatalf("candidate=%+v", got)
+	}
+	if got := p.ReferencePrices.Models[1]; got.Model != "old-gpt" || got.Eligible {
+		t.Fatalf("history-only=%+v", got)
+	}
+	if len(p.ReferencePrices.Assumptions) != 1 || p.ReferencePrices.Assumptions[0] != "base_tier" {
+		t.Fatalf("assumptions=%v", p.ReferencePrices.Assumptions)
+	}
+	body, err := json.Marshal(p.ReferencePrices)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(body), `"provider"`) || strings.Contains(string(body), `"cache_read":null`) {
+		t.Fatalf("internal or absent fields leaked: %s", body)
+	}
+}
+
+func TestReferencePriceFailureIsProviderLocalAndCollectionConcurrent(t *testing.T) {
+	now := time.Date(2026, 9, 11, 12, 5, 0, 0, time.UTC)
+	priceStarted := make(chan struct{})
+	releasePrice := make(chan struct{})
+	quotaRead := make(chan struct{})
+	h := New(Options{
+		History: historyFunc(func(context.Context, time.Time, time.Time) (usagehistory.Report, error) {
+			return sampleHistory(now), nil
+		}),
+		Anthropic: anthropicFunc(func(context.Context, string) (providerquota.Observation, error) {
+			close(quotaRead)
+			return providerquota.Observation{Source: providerquota.ProviderAnthropic, CollectedAt: now}, nil
+		}),
+		ReferencePrices: priceFunc(func(context.Context) (referenceprice.Snapshot, error) {
+			close(priceStarted)
+			<-releasePrice
+			return referenceprice.Snapshot{}, &referenceprice.Error{Code: "timeout", Retryable: true}
+		}),
+		Now: func() time.Time { return now },
+	})
+	done := make(chan Report, 1)
+	go func() {
+		done <- h.collect(context.Background(), credentials{anthropicToken: "token"}, utcDate(now).AddDate(0, 0, -29), utcDate(now))
+	}()
+	<-priceStarted
+	select {
+	case <-quotaRead:
+	case <-time.After(time.Second):
+		t.Fatal("quota read waited for reference prices")
+	}
+	close(releasePrice)
+	report := <-done
+	for _, provider := range report.Providers {
+		found := false
+		for _, reportErr := range provider.Errors {
+			if reportErr.Section == "reference_prices" && reportErr.Code == "timeout" && reportErr.Retryable {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("provider %s errors=%+v", provider.Provider, provider.Errors)
+		}
 	}
 }
 

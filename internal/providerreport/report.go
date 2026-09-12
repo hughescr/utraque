@@ -5,6 +5,7 @@ import (
 	"errors"
 	"math"
 	"math/big"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/hughescr/utraque/internal/codex/auth"
 	"github.com/hughescr/utraque/internal/providerquota"
+	"github.com/hughescr/utraque/internal/referenceprice"
 	"github.com/hughescr/utraque/internal/usagehistory"
 )
 
@@ -23,6 +25,11 @@ type credentials struct {
 type quotaResult struct {
 	obs providerquota.Observation
 	err error
+}
+
+type priceResult struct {
+	snapshot referenceprice.Snapshot
+	err      error
 }
 
 func (h *Handler) collect(ctx context.Context, creds credentials, since, until time.Time) Report {
@@ -39,9 +46,19 @@ func (h *Handler) collect(ctx context.Context, creds credentials, since, until t
 		report, err := h.history.Collect(ctx, since, until)
 		historyDone <- historyResult{report: report, err: err}
 	}()
+	pricesDone := make(chan priceResult, 1)
+	go func() {
+		if h.prices == nil {
+			pricesDone <- priceResult{}
+			return
+		}
+		snapshot, err := h.prices.Read(ctx)
+		pricesDone <- priceResult{snapshot: snapshot, err: err}
+	}()
 	quotas := h.readQuotas(ctx, creds)
 	historyResultValue := <-historyDone
 	history, historyErr := historyResultValue.report, historyResultValue.err
+	prices := <-pricesDone
 	ended := h.now().UTC()
 
 	r := Report{SchemaVersion: SchemaVersion, GeneratedAt: ended,
@@ -52,7 +69,7 @@ func (h *Handler) collect(ctx context.Context, creds credentials, since, until t
 		kind usagehistory.Provider
 	}{{"anthropic", usagehistory.ProviderAnthropic}, {"codex", usagehistory.ProviderCodex}, {"deepseek", usagehistory.ProviderDeepSeek}}
 	for _, p := range providers {
-		pr := h.buildProvider(p.name, p.kind, ended, quotas[p.name], history, historyErr, since, until)
+		pr := h.buildProvider(p.name, p.kind, ended, quotas[p.name], prices, history, historyErr, since, until)
 		r.Providers = append(r.Providers, pr)
 	}
 	r.UnattributedHistory = aggregateModels(history.Daily, usagehistory.ProviderUnknown, since, until)
@@ -93,7 +110,7 @@ func (h *Handler) readQuotas(ctx context.Context, creds credentials) map[string]
 	return out
 }
 
-func (h *Handler) buildProvider(name string, kind usagehistory.Provider, ended time.Time, quota quotaResult, history usagehistory.Report, historyErr error, since, until time.Time) ProviderReport {
+func (h *Handler) buildProvider(name string, kind usagehistory.Provider, ended time.Time, quota quotaResult, prices priceResult, history usagehistory.Report, historyErr error, since, until time.Time) ProviderReport {
 	pr := ProviderReport{Provider: name, LastAttempt: ended, Errors: []ReportError{}}
 	var quotaErr *providerquota.Error
 	if errors.As(quota.err, &quotaErr) && !quotaErr.AttemptedAt.IsZero() {
@@ -121,6 +138,12 @@ func (h *Handler) buildProvider(name string, kind usagehistory.Provider, ended t
 	if historyErr != nil {
 		pr.Errors = append(pr.Errors, safeError("history", historyErr))
 	}
+	if reference := h.referencePrices(name, rows30, prices.snapshot); reference != nil {
+		pr.ReferencePrices = reference
+	}
+	if prices.err != nil {
+		pr.Errors = append(pr.Errors, safeReferencePriceError(prices.err))
+	}
 
 	hasQuota := pr.QuotaBefore != nil || pr.QuotaAfter != nil
 	hasHistory := pr.History != nil
@@ -146,6 +169,63 @@ func (h *Handler) buildProvider(name string, kind usagehistory.Provider, ended t
 		pr.Remaining = estimateDeepSeek(quota.obs, rows30)
 	}
 	return pr
+}
+
+func (h *Handler) referencePrices(provider string, history []ModelStats, snapshot referenceprice.Snapshot) *referenceprice.Snapshot {
+	if len(snapshot.Models) == 0 {
+		return nil
+	}
+	observed := make(map[string]bool, len(history))
+	for _, row := range history {
+		model := strings.ToLower(strings.TrimSpace(row.Model))
+		if h.normalizePrice != nil {
+			model = strings.ToLower(strings.TrimSpace(h.normalizePrice(provider, row.Model)))
+		}
+		if model != "" {
+			observed[model] = true
+		}
+	}
+	eligibleModels := map[string]bool{}
+	if h.eligiblePrices != nil {
+		for _, model := range h.eligiblePrices(provider) {
+			if model = strings.ToLower(strings.TrimSpace(model)); model != "" {
+				eligibleModels[model] = true
+			}
+		}
+	}
+	out := referenceprice.Snapshot{Source: snapshot.Source, ObservedAt: snapshot.ObservedAt,
+		Stale: snapshot.Stale, Unit: snapshot.Unit, Models: []referenceprice.ModelPrice{}}
+	baseTier := false
+	for _, price := range snapshot.Models {
+		if price.Provider != provider {
+			continue
+		}
+		eligible := eligibleModels[strings.ToLower(price.Model)]
+		if !eligible && !observed[strings.ToLower(price.Model)] {
+			continue
+		}
+		price.Eligible = eligible
+		baseTier = baseTier || price.HasHigherTier
+		out.Models = append(out.Models, price)
+	}
+	if len(out.Models) == 0 {
+		return nil
+	}
+	if baseTier {
+		out.Assumptions = append(out.Assumptions, "base_tier")
+	}
+	if provider == "anthropic" && slices.ContainsFunc(out.Models, func(price referenceprice.ModelPrice) bool { return price.CacheWrite != nil }) {
+		out.Assumptions = append(out.Assumptions, "cache_write_5m")
+	}
+	return &out
+}
+
+func safeReferencePriceError(err error) ReportError {
+	var priceErr *referenceprice.Error
+	if errors.As(err, &priceErr) {
+		return ReportError{Section: "reference_prices", Code: priceErr.Code, Retryable: priceErr.Retryable, Message: "reference prices unavailable"}
+	}
+	return ReportError{Section: "reference_prices", Code: "unavailable", Retryable: true, Message: "reference prices unavailable"}
 }
 
 func safeError(section string, err error) ReportError {

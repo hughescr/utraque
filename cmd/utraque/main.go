@@ -38,6 +38,7 @@ import (
 	"github.com/hughescr/utraque/internal/obs"
 	"github.com/hughescr/utraque/internal/providerquota"
 	"github.com/hughescr/utraque/internal/providerreport"
+	"github.com/hughescr/utraque/internal/referenceprice"
 	"github.com/hughescr/utraque/internal/router"
 	"github.com/hughescr/utraque/internal/server"
 	"github.com/hughescr/utraque/internal/tokens"
@@ -391,6 +392,7 @@ type reportDependencies struct {
 	anthropic providerreport.AnthropicReader
 	deepseek  providerreport.DeepSeekReader
 	codex     providerreport.CodexReader
+	prices    providerreport.ReferencePriceReader
 }
 
 func newProviderReport(cfg config.Config, source auth.CredentialSource, deps *reportDependencies) (http.Handler, error) {
@@ -435,13 +437,65 @@ func newProviderReport(cfg config.Config, source auth.CredentialSource, deps *re
 		}
 		deps.codex = client
 	}
+	if deps.prices == nil {
+		client, err := referenceprice.NewModelsDevClient(referenceprice.Options{})
+		if err != nil {
+			return nil, err
+		}
+		deps.prices = client
+	}
 	return providerreport.New(providerreport.Options{
 		History:   deps.history,
 		Anthropic: deps.anthropic, DeepSeek: deps.deepseek, DeepSeekAPIKey: cfg.DeepSeek.APIKey,
-		Codex: deps.codex, CodexSource: source, CacheTTL: cfg.Reporting.CacheTTL,
-		Timeout: cfg.Reporting.Timeout, ClaudePlan: cfg.Reporting.ClaudePlan,
+		Codex: deps.codex, CodexSource: source, ReferencePrices: deps.prices,
+		EligiblePriceModels: func(provider string) []string {
+			return eligibleReferencePriceModels(cfg, provider)
+		},
+		NormalizePriceModel: normalizeReferencePriceModel,
+		CacheTTL:            cfg.Reporting.CacheTTL,
+		Timeout:             cfg.Reporting.Timeout, ClaudePlan: cfg.Reporting.ClaudePlan,
 		ClaudePlanMultiplier: cfg.Reporting.ClaudePlanMultiplier,
 	}), nil
+}
+
+func eligibleReferencePriceModels(cfg config.Config, provider string) []string {
+	models := []string{}
+	switch provider {
+	case "anthropic":
+		for _, candidate := range discovery.StaticAnthropicModels() {
+			models = append(models, strings.ToLower(candidate.ID))
+		}
+	case "codex":
+		seen := map[string]bool{}
+		for _, alias := range router.DefaultRegistry.AliasList() {
+			model := strings.ToLower(alias.Slug)
+			if !seen[model] {
+				models = append(models, model)
+				seen[model] = true
+			}
+		}
+	case "deepseek":
+		if cfg.DeepSeek.Configured() {
+			models = append(models, "deepseek-flash", "deepseek-v4-pro")
+		}
+	}
+	return models
+}
+
+func normalizeReferencePriceModel(provider, model string) string {
+	model = strings.ToLower(strings.TrimSpace(model))
+	if provider != "codex" && provider != "deepseek" {
+		return model
+	}
+	decision, err := router.ResolveWith(router.DefaultRegistry, model, "")
+	if err != nil || decision.UpstreamModel == "" {
+		return model
+	}
+	if (provider == "codex" && decision.Backend != router.BackendCodex) ||
+		(provider == "deepseek" && decision.Backend != router.BackendDeepSeek) {
+		return model
+	}
+	return strings.ToLower(decision.UpstreamModel)
 }
 
 func deepSeekAccountBase(inferenceURL string) string {

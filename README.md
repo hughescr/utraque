@@ -701,6 +701,15 @@ An abbreviated response looks like this:
         "cost_basis": "calculated_api_reference_usd",
         "unit_prices_available": false,
         "unit_price_unavailable_reason": "ccusage_does_not_report_unit_prices"
+      },
+      "reference_prices": {
+        "source": "models.dev",
+        "observed_at": "2026-09-11T12:00:00Z",
+        "unit": "usd_per_million_tokens",
+        "models": [
+          {"model": "claude-haiku-4-5", "input": 1, "output": 5, "cache_read": 0.1, "cache_write": 1.25, "eligible": true}
+        ],
+        "assumptions": ["cache_write_5m"]
       }
     }
   ]
@@ -720,6 +729,24 @@ Costs are `calculated_api_reference_usd`, not subscription charges or prepaid
 deductions. `ccusage` does not expose a current unit-price catalog, so per-model
 effective rates are weighted historical observations and remain unavailable
 when any included usage is unpriced.
+
+Each provider may also carry `reference_prices`, an independent public
+models.dev snapshot denominated in USD per million tokens. Model ids are exact
+author-catalog ids. `eligible: true` identifies current selectable candidates:
+the held live Codex routing catalog (or its startup seed), the built-in current
+Claude fallback list, and the two DeepSeek routes when configured. A model seen
+in local history is included with `eligible: false` when it is no longer in
+that candidate set, which keeps old usage interpretable without making a
+retired cheap model the estimate target. The Claude candidate flag therefore
+reflects the fallback list rather than any credential-scoped live Anthropic
+catalog. Optional cache fields are omitted when the source has no price for
+them; `cache_write_5m` and `base_tier` state which source price was selected.
+
+The public catalog read carries no provider or caller credential. Utraque caps
+it at 8 MiB and five seconds, coalesces concurrent reads, revalidates its
+five-minute cache with ETag, and returns its last good snapshot as `stale: true`
+when a refresh fails. A catalog failure is reported under the
+`reference_prices` section and does not block quota or history collection.
 
 Remaining-token figures are conditional estimates. A DeepSeek USD balance can
 be divided by a fully priced historical workload rate, with future price and

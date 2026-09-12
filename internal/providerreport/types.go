@@ -8,6 +8,7 @@ import (
 
 	"github.com/hughescr/utraque/internal/codex/auth"
 	"github.com/hughescr/utraque/internal/providerquota"
+	"github.com/hughescr/utraque/internal/referenceprice"
 	"github.com/hughescr/utraque/internal/usagehistory"
 )
 
@@ -27,6 +28,10 @@ type DeepSeekReader interface {
 
 type CodexReader interface {
 	ReadCredential(context.Context, auth.CredentialSource, auth.Credential) (providerquota.Observation, error)
+}
+
+type ReferencePriceReader interface {
+	Read(context.Context) (referenceprice.Snapshot, error)
 }
 
 type Report struct {
@@ -55,6 +60,7 @@ type ProviderReport struct {
 	QuotaAfter      *providerquota.Observation `json:"quota_after,omitempty"`
 	Paired          *PairedMeasurement         `json:"paired_measurement,omitempty"`
 	History         *HistorySummary            `json:"history,omitempty"`
+	ReferencePrices *referenceprice.Snapshot   `json:"reference_prices,omitempty"`
 	Calibration     *Calibration               `json:"calibration,omitempty"`
 	Remaining       []RemainingEstimate        `json:"conditional_remaining_token_estimates,omitempty"`
 	ConfiguredPlan  *ConfiguredPlan            `json:"configured_plan,omitempty"`
