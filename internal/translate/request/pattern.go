@@ -11,45 +11,42 @@ import (
 )
 
 // The Codex backend validates every function tool's parameters as a JSON
-// Schema before any model runs, and it compiles each "pattern" keyword with
-// Python's re module (the rejection reads "... is not a 'regex'", which is the
-// python-jsonschema format checker). A pattern re cannot parse fails the whole
-// request with HTTP 400, so one tool with a rich regex blocks every turn of the
-// session. Anthropic accepts the same schema untouched, which is why this only
-// surfaces on the codex route.
+// Schema before any model runs, and it accepts only a compatibility subset of
+// regular-expression syntax. A pattern it rejects fails the whole request with
+// HTTP 400, so one tool with a rich regex blocks every turn of the session.
+// Anthropic accepts the same schema untouched, which is why this only surfaces
+// on the codex route.
 //
-// The fix is a per-pattern translation into Python's dialect. Most of a regex
-// is literal text that every engine reads the same way; the disagreements are
-// concentrated in a handful of escape and group forms, and each one is either
-// rewritten to its Python spelling or, when Python has no spelling for it, the
-// pattern is dropped from the schema and its text appended to the property's
-// description instead. A language model reads a constraint from the
-// description anyway, and the client (Claude Code) validates tool input against
-// the original schema on its own side, so a dropped pattern loses nothing that
-// mattered on the wire.
+// The fix is a per-pattern compatibility translation. Most of a regex is
+// literal text that every engine reads the same way; the known disagreements
+// are concentrated in a handful of escape and group forms. Each one is either
+// rewritten to a spelling accepted by the backend, or the pattern is dropped
+// from the schema and its text appended to the property's description. That
+// keeps the constraint visible in the tool declaration without sending a
+// pattern the backend rejects.
 //
 // Rewritten:
-//   - \p{Name}, \P{Name}, \pL: Unicode property classes, which Python's re
-//     lacks. Expanded into explicit codepoint ranges from Go's unicode tables.
-//     A class whose expansion is large (\p{L} is hundreds of ranges) is dropped
-//     rather than bloating the prompt.
-//   - (?<name>...): the JS/.NET/Go named group. Python only knows (?P<name>...).
-//   - \k<name>: named backreference. Python spells it (?P=name).
-//   - \z: absolute end of text. Python spells it \Z.
-//   - \x{HHHH}: braced hex escape. Python spells it \uHHHH or \UHHHHHHHH.
+//   - \p{Name}, \P{Name}, \pL: Unicode property classes. Expanded into
+//     explicit codepoint ranges from Go's unicode tables. A class whose
+//     expansion is large (\p{L} is hundreds of ranges) is dropped rather than
+//     bloating the prompt.
+//   - (?<name>...): the JS/.NET/Go named group becomes (?P<name>...).
+//   - \k<name>: named backreference becomes (?P=name).
+//   - \z: absolute end of text becomes \Z.
+//   - \x{HHHH}: braced hex escape becomes \uHHHH or \UHHHHHHHH.
 //
-// Dropped (no Python equivalent, or one that depends on the Python version):
+// Dropped (known unsupported by the backend, or too large to emit):
+//   - lookaround: (?=...), (?!...), (?<=...), (?<!...)
 //   - \Q...\E, [[:alpha:]], \C, \G
-//   - (?>...) atomic groups and possessive quantifiers (Python >= 3.11 only)
+//   - (?>...) atomic groups and possessive quantifiers
 //   - inline flags other than i, m, s
 //
-// Kept as-is because Python accepts them: lookaround, numbered backreferences,
-// \A, \Z, (?P<name>...), (?P=name), (?#comment), non-capturing groups.
+// Kept as-is: numbered backreferences, \A, \Z, (?P<name>...), (?P=name),
+// (?#comment), and non-capturing groups.
 //
 // The translated pattern is finally checked for well-formedness by parsing a
-// Go-syntax twin of it (lookaround and backreferences swapped for forms Go's
-// parser accepts), which catches unbalanced brackets and bad repetitions that
-// would fail on every engine.
+// Go-syntax twin of it, which catches unbalanced brackets and bad repetitions
+// that would fail on every engine.
 
 // maxPropertyRanges caps how many codepoint ranges a single \p{...} may expand
 // to before the pattern is dropped instead. The Artifact tool's classes (Cc,
@@ -67,8 +64,8 @@ const patternNote = "Must match the regular expression: "
 
 // schemaPatternResult reports what sanitizeToolSchema did to one schema:
 // the JSON paths (relative to the schema root) of every node whose pattern was
-// rewritten into Python's dialect, and of every node whose pattern was dropped.
-// Both lists are sorted.
+// rewritten for backend compatibility, and of every node whose pattern was
+// dropped. Both lists are sorted.
 type schemaPatternResult struct {
 	Rewritten []string
 	Dropped   []string
@@ -79,7 +76,7 @@ func (r schemaPatternResult) empty() bool {
 }
 
 // sanitizeToolSchema returns a copy of raw with every "pattern" keyword
-// translated into Python's regex dialect, or removed where no translation
+// translated for backend compatibility, or removed where no compatible form
 // exists. When nothing needs to change the input bytes are returned as-is so
 // the wire form of an untouched tool stays byte-identical. A schema that is not
 // a JSON object is passed through untouched: the backend will reject it with a
@@ -179,9 +176,9 @@ func sanitizeSchemaNode(node map[string]any, path string, res *schemaPatternResu
 	}
 }
 
-// toPythonPattern translates p into Python's re dialect. It returns the
-// translated pattern (identical to p when nothing needed changing) and false
-// when p uses a form Python cannot express or is malformed.
+// toPythonPattern applies the known backend-compatibility rewrites to p. It
+// returns the translated pattern (identical to p when nothing needed changing)
+// and false when p uses an unsupported form or is malformed.
 func toPythonPattern(p string) (string, bool) {
 	w := patternWriter{}
 	if !w.translate(p) {
@@ -193,11 +190,10 @@ func toPythonPattern(p string) (string, bool) {
 	return w.out.String(), true
 }
 
-// patternWriter emits two spellings of a pattern side by side: out is the
-// Python dialect that goes on the wire, chk is a Go-syntax twin used only to
-// check well-formedness. The two differ where Go's parser rejects a form Python
-// accepts (lookaround becomes a plain group, a backreference becomes a literal)
-// and in the spelling of hex escapes (Python \uHHHH, Go \x{HHHH}).
+// patternWriter emits two spellings of a pattern side by side: out goes on the
+// wire, and chk is a Go-syntax twin used only to check well-formedness. They
+// differ where Go's parser rejects a form emitted on the wire and in the
+// spelling of hexadecimal escapes (\uHHHH on the wire, \x{HHHH} in Go).
 type patternWriter struct {
 	out, chk strings.Builder
 }
@@ -296,7 +292,7 @@ func (w *patternWriter) escape(s string, inClass bool) (int, bool) {
 		w.split(pyCodepoint(rune(cp)), goCodepoint(rune(cp)))
 		return end + 1, true
 	case 'u', 'U':
-		// \uHHHH and \UHHHHHHHH are Python spellings Go's parser lacks.
+		// \uHHHH and \UHHHHHHHH are wire spellings Go's parser lacks.
 		width := 4
 		if s[1] == 'U' {
 			width = 8
@@ -392,8 +388,9 @@ func (w *patternWriter) property(s string, inClass bool) (int, bool) {
 }
 
 // group handles a "(?" construct at the start of s and returns how many bytes
-// it consumed. Lookaround is kept for Python and downgraded to a plain group
-// for the Go check; the JS-style named group is respelled for Python.
+// it consumed. The Codex schema validator rejects lookaround, so any of its
+// four forms makes the enclosing pattern fall back to a description. The
+// JS-style named group is respelled for the backend.
 func (w *patternWriter) group(s string) (int, bool) {
 	rest := s[2:]
 	switch {
@@ -415,12 +412,9 @@ func (w *patternWriter) group(s string) (int, bool) {
 		}
 		w.split(s[:end+1], "x")
 		return end + 1, true
-	case strings.HasPrefix(rest, "="), strings.HasPrefix(rest, "!"):
-		w.split(s[:3], "(?:")
-		return 3, true
-	case strings.HasPrefix(rest, "<="), strings.HasPrefix(rest, "<!"):
-		w.split(s[:4], "(?:")
-		return 4, true
+	case strings.HasPrefix(rest, "="), strings.HasPrefix(rest, "!"),
+		strings.HasPrefix(rest, "<="), strings.HasPrefix(rest, "<!"):
+		return 0, false
 	case strings.HasPrefix(rest, "<"):
 		w.both("(?P<")
 		return 3, true

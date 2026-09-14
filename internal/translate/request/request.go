@@ -173,11 +173,10 @@ type Metadata struct {
 	// is the only trace that it existed in the request.
 	DroppedImages []string
 	// RewrittenPatterns names, as "<tool>.<json path>", each tool schema node
-	// whose "pattern" keyword was translated into the Python regex dialect the
-	// backend's schema validator uses (see pattern.go). DroppedPatterns names
-	// the nodes whose pattern had no Python translation and was removed, with
-	// its text folded into the node's description so the model still sees the
-	// constraint.
+	// whose "pattern" keyword was translated for backend compatibility (see
+	// pattern.go). DroppedPatterns names the nodes whose pattern could not be
+	// sent compatibly and was removed, with its text folded into the node's
+	// description so the constraint remains in the tool declaration.
 	RewrittenPatterns []string
 	DroppedPatterns   []string
 
@@ -550,11 +549,11 @@ func withImagePlaceholder(text string, n int) string {
 
 // translateTools maps Anthropic tool declarations onto Responses function
 // tools, carrying the input_schema through as the parameters. The schema is
-// byte-identical to the input unless it carries a "pattern" the backend's
-// Python-based validator cannot parse (see pattern.go), in which case the
-// pattern is rewritten into Python's dialect or, failing that, dropped. The
-// affected nodes are named "<tool>.<path>" in the returned rewritten and
-// dropped lists. A nil tool list yields nil (the field is omitted).
+// byte-identical to the input unless it carries a "pattern" the backend cannot
+// accept (see pattern.go), in which case the pattern is rewritten for
+// compatibility or, failing that, dropped. The affected nodes are named
+// "<tool>.<path>" in the returned rewritten and dropped lists. A nil tool list
+// yields nil (the field is omitted).
 func translateTools(tools []aschema.Tool) (out []cschema.Tool, rewritten, dropped []string) {
 	if len(tools) == 0 {
 		return nil, nil, nil

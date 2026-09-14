@@ -6,6 +6,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	aschema "github.com/hughescr/utraque/internal/anthropic/schema"
 )
 
 // artifactFieldPattern is the pattern that produced the first real rejection:
@@ -27,9 +29,6 @@ func TestToPythonPatternUnchanged(t *testing.T) {
 		`[^]a]`,
 		`a+?b*?c??`,
 		`^\.?$`,
-		`^(?!\.\.?(?:\/|$))[A-Za-z0-9_\-.~:@+]{1,200}$`,
-		`(?=a)b`,
-		`(?<=a)b(?<!c)`,
 		`(a)\1`,
 		`\Aabc\Z`,
 		`(?#note)a`,
@@ -66,40 +65,37 @@ func TestToPythonPatternRewritten(t *testing.T) {
 			t.Errorf("%q:\n got %q\nwant %q", in, got, want)
 		}
 	}
-	got, ok := toPythonPattern(artifactFieldPattern)
-	if !ok {
-		t.Fatalf("artifact pattern: want accepted")
-	}
-	wantPrefix := `^(?!__.*__$)[^\x00-\x1f\x7f-\x9f\xad`
-	wantSuffix := `\u2028\u2029"\\./[\]]{1,200}$`
-	if !strings.HasPrefix(got, wantPrefix) || !strings.HasSuffix(got, wantSuffix) {
-		t.Errorf("artifact pattern rewrote to %q", got)
-	}
 }
 
 func TestToPythonPatternDropped(t *testing.T) {
 	dropped := map[string]string{
-		`\p{L}+`:       "letter category: too many ranges",
-		`[\p{Nd}]`:     "decimal digits: too many ranges",
-		`\p{Nope}`:     "unknown property",
-		`\p{`:          "unterminated property",
-		`\p`:           "bare \\p",
-		`(?>ab)`:       "atomic group",
-		`\Qa.b\E`:      "quoted span",
-		`[[:alpha:]]+`: "POSIX class",
-		`\C`:           "any byte",
-		`\Ga`:          "match-start anchor",
-		`a++b`:         "possessive quantifier",
-		`(?x)a b`:      "verbose flag",
-		`(?)`:          "empty flag group",
-		`[abc`:         "unbalanced bracket",
-		`a{2,1}`:       "bad repetition",
-		`abc\`:         "trailing backslash",
-		`(?<n`:         "unterminated named group",
-		`\k<n`:         "unterminated named backreference",
-		`\x{zz}`:       "bad hex escape",
-		`\x{110000}`:   "codepoint past MaxRune",
-		`[\1]`:         "backreference inside class",
+		artifactFieldPattern:   "lookahead in the Artifact pattern",
+		`(?=a)b`:               "positive lookahead",
+		`(?!a)b`:               "negative lookahead",
+		`(?<=a)b`:              "positive lookbehind",
+		`(?<!a)b`:              "negative lookbehind",
+		`^(?!\.)(?!.*\.\.)a+$`: "multiple lookaheads",
+		`\p{L}+`:               "letter category: too many ranges",
+		`[\p{Nd}]`:             "decimal digits: too many ranges",
+		`\p{Nope}`:             "unknown property",
+		`\p{`:                  "unterminated property",
+		`\p`:                   "bare \\p",
+		`(?>ab)`:               "atomic group",
+		`\Qa.b\E`:              "quoted span",
+		`[[:alpha:]]+`:         "POSIX class",
+		`\C`:                   "any byte",
+		`\Ga`:                  "match-start anchor",
+		`a++b`:                 "possessive quantifier",
+		`(?x)a b`:              "verbose flag",
+		`(?)`:                  "empty flag group",
+		`[abc`:                 "unbalanced bracket",
+		`a{2,1}`:               "bad repetition",
+		`abc\`:                 "trailing backslash",
+		`(?<n`:                 "unterminated named group",
+		`\k<n`:                 "unterminated named backreference",
+		`\x{zz}`:               "bad hex escape",
+		`\x{110000}`:           "codepoint past MaxRune",
+		`[\1]`:                 "backreference inside class",
 	}
 	for p, why := range dropped {
 		if got, ok := toPythonPattern(p); ok {
@@ -108,20 +104,35 @@ func TestToPythonPatternDropped(t *testing.T) {
 	}
 }
 
-// TestToPythonPatternCompilesInPython is the claim the whole file rests on:
-// every accepted output compiles under Python's re. It is skipped when no
-// python3 is on PATH.
+func TestToPythonPatternKeepsLiteralLookaroundText(t *testing.T) {
+	unchanged := []string{
+		`\(?=literal`,
+		`\(\?=literal`,
+		`[(?=]`,
+	}
+	for _, p := range unchanged {
+		got, ok := toPythonPattern(p)
+		if !ok {
+			t.Errorf("%q: want accepted", p)
+		} else if got != p {
+			t.Errorf("%q: want unchanged, got %q", p, got)
+		}
+	}
+}
+
+// TestToPythonPatternCompilesInPython keeps the legacy rewrite spellings
+// syntactically valid in Python. It is not a Codex-validator contract;
+// lookaround is separately rejected before a pattern is emitted. It is skipped
+// when no python3 is on PATH.
 func TestToPythonPatternCompilesInPython(t *testing.T) {
 	py, err := exec.LookPath("python3")
 	if err != nil {
 		t.Skip("python3 not on PATH")
 	}
 	inputs := []string{
-		artifactFieldPattern,
 		`\p{Zl}`, `\P{Zl}`, `[\p{Zl}\p{Zp}]`, `[^\P{Zl}]`, `\p{Cc}`, `\p{Cf}`,
 		`(?<name>x)`, `(?<n>a)\k<n>`, `\Aabc\z`, `\x{41}\x{1F600}`,
-		`(?=a)b`, `(?<=a)b(?<!c)`, `(a)\1`, `(?i)^abc$`, `(?is:a.b)c`,
-		`^(?!\.\.?(?:\/|$))[A-Za-z0-9_\-.~:@+]{1,200}$`,
+		`(a)\1`, `(?i)^abc$`, `(?is:a.b)c`,
 	}
 	var patterns []string
 	for _, in := range inputs {
@@ -144,29 +155,6 @@ sys.exit(1 if bad else 0)`
 	outb, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("python rejected translated patterns:\n%s", outb)
-	}
-}
-
-// TestArtifactPatternSemantics checks the rewritten Artifact pattern still
-// accepts and rejects the same field names Python would judge with the
-// original intent. Skipped without python3.
-func TestArtifactPatternSemantics(t *testing.T) {
-	py, err := exec.LookPath("python3")
-	if err != nil {
-		t.Skip("python3 not on PATH")
-	}
-	out, ok := toPythonPattern(artifactFieldPattern)
-	if !ok {
-		t.Fatal("artifact pattern: want accepted")
-	}
-	script := `import re,sys
-p=re.compile(sys.argv[1])
-yes=["html","a b","日本語","x"*200]
-no=["","__x__","a.b","a/b","a\"b","a\\b","a[b","a]b","a\x00b","a\u200bb","a\u2028b","x"*201]
-bad=[s for s in yes if not p.search(s)]+[s for s in no if p.search(s)]
-print(bad); sys.exit(1 if bad else 0)`
-	if outb, err := exec.Command(py, "-c", script, out).CombinedOutput(); err != nil {
-		t.Fatalf("semantics mismatch: %s", outb)
 	}
 }
 
@@ -204,8 +192,8 @@ func TestSanitizeToolSchemaRewrites(t *testing.T) {
 	}`)
 	out, res := sanitizeToolSchema(raw)
 	want := schemaPatternResult{
-		Rewritten: []string{"properties.either.anyOf.1", "properties.field", "properties.list.items.properties.doc"},
-		Dropped:   []string{"$defs.D", "patternProperties.^x", "properties.bare", "properties.tuple.items.0"},
+		Rewritten: []string{"properties.either.anyOf.1", "properties.list.items.properties.doc"},
+		Dropped:   []string{"$defs.D", "patternProperties.^x", "properties.bare", "properties.field", "properties.tuple.items.0"},
 	}
 	if !reflect.DeepEqual(res, want) {
 		t.Fatalf("result = %+v\nwant     %+v", res, want)
@@ -216,11 +204,11 @@ func TestSanitizeToolSchemaRewrites(t *testing.T) {
 	}
 	props := got["properties"].(map[string]any)
 	field := props["field"].(map[string]any)
-	if p := field["pattern"]; p != `^(?!__.*__$)[^\x00-\x1f\x7f-\x9f]{1,200}$` {
-		t.Errorf("field.pattern = %q", p)
+	if _, ok := field["pattern"]; ok {
+		t.Errorf("field.pattern not removed")
 	}
-	if d := field["description"]; d != "the field." {
-		t.Errorf("field.description = %q, want untouched", d)
+	if d := field["description"]; d != `the field. Must match the regular expression: ^(?!__.*__$)[^\p{Cc}]{1,200}$` {
+		t.Errorf("field.description = %q", d)
 	}
 	bare := props["bare"].(map[string]any)
 	if _, ok := bare["pattern"]; ok {
@@ -240,5 +228,56 @@ func TestSanitizeToolSchemaRewrites(t *testing.T) {
 	ex := got["examples"].([]any)[0].(map[string]any)
 	if ex["pattern"] != `\p{L}` {
 		t.Errorf("examples[0] was rewritten: %v", ex)
+	}
+}
+
+func TestTranslateToolsDropsNestedEmailLookaround(t *testing.T) {
+	const emailPattern = `^(?!\.)(?!.*\.\.)[A-Za-z0-9.!#$%&'*+/=?^_{|}~-]+@[A-Za-z0-9.-]+$`
+	raw := json.RawMessage(`{
+		"type": "object",
+		"properties": {
+			"to": {
+				"anyOf": [{
+					"anyOf": [
+						{"type": "string", "description": "Recipient address.", "pattern": "^(?!\\.)(?!.*\\.\\.)[A-Za-z0-9.!#$%&'*+/=?^_{|}~-]+@[A-Za-z0-9.-]+$"},
+						{"type": "string", "pattern": "^[0-9]+$"}
+					]
+				}]
+			}
+		}
+	}`)
+	before := string(raw)
+	tools, rewritten, dropped := translateTools([]aschema.Tool{{
+		Name:        "send_email",
+		InputSchema: raw,
+	}})
+	if got, want := rewritten, []string(nil); !reflect.DeepEqual(got, want) {
+		t.Errorf("rewritten = %v, want %v", got, want)
+	}
+	if got, want := dropped, []string{"send_email.properties.to.anyOf.0.anyOf.0"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("dropped = %v, want %v", got, want)
+	}
+	if len(tools) != 1 {
+		t.Fatalf("tools length = %d, want 1", len(tools))
+	}
+	if string(raw) != before {
+		t.Errorf("input schema was mutated:\n got %s\nwant %s", raw, before)
+	}
+
+	var got map[string]any
+	if err := json.Unmarshal(tools[0].Parameters, &got); err != nil {
+		t.Fatalf("translated parameters are not JSON: %v\n%s", err, tools[0].Parameters)
+	}
+	to := got["properties"].(map[string]any)["to"].(map[string]any)
+	nested := to["anyOf"].([]any)[0].(map[string]any)["anyOf"].([]any)
+	email := nested[0].(map[string]any)
+	if _, ok := email["pattern"]; ok {
+		t.Error("nested email pattern was not removed")
+	}
+	if got, want := email["description"], "Recipient address. "+patternNote+emailPattern; got != want {
+		t.Errorf("nested email description = %q, want %q", got, want)
+	}
+	if got, want := nested[1].(map[string]any)["pattern"], "^[0-9]+$"; got != want {
+		t.Errorf("sibling pattern = %q, want %q", got, want)
 	}
 }

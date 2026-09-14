@@ -279,23 +279,25 @@ served and is still useful to any client that does ask for it.
 ### Tool schemas on a GPT route
 
 The Codex backend validates every tool's parameter schema before a model runs,
-and it compiles each JSON Schema `pattern` with Python's `re` module. Anthropic
-accepts any pattern the client sends, so a tool whose pattern uses a form
-Python lacks — Claude Code's Artifact tool has a `\p{Cc}` Unicode class — used
-to fail every request on a GPT route with `Invalid schema for function
-'Artifact': ... is not a 'regex'`.
+but its accepted regex subset is narrower than the patterns some Anthropic
+clients send. A tool whose pattern uses an unsupported form — Claude Code's
+Artifact tool has a `\p{Cc}` Unicode class, and some email schemas use
+lookaround — can fail every request on a GPT route with `Invalid schema for
+function ... is not a 'regex'`. Lookaround currently reports a more specific
+`Invalid JSON schema: regex lookaround is not supported` error.
 
-The request translator now rewrites each pattern into Python's dialect before
-it goes out. Unicode property classes become explicit codepoint ranges from
+The request translator applies narrow, known compatibility rewrites before a
+schema goes out. Unicode property classes become explicit codepoint ranges from
 Go's own Unicode tables, `(?<name>…)` becomes `(?P<name>…)`, `\k<name>` becomes
 `(?P=name)`, `\z` becomes `\Z`, and `\x{HHHH}` becomes `\uHHHH`. Lookaround
-and backreferences are left alone because Python accepts them. A pattern with
-no Python spelling (atomic groups, possessive quantifiers, `\Q…\E`, POSIX
-classes) or one whose class expansion would run to hundreds of ranges is
-dropped from the schema and its text appended to the property's description,
-which is where the model reads a constraint from anyway. Claude Code still
-validates tool input against its own original schema, so nothing is lost on
-the client side.
+(`(?=...)`, `(?!...)`, `(?<=...)`, and `(?<!...)`) is dropped because Codex
+schema validation rejects it. Atomic groups, possessive quantifiers,
+`\Q…\E`, POSIX classes, and a property-class expansion that would run to
+hundreds of ranges are also dropped. For each dropped pattern, its original
+text is appended to the property's description so the constraint remains in
+the tool declaration. A dropped pattern is no longer enforced by Codex schema
+validation, so callers or tool implementations that require enforcement must
+validate the input themselves.
 
 Untouched schemas go through byte-for-byte. The translation log line names
 each rewritten node as `rewritten_patterns` and each dropped one as
