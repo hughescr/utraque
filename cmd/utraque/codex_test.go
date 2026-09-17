@@ -504,9 +504,11 @@ func TestCodexStreamingProducesAnthropicSSE(t *testing.T) {
 	if delta.Delta.StopReason == nil || *delta.Delta.StopReason != "end_turn" {
 		t.Errorf("stop_reason = %v, want end_turn", delta.Delta.StopReason)
 	}
-	// Usage must be the upstream's own numbers, not the estimate.
-	if delta.Usage.InputTokens != 19 || delta.Usage.OutputTokens != 4 || delta.Usage.CacheReadInputTokens != 8 {
-		t.Errorf("usage = %+v, want the upstream's 19/4/8", delta.Usage)
+	// Usage must be the upstream's own numbers, not the estimate — under
+	// Anthropic semantics: the Responses block said 19 input of which 8 cached,
+	// so the client sees 11 uncached beside 8 cache-read.
+	if delta.Usage.InputTokens != 11 || delta.Usage.OutputTokens != 4 || delta.Usage.CacheReadInputTokens != 8 {
+		t.Errorf("usage = %+v, want the upstream's 19/4/8 as 11/4/8", delta.Usage)
 	}
 
 	// The credential the backend saw: the Codex OAuth bearer token and account
@@ -640,8 +642,9 @@ func TestCodexNonStreamingReturnsMessagesResponse(t *testing.T) {
 			Text string `json:"text"`
 		} `json:"content"`
 		Usage struct {
-			InputTokens  int `json:"input_tokens"`
-			OutputTokens int `json:"output_tokens"`
+			InputTokens          int `json:"input_tokens"`
+			OutputTokens         int `json:"output_tokens"`
+			CacheReadInputTokens int `json:"cache_read_input_tokens"`
 		} `json:"usage"`
 	}
 	if err := json.Unmarshal(raw, &msg); err != nil {
@@ -662,8 +665,9 @@ func TestCodexNonStreamingReturnsMessagesResponse(t *testing.T) {
 	if len(msg.Content) != 1 || msg.Content[0].Type != "text" || msg.Content[0].Text != "Sol answers." {
 		t.Errorf("content = %+v, want one text block %q", msg.Content, "Sol answers.")
 	}
-	if msg.Usage.InputTokens != 19 || msg.Usage.OutputTokens != 4 {
-		t.Errorf("usage = %+v, want the upstream's 19/4", msg.Usage)
+	// The same Anthropic-semantics numbers the streaming twin reports.
+	if msg.Usage.InputTokens != 11 || msg.Usage.OutputTokens != 4 || msg.Usage.CacheReadInputTokens != 8 {
+		t.Errorf("usage = %+v, want the upstream's 19/4/8 as 11/4/8", msg.Usage)
 	}
 	// A non-streaming answer must not leak SSE framing.
 	if strings.Contains(string(raw), "event:") || strings.Contains(string(raw), "data:") {

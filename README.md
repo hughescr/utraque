@@ -481,10 +481,18 @@ hung up" from "it broke", so a cancelled turn never reads as an incident.
 
 `input_tokens` and `cache_read_input_tokens` are the pair to watch on the Codex
 leg, because their RATIO is the only visible sign of whether the prompt cache is
-working. In a healthy agentic loop the cached count tracks the input count as
-the conversation grows. A cached count that stays FLAT while the input climbs
-means the replayed history has stopped matching what the model saw, and every
-turn is paying full price for the whole conversation — see *Prompt caching*.
+working. Both follow Anthropic semantics on every leg: `input_tokens` is the
+UNCACHED part of the prompt, `cache_read_input_tokens` the part served from the
+cache, and the whole prompt is their sum — so the hit rate is
+`cache_read_input_tokens / (input_tokens + cache_read_input_tokens)`. (The
+Responses API reports its `input_tokens` inclusive of the cached count; the
+translator subtracts it out, so the Codex leg's numbers add up the same way a
+Claude Code transcript's do and ccusage does not double count the cached
+part.) In a healthy agentic loop the cached count tracks the prompt as the
+conversation grows and `input_tokens` stays small. A cached count that stays
+FLAT while `input_tokens` climbs means the replayed history has stopped matching
+what the model saw, and every turn is paying full price for the whole
+conversation — see *Prompt caching*.
 
 **Redaction is by allowlist.** Exactly four request headers may be logged with
 their values — `anthropic-version`, `anthropic-beta`, `content-type`,
@@ -538,10 +546,13 @@ first assistant message, so the hit stops there and never grows again: every
 later turn re-reads the whole conversation at full price.
 
 That is not hypothetical. Before this was fixed, real sessions ran at an 11.7%
-cache hit rate — 246M input tokens against 28.7M cached — while the Codex CLI on
-the same backend runs at 95–99%. The tell was a `cache_read_input_tokens` pinned
-at exactly the same number, turn after turn, while `input_tokens` climbed from
-56k to 113k.
+cache hit rate — 246M prompt tokens in total, of which 28.7M were cached — while
+the Codex CLI on the same backend runs at 95–99%. (Those figures were measured
+when the log still carried the Responses API's inclusive `input_tokens`; under
+today's Anthropic-semantics log the same sessions would read 217M uncached
+against 28.7M cached, and the rate is `cached / (input + cached)` — the same
+11.7%.) The tell was a `cache_read_input_tokens` pinned at exactly the same
+number, turn after turn, while the prompt climbed from 56k to 113k.
 
 Three things keep the prefix matching.
 

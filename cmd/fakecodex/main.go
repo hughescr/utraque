@@ -231,6 +231,9 @@ func answerScript(blob string) []event {
 		{"response.output_text.delta", `{"type":"response.output_text.delta","output_index":1,"delta":` + q("Acknowledged ("+blob+"). Ask me again to test the replay.") + `}`},
 		{"response.output_text.done", `{"type":"response.output_text.done","output_index":1,"text":` + q("Acknowledged ("+blob+"). Ask me again to test the replay.") + `}`},
 		{"response.output_item.done", `{"type":"response.output_item.done","output_index":1,"item":{"type":"message","id":"msg_fake","role":"assistant"}}`},
+		// Responses usage: input_tokens is INCLUSIVE of cached_tokens (the
+		// translator subtracts it out), so with nothing cached the whole 100
+		// reaches the client as input_tokens.
 		{"response.completed", `{"type":"response.completed","response":{"id":"resp_fake","status":"completed","usage":{"input_tokens":100,"output_tokens":12,"input_tokens_details":{"cached_tokens":0}}}}`},
 	}
 }

@@ -991,6 +991,73 @@ func TestTerminalUsageFallsBackToTheEstimateOnBothSinks(t *testing.T) {
 	}
 }
 
+// TestTerminalUsageAnthropicSemantics pins the Responses→Anthropic prompt
+// accounting on the wire and on the fold, one usage block per case:
+//
+//   - a partially cached prompt reports the UNCACHED remainder as input_tokens;
+//   - a fully cached prompt reports a true input_tokens 0, which the estimate
+//     substitution must leave alone (the whole prompt is non-zero);
+//   - an explicit all-zero usage block still takes the message_start estimate,
+//     because a zero-token prompt is never a true statement;
+//   - cached_tokens larger than input_tokens is an upstream bug that clamps to
+//     0 rather than surfacing as a negative count.
+func TestTerminalUsageAnthropicSemantics(t *testing.T) {
+	cases := []struct {
+		name  string
+		usage string
+		want  string
+	}{
+		{"partially_cached", `{"input_tokens":1000,"output_tokens":2,"input_tokens_details":{"cached_tokens":800}}`,
+			`"usage":{"input_tokens":200,"output_tokens":2,"cache_read_input_tokens":800}`},
+		{"fully_cached", `{"input_tokens":1000,"output_tokens":2,"input_tokens_details":{"cached_tokens":1000}}`,
+			`"usage":{"input_tokens":0,"output_tokens":2,"cache_read_input_tokens":1000}`},
+		{"explicit_zero_prompt", `{"input_tokens":0,"output_tokens":2}`,
+			`"usage":{"input_tokens":7,"output_tokens":2}`},
+		{"cached_exceeds_input", `{"input_tokens":10,"output_tokens":2,"input_tokens_details":{"cached_tokens":12}}`,
+			`"usage":{"input_tokens":0,"output_tokens":2,"cache_read_input_tokens":12}`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			input := sseFrame("response.created", `{"type":"response.created","response":{"id":"resp_test"}}`) +
+				sseFrame("response.content_part.added",
+					`{"type":"response.content_part.added","output_index":0,"part":{"type":"output_text"}}`) +
+				sseFrame("response.output_text.delta",
+					`{"type":"response.output_text.delta","output_index":0,"delta":"hi"}`) +
+				sseFrame("response.output_text.done",
+					`{"type":"response.output_text.done","output_index":0,"text":"hi"}`) +
+				sseFrame("response.completed",
+					`{"type":"response.completed","response":{"id":"resp_test","status":"completed","usage":`+c.usage+`}}`)
+
+			wire, res, err := runToBytes(t, []byte(input), goldenOptions())
+			if err != nil {
+				t.Fatalf("run: %v", err)
+			}
+			checkGrammar(t, wire)
+			if !strings.Contains(string(wire), c.want) {
+				t.Errorf("streamed message_delta:\n got: %s\nwant a usage of %s", wire, c.want)
+			}
+			folded, err := aggregateFixture(t, []byte(input), goldenOptions())
+			if err != nil {
+				t.Fatalf("fold: %v", err)
+			}
+			if !strings.Contains(string(folded), c.want) {
+				t.Errorf("folded message disagrees with the stream:\n got: %s\nwant a usage of %s", folded, c.want)
+			}
+			// The request log is recorded from the same numbers the client saw.
+			var wantUsage struct {
+				Usage schema.Usage `json:"usage"`
+			}
+			if err := json.Unmarshal([]byte("{"+c.want+"}"), &wantUsage); err != nil {
+				t.Fatalf("parse want: %v", err)
+			}
+			if res.InputTokens != wantUsage.Usage.InputTokens || res.CachedInputTokens != wantUsage.Usage.CacheReadInputTokens {
+				t.Errorf("Result input/cached = %d/%d, want %d/%d", res.InputTokens, res.CachedInputTokens,
+					wantUsage.Usage.InputTokens, wantUsage.Usage.CacheReadInputTokens)
+			}
+		})
+	}
+}
+
 // TestMidStreamErrorSignsAnOpenThinkingBlock: a thinking block force-closed by a
 // mid-stream failure must still carry the synthetic signature. Without it the
 // client keeps an unsigned thinking block, the Anthropic-leg sanitizer cannot

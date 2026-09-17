@@ -152,15 +152,18 @@ func (a *Aggregator) BlockStop(index int) error {
 
 // MessageDelta records the terminal stop reason and usage.
 //
-// The Translator already substitutes the message_start estimate for a zero
-// upstream input count (see Translator.terminalUsage), so both sinks see the
-// same numbers. This repeats the rule only for a caller driving the Sink
-// directly, which has no translator to do it: it must never be the ONLY place
-// the substitution happens, or the streaming path would diverge again.
+// The Translator already substitutes the message_start estimate for a usage
+// block that reports no prompt at all (see Translator.terminalUsage), so both
+// sinks see the same numbers. This repeats the rule only for a caller driving
+// the Sink directly, which has no translator to do it: it must never be the
+// ONLY place the substitution happens, or the streaming path would diverge
+// again. The test is the whole prompt, not input_tokens alone: under Anthropic
+// semantics a fully cached prompt reports input_tokens 0 beside a non-zero
+// cache_read_input_tokens, and that is a true statement to keep.
 func (a *Aggregator) MessageDelta(d MessageDelta) error {
 	a.stopReason = d.StopReason
 	u := d.Usage
-	if u.InputTokens == 0 {
+	if promptTokens(u) == 0 {
 		u.InputTokens = a.usage.InputTokens
 	}
 	a.usage = u

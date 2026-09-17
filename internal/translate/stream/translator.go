@@ -143,12 +143,14 @@ type Result struct {
 	StopReason string
 	// OutputTokens is the completion token count reported on that terminus.
 	OutputTokens int
-	// InputTokens is the prompt token count reported on that terminus, and
-	// CachedInputTokens is how much of it the backend served from its prompt
-	// cache. The pair is the only visible measure of whether the conversation's
-	// prefix is still matching: a cached count that stays flat while the input
-	// grows means the replayed history has diverged from what the model saw, and
-	// every turn is paying full price for the whole conversation.
+	// InputTokens and CachedInputTokens follow Anthropic semantics: InputTokens
+	// is the UNCACHED part of the prompt reported on that terminus, and
+	// CachedInputTokens is the part the backend served from its prompt cache,
+	// so the whole prompt is their sum (see mapUsage). The pair is the only
+	// visible measure of whether the conversation's prefix is still matching: a
+	// cached count that stays flat while the uncached count grows means the
+	// replayed history has diverged from what the model saw, and every turn is
+	// paying full price for the whole conversation.
 	InputTokens       int
 	CachedInputTokens int
 
@@ -203,6 +205,7 @@ type Translator struct {
 	incomplete          bool
 	incompleteMaxTokens bool
 	usage               schema.Usage
+	usageSeen           bool
 	unknown             map[string]int
 	finalStop           string
 	finalOutputTokens   int
@@ -260,6 +263,7 @@ func (t *Translator) reset() {
 	t.incomplete = false
 	t.incompleteMaxTokens = false
 	t.usage = schema.Usage{}
+	t.usageSeen = false
 	t.unknown = make(map[string]int)
 	t.finalStop = ""
 	t.finalOutputTokens = 0
@@ -475,7 +479,7 @@ func (t *Translator) handle(sink Sink, fr sse.Frame) (bool, error) {
 
 	case cschema.EventResponseCompleted:
 		if ev.Response != nil {
-			t.usage = mapUsage(ev.Response.Usage)
+			t.recordUsage(ev.Response.Usage)
 		}
 		if err := t.ensureStarted(sink); err != nil {
 			return true, err
@@ -484,7 +488,7 @@ func (t *Translator) handle(sink Sink, fr sse.Frame) (bool, error) {
 
 	case cschema.EventResponseIncomplete:
 		if ev.Response != nil {
-			t.usage = mapUsage(ev.Response.Usage)
+			t.recordUsage(ev.Response.Usage)
 			t.incomplete = true
 			if d := ev.Response.IncompleteDetails; d != nil && d.Reason == cschema.IncompleteReasonMaxOutputTokens {
 				t.incompleteMaxTokens = true
@@ -733,11 +737,23 @@ func (t *Translator) finalizeClean(sink Sink) error {
 	return nil
 }
 
+// recordUsage captures the usage block from a terminus event. The flag is what
+// terminalUsage consults, not the counts: after mapUsage's subtraction a fully
+// cached prompt legitimately reports input_tokens 0, so a zero can no longer
+// stand in for "the upstream never said".
+func (t *Translator) recordUsage(u *cschema.Usage) {
+	t.usage = mapUsage(u)
+	t.usageSeen = u != nil
+}
+
 // terminalUsage is the usage reported on message_delta.
 //
-// An upstream terminus that carried no usage block, or an explicit zero input
-// count, keeps the message_start estimate: a zero-token prompt is never a true
-// statement, and a client that shows a context bar would read it as one.
+// An upstream terminus that carried no usage block, or one whose prompt counts
+// are all zero, keeps the message_start estimate: a zero-token prompt is never a
+// true statement, and a client that shows a context bar would read it as one.
+// A prompt of zero UNCACHED tokens is a different thing — the whole prefix was
+// served from the cache — and is reported exactly as upstream said, so the
+// check is on the usage flag and the prompt total, never on input_tokens alone.
 //
 // The substitution belongs HERE rather than in a sink. Both sinks see the same
 // MessageDelta, so stream:true and stream:false report identical numbers by
@@ -746,10 +762,16 @@ func (t *Translator) finalizeClean(sink Sink) error {
 // "input_tokens":0 for a request whose non-streaming twin reported the estimate.
 func (t *Translator) terminalUsage() schema.Usage {
 	u := t.usage
-	if u.InputTokens == 0 {
+	if !t.usageSeen || promptTokens(u) == 0 {
 		u.InputTokens = t.inputTokens
 	}
 	return u
+}
+
+// promptTokens is the whole prompt under Anthropic semantics: the uncached
+// input plus every cached part.
+func promptTokens(u schema.Usage) int {
+	return u.InputTokens + u.CacheReadInputTokens + u.CacheCreationInputTokens
 }
 
 // stopReason applies the finalization rule: tool_use wins; else max_tokens on a
@@ -788,15 +810,31 @@ func (t *Translator) countUnknown(typ string) {
 	}
 }
 
-// mapUsage maps a Responses usage block onto the Anthropic usage block, folding
-// cached input tokens into cache_read_input_tokens.
+// mapUsage maps a Responses usage block onto the Anthropic usage block.
+//
+// The two APIs count the prompt differently. Responses reports input_tokens
+// INCLUSIVE of input_tokens_details.cached_tokens: the whole prompt, of which
+// cached_tokens were served from the cache. Anthropic reports input_tokens
+// EXCLUSIVE of the cache fields: the prompt is input_tokens +
+// cache_read_input_tokens + cache_creation_input_tokens, and input_tokens is
+// only the part billed at full price. A client reading Anthropic usage
+// therefore adds the fields back together, so passing the inclusive count
+// through as input_tokens double-counted the cached portion — a 1000-token
+// prompt with 800 cached read as 1800 in Claude Code's transcripts and in
+// ccusage. The subtraction here is what makes the Codex leg's usage mean the
+// same thing as every other leg's.
+//
+// The count is clamped at zero: cached_tokens is defined as a subset of
+// input_tokens, so a larger value is an upstream bug that must not surface as
+// a negative prompt.
 func mapUsage(u *cschema.Usage) schema.Usage {
 	if u == nil {
 		return schema.Usage{}
 	}
+	cached := u.CachedTokens()
 	return schema.Usage{
-		InputTokens:          u.InputTokens,
+		InputTokens:          max(0, u.InputTokens-cached),
 		OutputTokens:         u.OutputTokens,
-		CacheReadInputTokens: u.CachedTokens(),
+		CacheReadInputTokens: cached,
 	}
 }

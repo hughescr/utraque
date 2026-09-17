@@ -115,15 +115,20 @@ func (s *Summary) SetOutputTokens(n int) {
 	s.set(func() { s.outputTokens, s.haveOutputTokens = n, true })
 }
 
-// SetInputTokens records the prompt token count and how much of it the upstream
-// served from its prompt cache.
+// SetInputTokens records the prompt token counts under Anthropic semantics:
+// uncached is the part of the prompt billed at full price and cached is the
+// part the upstream served from its prompt cache, so the whole prompt is their
+// sum. Every leg reports this way — the Codex leg subtracts the cached count
+// out of the inclusive figure Responses gives it (see stream.mapUsage) — so
+// the logged input_tokens and cache_read_input_tokens add up the same way a
+// Claude Code transcript's do.
 //
-// Both go on the request line because the RATIO is the diagnostic: a cached
-// count that stays flat while a conversation's input grows is what a broken
-// prompt-cache prefix looks like, and it is otherwise invisible until the
-// quota runs out.
-func (s *Summary) SetInputTokens(total, cached int) {
-	s.set(func() { s.inputTokens, s.cachedTokens, s.haveInputTokens = total, cached, true })
+// Both go on the request line because the RATIO is the diagnostic: the hit
+// rate is cached / (uncached + cached), and a cached count that stays flat
+// while a conversation's uncached count grows is what a broken prompt-cache
+// prefix looks like. It is otherwise invisible until the quota runs out.
+func (s *Summary) SetInputTokens(uncached, cached int) {
+	s.set(func() { s.inputTokens, s.cachedTokens, s.haveInputTokens = uncached, cached, true })
 }
 
 // SetStopReason records the Anthropic stop_reason the answer terminated with.

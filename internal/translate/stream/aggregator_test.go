@@ -102,11 +102,22 @@ func TestAggregatorFoldsCleanFixtures(t *testing.T) {
 				`"stop_reason":"tool_use","stop_sequence":null,"usage":{"input_tokens":7,"output_tokens":2}}`,
 		},
 		{
+			// Anthropic semantics: input_tokens is the UNCACHED part of the
+			// 1000-token prompt, not the inclusive count Responses reported.
 			"usage_cached_tokens",
 			`{"id":"msg_codex_resp_test","type":"message","role":"assistant","model":"gpt-5.6-sol",` +
 				`"content":[{"type":"text","text":"Reusing the cached prompt."}],` +
 				`"stop_reason":"end_turn","stop_sequence":null,` +
-				`"usage":{"input_tokens":1000,"output_tokens":20,"cache_read_input_tokens":800}}`,
+				`"usage":{"input_tokens":200,"output_tokens":20,"cache_read_input_tokens":800}}`,
+		},
+		{
+			// A fully cached prompt is a true zero, not a missing count: the fold
+			// must not swap in the message_start estimate (7) for it.
+			"usage_fully_cached",
+			`{"id":"msg_codex_resp_test","type":"message","role":"assistant","model":"gpt-5.6-sol",` +
+				`"content":[{"type":"text","text":"Every prompt token was cached."}],` +
+				`"stop_reason":"end_turn","stop_sequence":null,` +
+				`"usage":{"input_tokens":0,"output_tokens":20,"cache_read_input_tokens":1000}}`,
 		},
 	}
 	for _, c := range cases {
