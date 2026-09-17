@@ -214,3 +214,27 @@ func TestSafePath(t *testing.T) {
 		t.Errorf("SafePath = %q, want the query dropped", got)
 	}
 }
+
+// TestSummaryTokenFields pins the request-line token fields: the pair that
+// follows Anthropic semantics, and the locally counted seed beside them so the
+// lower-bound invariant (estimated <= input + cache_read) can be read off one
+// line. Each is absent until set, and a negative seed is refused rather than
+// logged.
+func TestSummaryTokenFields(t *testing.T) {
+	sum := obs.NewSummary()
+	if f := sum.Fields(); f["estimated_input_tokens"] != nil || f["input_tokens"] != nil {
+		t.Fatalf("token fields present before being set: %v", f)
+	}
+	sum.SetEstimatedInputTokens(-1)
+	if f := sum.Fields(); f["estimated_input_tokens"] != nil {
+		t.Fatalf("a negative seed was logged: %v", f)
+	}
+	sum.SetInputTokens(11, 8)
+	sum.SetEstimatedInputTokens(17)
+	f := sum.Fields()
+	if f["input_tokens"] != int64(11) || f["cache_read_input_tokens"] != int64(8) || f["estimated_input_tokens"] != int64(17) {
+		t.Errorf("fields = %v", f)
+	}
+	var nilSum *obs.Summary
+	nilSum.SetEstimatedInputTokens(3) // must not panic
+}

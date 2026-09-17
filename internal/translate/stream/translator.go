@@ -107,7 +107,15 @@ type Options struct {
 	// Model is the client-requested model string, echoed in message_start.model.
 	Model string
 	// InputTokens seeds message_start usage.input_tokens (an estimate, or 0).
-	InputTokens int
+	// InputTokensFunc, when set, supplies that seed lazily instead and takes
+	// precedence: it is called at most once per Run, on the first event that
+	// needs the number (message_start, or the terminal usage fallback), so a
+	// caller can start counting the prompt concurrently with the upstream
+	// request and pay for the wait only if the count is slower than the
+	// upstream's first event. It must be safe to call from Run's goroutine and
+	// must return the same value however many times it is called.
+	InputTokens     int
+	InputTokensFunc func() int
 	// EmitReasoning is "thinking" (default) or "drop".
 	EmitReasoning string
 	// OnTruncate is "error" (default) or "finish".
@@ -184,6 +192,7 @@ type Result struct {
 type Translator struct {
 	model           string
 	inputTokens     int
+	inputTokensFunc func() int
 	emitReasoning   string
 	onTruncate      string
 	heartbeat       time.Duration
@@ -206,6 +215,7 @@ type Translator struct {
 	incompleteMaxTokens bool
 	usage               schema.Usage
 	usageSeen           bool
+	seedResolved        bool
 	unknown             map[string]int
 	finalStop           string
 	finalOutputTokens   int
@@ -218,6 +228,7 @@ func New(opts Options) *Translator {
 	t := &Translator{
 		model:           opts.Model,
 		inputTokens:     opts.InputTokens,
+		inputTokensFunc: opts.InputTokensFunc,
 		emitReasoning:   opts.EmitReasoning,
 		onTruncate:      opts.OnTruncate,
 		heartbeat:       opts.Heartbeat,
@@ -264,6 +275,7 @@ func (t *Translator) reset() {
 	t.incompleteMaxTokens = false
 	t.usage = schema.Usage{}
 	t.usageSeen = false
+	t.seedResolved = false
 	t.unknown = make(map[string]int)
 	t.finalStop = ""
 	t.finalOutputTokens = 0
@@ -763,9 +775,21 @@ func (t *Translator) recordUsage(u *cschema.Usage) {
 func (t *Translator) terminalUsage() schema.Usage {
 	u := t.usage
 	if !t.usageSeen || promptTokens(u) == 0 {
-		u.InputTokens = t.inputTokens
+		u.InputTokens = t.seed()
 	}
 	return u
+}
+
+// seed is the message_start input-token estimate. A lazily supplied seed is
+// resolved on first use and then held for the rest of the Run, so message_start
+// and a terminal fallback report the same number, and the caller's count is
+// awaited only once and only if an event actually needs it.
+func (t *Translator) seed() int {
+	if t.inputTokensFunc != nil && !t.seedResolved {
+		t.inputTokens = max(0, t.inputTokensFunc())
+		t.seedResolved = true
+	}
+	return t.inputTokens
 }
 
 // promptTokens is the whole prompt under Anthropic semantics: the uncached
@@ -797,7 +821,7 @@ func (t *Translator) ensureStarted(sink Sink) error {
 	return sink.MessageStart(MessageStart{
 		ID:          "msg_codex_" + t.responseID,
 		Model:       t.model,
-		InputTokens: t.inputTokens,
+		InputTokens: t.seed(),
 	})
 }
 

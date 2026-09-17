@@ -117,8 +117,8 @@ type Options struct {
 	OnUnknownEvents func(map[string]int)
 
 	// Estimator counts input tokens for the message_start seed and for
-	// count_tokens. Nil uses tokens.Default().
-	Estimator tokens.Estimator
+	// count_tokens. Nil uses tokens.Codex(), the exact o200k_base count.
+	Estimator tokens.RequestEstimator
 
 	// EmitReasoning is "thinking" (default) or "drop"; OnTruncate is "error"
 	// (default) or "finish". Both are passed through to the Translator.
@@ -151,7 +151,7 @@ type Leg struct {
 	catalogTimeout time.Duration
 	onCatalog      func([]cschema.Model)
 	onUnknown      func(map[string]int)
-	est            tokens.Estimator
+	est            tokens.RequestEstimator
 	emitReasoning  string
 	onTruncate     string
 	summary        string
@@ -186,7 +186,7 @@ func New(opts Options) (*Leg, error) {
 		l.catalogTimeout = DefaultCatalogTimeout
 	}
 	if l.est == nil {
-		l.est = tokens.Default()
+		l.est = tokens.Codex()
 	}
 	if l.log == nil {
 		l.log = slog.New(slog.DiscardHandler)
@@ -228,7 +228,11 @@ func (l *Leg) Messages(w http.ResponseWriter, r *http.Request, rq *router.Reques
 	}
 	logTranslation(ctx, log, rq, meta)
 
-	inputTokens := l.est.EstimatePrompt(tokens.PromptFromMessages(&req))
+	// The message_start seed is counted on its own goroutine, from the request
+	// exactly as it goes upstream, so a 200k-token prompt never delays sending
+	// it: the translator asks for the number only when it needs it, and waits
+	// only if the count is slower than the upstream's first event.
+	seed := startSeed(l.est, creq, log)
 
 	// The resolved effort belongs on the request line: "why did this answer
 	// take so long" is usually answered by the effort, not the model.
@@ -255,17 +259,23 @@ func (l *Leg) Messages(w http.ResponseWriter, r *http.Request, rq *router.Reques
 	upstream = trace.TeeUpstream(upstream)
 
 	if rq.Stream {
-		return l.serveStream(ctx, w, rq, upstream, inputTokens, log)
+		return l.serveStream(ctx, w, rq, upstream, seed, log)
 	}
-	return l.serveAggregate(ctx, w, rq, upstream, inputTokens, log)
+	return l.serveAggregate(ctx, w, rq, upstream, seed, log)
 }
 
 // CountTokens serves POST /v1/messages/count_tokens for a codex-routed model.
 //
 // The Codex backend exposes no token-counting endpoint, and asking it would
-// spend a real inference request, so this is answered locally from the
-// estimator. It is documented as an estimate (see internal/tokens); it drives
-// the client's context bar, never anything billing-shaped.
+// spend a real inference request, so this is answered locally. The request is
+// run through the same translation a real turn would get and the RESULT is
+// counted, so the number reflects what would actually go upstream — the
+// billing header dropped, thinking text replaced by its encrypted replay, and
+// so on — rather than the Anthropic-shaped body the client sent. It is a
+// lower bound by design (see internal/tokens): it drives the client's context
+// bar, never anything billing-shaped, and a bar that reads a few percent low
+// in a reasoning-heavy session is the accepted cost of a seed that never
+// overshoots.
 func (l *Leg) CountTokens(w http.ResponseWriter, r *http.Request, rq *router.Request) error {
 	markRoute(w.Header(), rq)
 
@@ -275,13 +285,26 @@ func (l *Leg) CountTokens(w http.ResponseWriter, r *http.Request, rq *router.Req
 			"request body is not a valid count_tokens request")
 	}
 
-	body, err := json.Marshal(tokens.Count(l.est, &req))
+	// No catalog lookup: it needs a credential, and effort clamping does not
+	// change a single prompt token.
+	creq, _, err := request.Translate(&aschema.MessagesRequest{
+		Model:      req.Model,
+		Messages:   req.Messages,
+		System:     req.System,
+		Tools:      req.Tools,
+		ToolChoice: req.ToolChoice,
+	}, rq.Dec, cschema.Model{}, request.Options{Summary: l.summary})
+	if err != nil {
+		return apierr.Wrap(err, apierr.TypeInvalidRequest, "translating the request for the codex backend failed")
+	}
+
+	body, err := json.Marshal(aschema.CountTokensResponse{InputTokens: l.est.EstimateRequest(creq)})
 	if err != nil {
 		return apierr.Wrap(err, apierr.TypeAPI, "encoding the token count failed")
 	}
 	body = append(body, '\n')
 
-	l.logger(rq).LogAttrs(r.Context(), slog.LevelDebug, "codex count_tokens estimated locally",
+	l.logger(rq).LogAttrs(r.Context(), slog.LevelDebug, "codex count_tokens counted locally",
 		slog.String("estimator", l.est.Name()), slog.Int("bytes", len(rq.Raw)))
 
 	h := w.Header()
@@ -299,7 +322,7 @@ func (l *Leg) CountTokens(w http.ResponseWriter, r *http.Request, rq *router.Req
 // sink frame. That is what keeps failure mode 1 available for a 200 whose body
 // turns out to be empty — a status line already on the wire could not be taken
 // back, and an error envelope appended to it would corrupt the stream.
-func (l *Leg) serveStream(ctx context.Context, w http.ResponseWriter, rq *router.Request, upstream io.ReadCloser, inputTokens int, log *slog.Logger) error {
+func (l *Leg) serveStream(ctx context.Context, w http.ResponseWriter, rq *router.Request, upstream io.ReadCloser, seed *seed, log *slog.Logger) error {
 	lw := newLazyWriter(w, func(h http.Header) {
 		h.Set("Content-Type", "text/event-stream")
 		h.Set("Cache-Control", "no-cache")
@@ -315,9 +338,9 @@ func (l *Leg) serveStream(ctx context.Context, w http.ResponseWriter, rq *router
 	// trace records exactly the bytes the client received — including the
 	// heartbeat pings and the frame boundaries, which is where an SSE bug
 	// usually is.
-	tr := stream.New(l.translatorOptions(rq, inputTokens, l.heartbeat, log))
+	tr := stream.New(l.translatorOptions(ctx, rq, seed, l.heartbeat, log))
 	res, err := tr.Run(ctx, upstream, stream.NewSSEWriter(obs.TraceFrom(ctx).TeeDownstream(lw)))
-	l.logResult(ctx, log, rq, res)
+	l.logResult(ctx, log, rq, res, seed)
 
 	if err == nil {
 		return nil
@@ -336,12 +359,12 @@ func (l *Leg) serveStream(ctx context.Context, w http.ResponseWriter, rq *router
 // Nothing is written until the fold succeeds, so every failure — including a
 // mid-stream one — reaches the client as a real HTTP status rather than as a
 // truncated answer dressed up as a complete one.
-func (l *Leg) serveAggregate(ctx context.Context, w http.ResponseWriter, rq *router.Request, upstream io.ReadCloser, inputTokens int, log *slog.Logger) error {
+func (l *Leg) serveAggregate(ctx context.Context, w http.ResponseWriter, rq *router.Request, upstream io.ReadCloser, seed *seed, log *slog.Logger) error {
 	agg := stream.NewAggregator()
 	// A keepalive has no meaning when nothing is on the wire yet.
-	tr := stream.New(l.translatorOptions(rq, inputTokens, -1, log))
+	tr := stream.New(l.translatorOptions(ctx, rq, seed, -1, log))
 	res, err := tr.Run(ctx, upstream, agg)
-	l.logResult(ctx, log, rq, res)
+	l.logResult(ctx, log, rq, res, seed)
 	if err != nil {
 		return l.renderStartFailure(ctx, w, log, err)
 	}
@@ -366,7 +389,7 @@ func (l *Leg) serveAggregate(ctx context.Context, w http.ResponseWriter, rq *rou
 // translatorOptions builds the Translator configuration shared by both sinks, so
 // the streaming and non-streaming paths cannot be configured differently by
 // accident.
-func (l *Leg) translatorOptions(rq *router.Request, inputTokens int, heartbeat time.Duration, log *slog.Logger) stream.Options {
+func (l *Leg) translatorOptions(ctx context.Context, rq *router.Request, seed *seed, heartbeat time.Duration, log *slog.Logger) stream.Options {
 	return stream.Options{
 		// Echo the upstream slug utraque actually called, not the model string
 		// the caller wrote. Claude Code (verified against 2.1.241) does not match
@@ -376,13 +399,13 @@ func (l *Leg) translatorOptions(rq *router.Request, inputTokens int, heartbeat t
 		// has to price. The reasoning effort is deliberately left off: it is not
 		// part of the model's identity, and the client does not record it for
 		// Anthropic models either.
-		Model:         upstreamModel(rq),
-		InputTokens:   inputTokens,
-		EmitReasoning: l.emitReasoning,
-		OnTruncate:    l.onTruncate,
-		Heartbeat:     heartbeat,
-		UpstreamIdle:  l.upstreamIdle,
-		Logger:        log,
+		Model:           upstreamModel(rq),
+		InputTokensFunc: func() int { return seed.Value(ctx) },
+		EmitReasoning:   l.emitReasoning,
+		OnTruncate:      l.onTruncate,
+		Heartbeat:       heartbeat,
+		UpstreamIdle:    l.upstreamIdle,
+		Logger:          log,
 	}
 }
 
@@ -537,12 +560,22 @@ func (l *Leg) logger(rq *router.Request) *slog.Logger {
 // How the answer ended — the stop reason and the completion size — goes on the
 // request line rather than a second log line of its own, so one request stays
 // one record.
-func (l *Leg) logResult(ctx context.Context, log *slog.Logger, rq *router.Request, res stream.Result) {
+func (l *Leg) logResult(ctx context.Context, log *slog.Logger, rq *router.Request, res stream.Result, seed *seed) {
 	if sum := obs.SummaryFrom(ctx); sum != nil {
 		sum.SetStopReason(res.StopReason)
 		if res.Terminated && !res.Errored {
 			sum.SetOutputTokens(res.OutputTokens)
 			sum.SetInputTokens(res.InputTokens, res.CachedInputTokens)
+		}
+		// The seed goes beside the real counts so the lower-bound invariant
+		// (estimated <= input + cache_read) can be checked from the log. Once
+		// message_start went out the count is already resolved; before that
+		// the request failed, and a failed request is not held up for a number
+		// nothing will compare against.
+		if res.Started {
+			sum.SetEstimatedInputTokens(seed.Value(ctx))
+		} else if n, ok := seed.Peek(); ok {
+			sum.SetEstimatedInputTokens(n)
 		}
 	}
 
@@ -599,6 +632,75 @@ func logTranslation(ctx context.Context, log *slog.Logger, rq *router.Request, m
 		attrs = append(attrs, slog.Any("dropped_patterns", meta.DroppedPatterns))
 	}
 	log.LogAttrs(ctx, slog.LevelDebug, "translated a Messages request for the codex backend", attrs...)
+}
+
+// seed is the message_start input-token estimate, counted on its own goroutine
+// so that tokenizing the prompt never sits between translating the request and
+// sending it upstream. The translator takes Value as its lazy seed and calls
+// it on the first event that needs the number; by then the upstream has
+// usually spent far longer thinking than the count took.
+//
+// The count is bounded — internal/tokens caps the work per field at a small
+// multiple of its length — so the wait is short even on a hostile prompt,
+// and it is also cancellable: a request whose context ends while the count
+// is still running takes 0 rather than waiting, so a client that has gone
+// away never holds the translator (and its idle timer) on a number nobody
+// will read. The goroutine itself runs to completion; its per-field results
+// are memoized, so a retry of the same prompt gets them for free.
+type seed struct {
+	done chan struct{}
+	n    int
+}
+
+// startSeed begins counting creq. creq is read concurrently by the responses
+// client, which only marshals it; nothing writes to it after translation.
+//
+// A panic on a helper goroutine would take the whole process down, where the
+// same panic on the request goroutine is recovered by net/http, so it is
+// recovered here and reported as a zero seed: a missing estimate is a blemish
+// on one message_start, a crash is every session on the machine.
+func startSeed(est tokens.RequestEstimator, creq *cschema.ResponsesRequest, log *slog.Logger) *seed {
+	s := &seed{done: make(chan struct{})}
+	go func() {
+		defer close(s.done)
+		defer func() {
+			if r := recover(); r != nil {
+				s.n = 0
+				log.LogAttrs(context.Background(), slog.LevelError,
+					"input token count panicked; seeding message_start with 0",
+					slog.String("estimator", est.Name()), slog.Any("panic", r))
+			}
+		}()
+		s.n = est.EstimateRequest(creq)
+	}()
+	return s
+}
+
+// Value waits for the count, or for ctx to end, whichever is first; a
+// finished count wins over a finished context, so a request that completed
+// normally always logs its real seed.
+func (s *seed) Value(ctx context.Context) int {
+	select {
+	case <-s.done:
+		return s.n
+	default:
+	}
+	select {
+	case <-s.done:
+		return s.n
+	case <-ctx.Done():
+		return 0
+	}
+}
+
+// Peek returns the count if it is ready, without waiting.
+func (s *seed) Peek() (int, bool) {
+	select {
+	case <-s.done:
+		return s.n, true
+	default:
+		return 0, false
+	}
 }
 
 // markRoute stamps the debug headers. They are set before anything is written so

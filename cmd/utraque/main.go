@@ -324,7 +324,7 @@ func newApp(cfg config.Config, log *slog.Logger, activity server.ActivityTracker
 		Catalog:         cat,
 		OnCatalog:       loadAliases,
 		OnUnknownEvents: obsv.observeUnknownEvents,
-		Estimator:       tokens.Default(),
+		Estimator:       tokens.Codex(),
 		UpstreamIdle:    cfg.Limits.UpstreamIdleTimeout,
 		Logger:          log,
 	}

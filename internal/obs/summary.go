@@ -33,18 +33,20 @@ type Summary struct {
 	stopReason    string
 	err           string
 
-	reqBytes       int64
-	upstreamStatus int
-	outputTokens   int
-	inputTokens    int
-	cachedTokens   int
+	reqBytes        int64
+	upstreamStatus  int
+	outputTokens    int
+	inputTokens     int
+	cachedTokens    int
+	estimatedTokens int
 
 	stream      bool
 	interrupted bool
 
-	haveReqBytes     bool
-	haveOutputTokens bool
-	haveInputTokens  bool
+	haveReqBytes        bool
+	haveOutputTokens    bool
+	haveInputTokens     bool
+	haveEstimatedTokens bool
 }
 
 // NewSummary builds an empty Summary.
@@ -131,6 +133,20 @@ func (s *Summary) SetInputTokens(uncached, cached int) {
 	s.set(func() { s.inputTokens, s.cachedTokens, s.haveInputTokens = uncached, cached, true })
 }
 
+// SetEstimatedInputTokens records the prompt token count utraque computed
+// locally and seeded into message_start before the upstream reported the real
+// usage. It is logged beside the real counts because the seed is designed to
+// be a LOWER BOUND of the billed prompt (see internal/tokens): the invariant
+// to monitor is estimated_input_tokens <= input_tokens +
+// cache_read_input_tokens, and a line that breaks it is a line on which
+// ccusage's per-message dedup could have kept the seed instead of the truth.
+func (s *Summary) SetEstimatedInputTokens(n int) {
+	if n < 0 {
+		return
+	}
+	s.set(func() { s.estimatedTokens, s.haveEstimatedTokens = n, true })
+}
+
 // SetStopReason records the Anthropic stop_reason the answer terminated with.
 func (s *Summary) SetStopReason(reason string) { s.set(func() { s.stopReason = reason }) }
 
@@ -172,7 +188,7 @@ func (s *Summary) Attrs() []slog.Attr {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	attrs := make([]slog.Attr, 0, 12)
+	attrs := make([]slog.Attr, 0, 16)
 	str := func(k, v string) {
 		if v != "" {
 			attrs = append(attrs, slog.String(k, v))
@@ -195,6 +211,9 @@ func (s *Summary) Attrs() []slog.Attr {
 	if s.haveInputTokens {
 		attrs = append(attrs, slog.Int("input_tokens", s.inputTokens))
 		attrs = append(attrs, slog.Int("cache_read_input_tokens", s.cachedTokens))
+	}
+	if s.haveEstimatedTokens {
+		attrs = append(attrs, slog.Int("estimated_input_tokens", s.estimatedTokens))
 	}
 	str("stop_reason", s.stopReason)
 	attrs = append(attrs, slog.Bool("interrupted", s.interrupted))

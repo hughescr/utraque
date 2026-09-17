@@ -33,7 +33,9 @@ yet been included in the live-backend tripwire.
   Anthropic-shaped SSE — or as a single `MessagesResponse` when the client sends
   `stream:false` — billed against your Codex subscription. `GET /v1/models`
   serves the merged picker catalog, and `POST /v1/messages/count_tokens` is
-  answered locally for GPT-routed models.
+  answered locally for GPT-routed models with the real o200k_base tokenizer
+  (compiled in; nothing is downloaded), counting the request as it would go
+  upstream — see *Token counts and the message_start seed*.
 - **DeepSeek leg.** Uses DeepSeek's documented Anthropic-compatible endpoint
   with a separately configured API key. It accepts only documented model names,
   canonicalizes retired Flash aliases to `deepseek-flash`, and never forwards
@@ -471,7 +473,8 @@ One structured line per request, on stderr (launchd captures it), carrying
 `request_id`, `method`, `path`, `status`, `req_bytes`, `resp_bytes`, `ttfb_ms`,
 `total_ms`, `route`, `client_model`, `upstream_model`, `effort`, `stream`,
 `upstream_status`, `output_tokens`, `input_tokens`, `cache_read_input_tokens`,
-`stop_reason`, `interrupted`, `transport`, and `err` when there was one.
+`estimated_input_tokens`, `stop_reason`, `interrupted`, `transport`, and `err`
+when there was one.
 
 Two of those fields earn their place by being *differences*. `upstream_status`
 is the status the BACKEND gave, which is not always the one you were answered
@@ -493,6 +496,13 @@ conversation grows and `input_tokens` stays small. A cached count that stays
 FLAT while `input_tokens` climbs means the replayed history has stopped matching
 what the model saw, and every turn is paying full price for the whole
 conversation — see *Prompt caching*.
+
+`estimated_input_tokens` is the prompt count utraque computed locally and
+seeded into `message_start` before the backend reported the real usage. It is
+designed to be a lower bound of the billed prompt, so the invariant to watch is
+`estimated_input_tokens <= input_tokens + cache_read_input_tokens`; a line that
+breaks it is one on which ccusage's per-message dedup could have kept the seed
+instead of the truth — see *Token counts and the message_start seed*.
 
 **Redaction is by allowlist.** Exactly four request headers may be logged with
 their values — `anthropic-version`, `anthropic-beta`, `content-type`,
@@ -593,6 +603,67 @@ exactly as Claude Code wrote it.
 name the same conversation. The Codex CLI sends one, the backend is
 undocumented, and a request must never claim one identity in the header and a
 different one in the body.
+
+## Token counts and the message_start seed
+
+Two numbers on the Codex leg are computed locally rather than reported by the
+backend: the `usage.input_tokens` seeded into `message_start` before the
+upstream has said anything, and the answer to `POST /v1/messages/count_tokens`,
+which the Codex API does not offer and which drives Claude Code's context bar.
+Both come from the real GPT tokenizer, o200k_base, compiled into the binary
+(the vocabulary is embedded Go source; nothing is fetched at runtime).
+
+**Why the seed must be a lower bound.** Claude Code writes one transcript line
+per content block, all sharing one `message.id`. The first line carries the
+`message_start` seed; the last carries the real usage from `message_delta`.
+ccusage dedups lines sharing an id by keeping the one with the LARGER total
+(`input + cache_create + cache_read + output`). A seed that overshoots the real
+prompt by more than the answer's size therefore wins the dedup, and that turn's
+cache reads and output vanish from the report. (The previous chars/4 estimate
+did exactly this on short-answer turns.) So the seed is counted to stay at or
+below what the backend bills:
+
+- **Only text that actually goes upstream is counted** — the instructions,
+  each message part, each function call's name and arguments, each function
+  result, each tool's name, description and the prose inside its parameter
+  schema (property names, descriptions, enum values, types; never the JSON
+  punctuation or schema keywords, which the backend does not show the model).
+  It is counted from the request AFTER translation, so the dropped billing
+  header, dropped thinking text and the rest are already gone.
+- **Each field is tokenized separately and the counts summed.** The backend
+  frames every field in its own turn or declaration, so a per-field count is
+  the faithful model.
+- **No framing overheads are added.** The backend adds its own — role and turn
+  markers, tool namespace syntax, a hidden preamble — and guessing at them
+  could only push the count over.
+- **Opaque blobs are skipped.** Encrypted reasoning items, image data URLs,
+  anything base64: tokenizing ciphertext would overshoot wildly, and the
+  backend counts the real content utraque cannot see.
+
+**The consequence.** The count is knowingly low, and in one case low by a lot:
+a session with heavy reasoning replay carries thousands of reasoning tokens
+per turn inside the encrypted items, so `count_tokens` — and the context bar
+it drives — reads a few percent low in such sessions. That is accepted. A low
+bar is harmless; a seed that wins the dedup is not.
+
+**Cost.** The count runs concurrently with the upstream request, never ahead
+of it: `message_start` waits for it only if the tokenizer is slower than the
+backend's first event, which on a warm cache it never is, and a request whose
+client has gone away does not wait at all. Per-field counts are memoized in a
+bounded in-process cache keyed by content hash, because an agentic loop
+resends the same history every turn — a 400 KB prompt costs ~35 ms cold and
+~55 µs on the next turn.
+
+The work is bounded per field. The tokenizer library is quadratic in the
+length of one regex piece — an unbroken run of letters, one repeated symbol,
+or a block of blank lines — and a 400 KB run took nearly a minute. So a run
+of one character class 1 KB or longer is never handed to it: the run, widened
+to the nearest guaranteed piece boundaries, is charged the provable floor of
+one token per 128 bytes (the longest o200k token), and everything else is
+counted exactly. Ordinary prose, code and JSON never contain such a run; for
+the rare field that does, the count reads low, which is the accepted
+direction. A 400 KB field of such runs counts in ~250 ms at worst, and a
+single 400 KB run in under a millisecond.
 
 ### Testing the round trip without spending quota
 

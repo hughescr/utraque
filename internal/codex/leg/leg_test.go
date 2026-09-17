@@ -2,17 +2,25 @@ package leg
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/hughescr/utraque/internal/apierr"
 	"github.com/hughescr/utraque/internal/codex/auth"
 	cschema "github.com/hughescr/utraque/internal/codex/schema"
+	"github.com/hughescr/utraque/internal/obs"
 	"github.com/hughescr/utraque/internal/router"
+	"github.com/hughescr/utraque/internal/tokens"
 	"github.com/hughescr/utraque/internal/translate/stream"
 )
 
@@ -252,5 +260,222 @@ func TestUpstreamModelEchoesTheResolvedSlug(t *testing.T) {
 				t.Errorf("upstreamModel = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// stubCreds hands out a fixed credential; it never reads a file.
+type stubCreds struct{}
+
+func (stubCreds) Get(context.Context) (auth.Credential, error) { return auth.Credential{}, nil }
+func (stubCreds) Invalidate(auth.Credential)                   {}
+
+// signalStreamer is a stubStreamer that announces the moment the upstream
+// request is sent, so a test can order it against other work.
+type signalStreamer struct {
+	stubStreamer
+	sent chan struct{}
+	once sync.Once
+}
+
+func (s *signalStreamer) StreamWithRefresh(ctx context.Context, src auth.CredentialSource, req *cschema.ResponsesRequest) (io.ReadCloser, error) {
+	s.once.Do(func() { close(s.sent) })
+	return s.stubStreamer.StreamWithRefresh(ctx, src, req)
+}
+
+// gatedEstimator blocks every count until released, standing in for a
+// tokenizer that is slower than the upstream.
+type gatedEstimator struct {
+	release chan struct{}
+	n       int
+	calls   atomic.Int32
+}
+
+func (g *gatedEstimator) EstimateString(string) int { return g.n }
+func (g *gatedEstimator) Name() string              { return "gated" }
+func (g *gatedEstimator) EstimateRequest(*cschema.ResponsesRequest) int {
+	g.calls.Add(1)
+	<-g.release
+	return g.n
+}
+
+func textOnlyFixture(t *testing.T) string {
+	t.Helper()
+	raw, err := os.ReadFile("../../../testdata/streams/text_only.codex.sse")
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	return string(raw)
+}
+
+// TestSeedDoesNotDelayTheUpstreamRequest is the performance contract of the
+// message_start seed: the upstream request goes out BEFORE the prompt count
+// finishes, the count is asked for exactly once, message_start carries it, the
+// terminal usage carries the upstream's own number, and the request line
+// records the seed beside it.
+func TestSeedDoesNotDelayTheUpstreamRequest(t *testing.T) {
+	for _, streaming := range []bool{true, false} {
+		t.Run(map[bool]string{true: "stream", false: "aggregate"}[streaming], func(t *testing.T) {
+			st := &signalStreamer{stubStreamer: stubStreamer{body: textOnlyFixture(t)}, sent: make(chan struct{})}
+			est := &gatedEstimator{release: make(chan struct{}), n: 4242}
+			l, err := New(Options{Client: st, Credentials: stubCreds{}, Estimator: est, Heartbeat: -1, UpstreamIdle: -1})
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+
+			sum := obs.NewSummary()
+			w := httptest.NewRecorder()
+			r := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+			r = r.WithContext(obs.WithSummary(r.Context(), sum))
+			rq := &router.Request{
+				Raw:    []byte(`{"model":"sol","max_tokens":8,"stream":` + strconv.FormatBool(streaming) + `,"messages":[{"role":"user","content":"hello"}]}`),
+				Model:  "sol",
+				Stream: streaming,
+				Dec:    router.Decision{Backend: router.BackendCodex, ClientModel: "sol", UpstreamModel: "gpt-5.6-sol"},
+			}
+
+			done := make(chan error, 1)
+			go func() { done <- l.Messages(w, r, rq) }()
+
+			// The upstream request must be sent while the count is still
+			// blocked.
+			select {
+			case <-st.sent:
+			case err := <-done:
+				t.Fatalf("Messages returned (%v) before the upstream request was sent", err)
+			case <-time.After(5 * time.Second):
+				t.Fatal("the upstream request was not sent while the estimator was blocked")
+			}
+			// And the response cannot complete until the count arrives,
+			// because message_start needs it.
+			select {
+			case err := <-done:
+				t.Fatalf("Messages returned (%v) before the seed was available", err)
+			case <-time.After(50 * time.Millisecond):
+			}
+
+			close(est.release)
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatalf("Messages: %v", err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("Messages did not return after the seed was released")
+			}
+
+			if got := est.calls.Load(); got != 1 {
+				t.Errorf("the estimator was asked %d times, want 1", got)
+			}
+			body := w.Body.String()
+			if streaming {
+				if !strings.Contains(body, `"usage":{"input_tokens":4242,"output_tokens":0}`) {
+					t.Errorf("message_start does not carry the seed:\n%s", body)
+				}
+				if !strings.Contains(body, `"usage":{"input_tokens":7,"output_tokens":3}`) {
+					t.Errorf("message_delta does not carry the upstream's usage:\n%s", body)
+				}
+			} else if !strings.Contains(body, `"usage":{"input_tokens":7,"output_tokens":3}`) {
+				t.Errorf("the folded message does not carry the upstream's usage:\n%s", body)
+			}
+			fields := sum.Fields()
+			if got := fields["estimated_input_tokens"]; got != int64(4242) {
+				t.Errorf("estimated_input_tokens = %v (%T), want 4242", got, got)
+			}
+			if got := fields["input_tokens"]; got != int64(7) {
+				t.Errorf("input_tokens = %v, want 7", got)
+			}
+		})
+	}
+}
+
+// TestSeedWaitEndsWithTheRequest: a request whose context ends while the
+// count is still running does not wait for it. The upstream has answered,
+// message_start needs the seed, the client is gone — the translator must be
+// free to notice, not parked on the tokenizer. The count goroutine finishes
+// on its own afterwards.
+func TestSeedWaitEndsWithTheRequest(t *testing.T) {
+	st := &signalStreamer{stubStreamer: stubStreamer{body: textOnlyFixture(t)}, sent: make(chan struct{})}
+	est := &gatedEstimator{release: make(chan struct{}), n: 4242}
+	l, err := New(Options{Client: st, Credentials: stubCreds{}, Estimator: est, Heartbeat: -1, UpstreamIdle: -1})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodPost, "/v1/messages", nil).WithContext(ctx)
+	rq := &router.Request{
+		Raw:    []byte(`{"model":"sol","max_tokens":8,"stream":true,"messages":[{"role":"user","content":"hello"}]}`),
+		Model:  "sol",
+		Stream: true,
+		Dec:    router.Decision{Backend: router.BackendCodex, ClientModel: "sol", UpstreamModel: "gpt-5.6-sol"},
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- l.Messages(w, r, rq) }()
+	select {
+	case <-st.sent:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the upstream request was not sent")
+	}
+	// Let the translator reach message_start and block on the gated count
+	// (the body is already in hand), then end the request instead.
+	select {
+	case err := <-done:
+		t.Fatalf("Messages returned (%v) with the count still gated", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Messages waited on the count after its context ended")
+	}
+	if got := est.calls.Load(); got != 1 {
+		t.Errorf("the estimator was started %d times, want 1", got)
+	}
+	close(est.release)
+}
+
+// TestCountTokensCountsTheTranslatedRequest: count_tokens is answered from the
+// request as it would go upstream, not from the Anthropic body. Thinking text
+// is the visible difference — the translator drops it (it is replaced by the
+// encrypted replay item, or nothing), so it must not be counted — and the
+// number must be the exact tokenizer's, which the Name on the leg confirms.
+func TestCountTokensCountsTheTranslatedRequest(t *testing.T) {
+	l, err := New(Options{Client: &stubStreamer{}})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if got := l.est.Name(); got != tokens.O200kName {
+		t.Fatalf("default estimator = %q, want %q", got, tokens.O200kName)
+	}
+	count := func(t *testing.T, raw string) int {
+		t.Helper()
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest(http.MethodPost, "/v1/messages/count_tokens", nil)
+		rq := &router.Request{Raw: []byte(raw), Model: "sol",
+			Dec: router.Decision{Backend: router.BackendCodex, ClientModel: "sol", UpstreamModel: "gpt-5.6-sol"}}
+		if err := l.CountTokens(w, r, rq); err != nil {
+			t.Fatalf("CountTokens: %v", err)
+		}
+		var out struct {
+			InputTokens int `json:"input_tokens"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+			t.Fatalf("body %q: %v", w.Body.String(), err)
+		}
+		return out.InputTokens
+	}
+
+	plain := count(t, `{"model":"sol","system":"Be terse.","messages":[{"role":"user","content":"hello world"}]}`)
+	if want := l.est.EstimateString("Be terse.") + l.est.EstimateString("hello world"); plain != want {
+		t.Errorf("count = %d, want the per-field sum %d", plain, want)
+	}
+	withThinking := count(t, `{"model":"sol","system":"Be terse.","messages":[`+
+		`{"role":"user","content":"hello world"},`+
+		`{"role":"assistant","content":[{"type":"thinking","thinking":"`+strings.Repeat("deep thoughts about the port number ", 50)+`","signature":"nope"}]}]}`)
+	if withThinking != plain {
+		t.Errorf("unreplayable thinking text was counted: %d vs %d", withThinking, plain)
 	}
 }

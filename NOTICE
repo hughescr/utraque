@@ -30,3 +30,46 @@ they blazed.
   * openai/codex (codex-rs)
     https://github.com/openai/codex
     License: Apache License, Version 2.0
+
+------------------------------------------------------------------------------
+
+Embedded data
+
+The Codex leg counts prompt tokens with OpenAI's o200k_base encoding. The
+vocabulary is compiled into the utraque binary through the module below,
+which carries it as generated Go source; nothing is downloaded at runtime.
+It is called out here, unlike ordinary library dependencies, because the
+binary redistributes that data.
+
+  * tiktoken-go/tokenizer
+    https://github.com/tiktoken-go/tokenizer
+    License: MIT
+    Copyright (c) 2023 tiktoken-go
+
+  * dlclark/regexp2 (the tokenizer's regular-expression engine)
+    https://github.com/dlclark/regexp2
+    License: MIT
+    Copyright (c) Doug Clark
+
+Both are distributed under the MIT License, whose terms require that the
+copyright notices above and the following permission notice accompany
+every copy or substantial portion of the software:
+
+    Permission is hereby granted, free of charge, to any person obtaining
+    a copy of this software and associated documentation files (the
+    "Software"), to deal in the Software without restriction, including
+    without limitation the rights to use, copy, modify, merge, publish,
+    distribute, sublicense, and/or sell copies of the Software, and to
+    permit persons to whom the Software is furnished to do so, subject to
+    the following conditions:
+
+    The above copyright notice and this permission notice shall be
+    included in all copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+    EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+    MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+    IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+    CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+    TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.

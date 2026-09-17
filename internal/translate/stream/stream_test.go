@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1108,5 +1109,68 @@ func TestUpstreamFailureBeforeMessageStartIs502(t *testing.T) {
 				t.Errorf("message = %q, want the upstream's own reason", ae.Message)
 			}
 		})
+	}
+}
+
+// TestLazySeedIsResolvedOnceAndSharedByBothSinks pins the InputTokensFunc
+// contract: it is called at most once per Run, on the first event that needs
+// the number, it wins over a static InputTokens, and the value it produces
+// reaches message_start AND the terminal-usage fallback identically on the
+// streaming and the non-streaming sinks — including the case where the seed
+// is the only prompt count the stream ever gets.
+func TestLazySeedIsResolvedOnceAndSharedByBothSinks(t *testing.T) {
+	// No usage block on the terminus, so the seed is also the terminal count.
+	input := sseFrame("response.created", `{"type":"response.created","response":{"id":"resp_test"}}`) +
+		sseFrame("response.content_part.added",
+			`{"type":"response.content_part.added","output_index":0,"part":{"type":"output_text"}}`) +
+		sseFrame("response.output_text.delta",
+			`{"type":"response.output_text.delta","output_index":0,"delta":"hi"}`) +
+		sseFrame("response.output_text.done",
+			`{"type":"response.output_text.done","output_index":0,"text":"hi"}`) +
+		sseFrame("response.completed", `{"type":"response.completed","response":{"id":"resp_test","status":"completed"}}`)
+
+	var calls atomic.Int32
+	opts := goldenOptions() // InputTokens: 7, which the func must override
+	opts.InputTokensFunc = func() int { calls.Add(1); return 4242 }
+
+	wire, _, err := runToBytes(t, []byte(input), opts)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	checkGrammar(t, wire)
+	if !strings.Contains(string(wire), `"usage":{"input_tokens":4242,"output_tokens":0}`) {
+		t.Errorf("message_start did not carry the lazy seed:\n%s", wire)
+	}
+	if !strings.Contains(string(wire), `"usage":{"input_tokens":4242`) || strings.Contains(string(wire), `"input_tokens":7`) {
+		t.Errorf("the terminal usage did not fall back to the lazy seed:\n%s", wire)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Errorf("InputTokensFunc was called %d times in one Run, want exactly 1", got)
+	}
+
+	folded, err := aggregateFixture(t, []byte(input), opts)
+	if err != nil {
+		t.Fatalf("fold: %v", err)
+	}
+	if !strings.Contains(string(folded), `"usage":{"input_tokens":4242`) {
+		t.Errorf("the folded message disagrees with the stream:\n%s", folded)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Errorf("InputTokensFunc was called %d times across two Runs, want exactly 2", got)
+	}
+}
+
+// TestLazySeedIsNotAskedForBeforeItIsNeeded: a stream that fails before
+// message_start never touches the seed, so a request that dies on its first
+// event is not held up waiting for a prompt count nothing will report.
+// (response.created itself emits message_start, so the seed IS needed on a
+// healthy stream's first event; only a stream that never starts skips it.)
+func TestLazySeedIsNotAskedForBeforeItIsNeeded(t *testing.T) {
+	input := sseFrame("error", `{"type":"error","code":"server_error","message":"boom"}`)
+	opts := goldenOptions()
+	opts.InputTokensFunc = func() int { t.Error("InputTokensFunc called on a stream that never started"); return 0 }
+	_, res, err := runToBytes(t, []byte(input), opts)
+	if err == nil || res.Started {
+		t.Fatalf("expected a mode-1 failure with nothing started, got err=%v res=%+v", err, res)
 	}
 }
