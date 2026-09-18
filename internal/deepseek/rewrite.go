@@ -9,28 +9,39 @@ import (
 	"github.com/hughescr/utraque/internal/anthropic/schema"
 	"github.com/hughescr/utraque/internal/apierr"
 	"github.com/hughescr/utraque/internal/sse"
+	"github.com/hughescr/utraque/internal/toolschema"
 )
 
 const toolErrorMarker = "[tool error]"
 
-func rewriteRequest(raw []byte, canonical string) ([]byte, error) {
+// rewriteReport records what rewriteRequest changed beyond the model name, so
+// the leg can log it the way the codex leg logs its translation metadata.
+// RewrittenPatterns and DroppedPatterns name tool schema nodes as
+// "<tool>.<json path>" (see internal/toolschema).
+type rewriteReport struct {
+	RewrittenPatterns []string
+	DroppedPatterns   []string
+}
+
+func rewriteRequest(raw []byte, canonical string) ([]byte, rewriteReport, error) {
+	var report rewriteReport
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &obj); err != nil || obj == nil {
-		return nil, apierr.InvalidRequest("deepseek request body must be a JSON object")
+		return nil, report, apierr.InvalidRequest("deepseek request body must be a JSON object")
 	}
-	if err := validateContent(obj, canonical); err != nil {
-		return nil, err
+	if err := validateContent(obj, canonical, &report); err != nil {
+		return nil, report, err
 	}
 	model, _ := json.Marshal(canonical)
 	obj["model"] = model
 	out, err := json.Marshal(obj)
 	if err != nil {
-		return nil, apierr.Wrap(err, apierr.TypeInvalidRequest, "encode deepseek request")
+		return nil, report, apierr.Wrap(err, apierr.TypeInvalidRequest, "encode deepseek request")
 	}
-	return out, nil
+	return out, report, nil
 }
 
-func validateContent(obj map[string]json.RawMessage, canonical string) error {
+func validateContent(obj map[string]json.RawMessage, canonical string, report *rewriteReport) error {
 	toolSchemas := declaredToolSchemas(obj["tools"])
 	referencedTools := make(map[string]struct{})
 	for _, field := range []string{"container", "mcp_servers", "top_k"} {
@@ -96,8 +107,8 @@ func validateContent(obj map[string]json.RawMessage, canonical string) error {
 			obj["messages"] = encoded
 		}
 	}
-	if len(referencedTools) > 0 {
-		rewritten, changed, err := enableReferencedTools(obj["tools"], referencedTools)
+	if present(obj["tools"]) {
+		rewritten, changed, err := rewriteTools(obj["tools"], referencedTools, report)
 		if err != nil {
 			return err
 		}
@@ -126,7 +137,13 @@ func declaredToolSchemas(raw json.RawMessage) map[string]struct{} {
 	return declared
 }
 
-func enableReferencedTools(raw json.RawMessage, referenced map[string]struct{}) (json.RawMessage, bool, error) {
+// rewriteTools makes every tool declaration acceptable to DeepSeek: a tool
+// the conversation discovered through tool_reference loses its defer_loading
+// flag, and each input_schema has its "pattern" keywords translated to the
+// DeepSeek regex dialect (see internal/toolschema). DeepSeek validates every
+// pattern before the model runs, so one rejected pattern would fail the whole
+// request. When nothing needs to change the input bytes are returned as-is.
+func rewriteTools(raw json.RawMessage, referenced map[string]struct{}, report *rewriteReport) (json.RawMessage, bool, error) {
 	var tools []map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &tools); err != nil {
 		return nil, false, apierr.InvalidRequest("deepseek tools must be an array")
@@ -137,12 +154,23 @@ func enableReferencedTools(raw json.RawMessage, referenced map[string]struct{}) 
 		if json.Unmarshal(tool["name"], &name) != nil {
 			continue
 		}
-		if _, ok := referenced[name]; !ok {
+		if _, ok := referenced[name]; ok {
+			if _, ok := tool["defer_loading"]; ok {
+				delete(tool, "defer_loading")
+				changed = true
+			}
+		}
+		schema, res := toolschema.Sanitize(toolschema.DeepSeek, tool["input_schema"])
+		if res.Empty() {
 			continue
 		}
-		if _, ok := tool["defer_loading"]; ok {
-			delete(tool, "defer_loading")
-			changed = true
+		tool["input_schema"] = schema
+		changed = true
+		for _, p := range res.Rewritten {
+			report.RewrittenPatterns = append(report.RewrittenPatterns, name+toolschema.PathSep+p)
+		}
+		for _, p := range res.Dropped {
+			report.DroppedPatterns = append(report.DroppedPatterns, name+toolschema.PathSep+p)
 		}
 	}
 	if !changed {

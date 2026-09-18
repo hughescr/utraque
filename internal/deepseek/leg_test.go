@@ -1,13 +1,16 @@
 package deepseek
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -338,6 +341,140 @@ func TestToolReferencesBecomeTextWhenSchemasRemainAvailable(t *testing.T) {
 				t.Errorf("second discovered tool = %+v", got)
 			}
 		})
+	}
+}
+
+func TestToolSchemaPatternsAreTranslatedForDeepSeek(t *testing.T) {
+	// The fixture is the shape of Claude Code's Artifact tool, whose
+	// file_paths item pattern "^[^\0]*$" DeepSeek rejects as not a regex.
+	artifactSchema, err := os.ReadFile("testdata/artifact_tool_schema.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A tool no dialect needs to touch, so its schema must arrive as sent;
+	// and one whose pattern has no DeepSeek spelling, so it falls back to the
+	// description. Both are deliberately not gofmt-tidy JSON: compaction is
+	// the only change the wire form may show.
+	const readSchema = `{"type":"object","properties":{"file_path":{"type":"string","pattern":"^/"},"limit":{"type":"integer","minimum":1}},"required":["file_path"]}`
+	const quotedSchema = `{"type":"object","properties":{"q":{"type":"string","description":"A literal.","pattern":"\\Qa.b\\E"}}}`
+
+	gotBody := make(chan []byte, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		gotBody <- body
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"msg_1","type":"message","role":"assistant","model":"deepseek-flash","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":8,"output_tokens":1}}`)
+	}))
+	defer upstream.Close()
+
+	var logs bytes.Buffer
+	leg := testLeg(t, upstream.URL)
+	WithLogger(slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))(leg)
+
+	body := `{"model":"deepseek-flash","max_tokens":16,"tools":[` +
+		`{"name":"Artifact","description":"publish a page","input_schema":` + string(artifactSchema) + `},` +
+		`{"name":"Read","description":"read a file","input_schema":` + readSchema + `},` +
+		`{"name":"Quoted","description":"quoted","input_schema":` + quotedSchema + `}],` +
+		`"messages":[{"role":"user","content":"publish it"}]}`
+	if _, err := callLeg(t, leg, "deepseek-flash", body, false, false, nil); err != nil {
+		t.Fatalf("Messages: %v", err)
+	}
+
+	var request struct {
+		Tools []struct {
+			Name        string          `json:"name"`
+			InputSchema json.RawMessage `json:"input_schema"`
+		} `json:"tools"`
+	}
+	raw := <-gotBody
+	if err := json.Unmarshal(raw, &request); err != nil {
+		t.Fatalf("invalid rewritten request: %s", raw)
+	}
+	if len(request.Tools) != 3 {
+		t.Fatalf("tools = %d, want 3", len(request.Tools))
+	}
+
+	// Artifact: exactly one pattern respelled, everything else preserved.
+	var wantArtifact map[string]any
+	if err := json.Unmarshal(artifactSchema, &wantArtifact); err != nil {
+		t.Fatal(err)
+	}
+	items := wantArtifact["properties"].(map[string]any)["file_paths"].(map[string]any)["items"].(map[string]any)
+	if items["pattern"] != `^[^\0]*$` {
+		t.Fatalf("fixture drifted: file_paths.items.pattern = %q", items["pattern"])
+	}
+	items["pattern"] = `^[^\x00]*$`
+	wantArtifactBytes, _ := json.Marshal(wantArtifact)
+	if got := string(request.Tools[0].InputSchema); got != string(wantArtifactBytes) {
+		t.Errorf("Artifact schema on the wire:\n got %s\nwant %s", got, wantArtifactBytes)
+	}
+
+	// Read: byte-identical (compaction aside, and it was already compact).
+	if got := string(request.Tools[1].InputSchema); got != readSchema {
+		t.Errorf("untouched Read schema changed on the wire:\n got %s\nwant %s", got, readSchema)
+	}
+
+	// Quoted: pattern dropped, constraint folded into the description.
+	var quoted map[string]any
+	if err := json.Unmarshal(request.Tools[2].InputSchema, &quoted); err != nil {
+		t.Fatal(err)
+	}
+	q := quoted["properties"].(map[string]any)["q"].(map[string]any)
+	if _, ok := q["pattern"]; ok {
+		t.Errorf("Quoted pattern was not dropped: %v", q)
+	}
+	if got, want := q["description"], `A literal. Must match the regular expression: \Qa.b\E`; got != want {
+		t.Errorf("Quoted description = %q, want %q", got, want)
+	}
+
+	// The rewrite is logged the way the codex leg logs its translation.
+	var entry struct {
+		Msg       string   `json:"msg"`
+		Rewritten []string `json:"rewritten_patterns"`
+		Dropped   []string `json:"dropped_patterns"`
+	}
+	found := false
+	for _, line := range bytes.Split(bytes.TrimSpace(logs.Bytes()), []byte("\n")) {
+		if json.Unmarshal(line, &entry) == nil && strings.Contains(entry.Msg, "tool schema patterns") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("no pattern rewrite log line in:\n%s", logs.String())
+	}
+	if got, want := entry.Rewritten, []string{"Artifact.properties.file_paths.items"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("rewritten_patterns = %v, want %v", got, want)
+	}
+	if got, want := entry.Dropped, []string{"Quoted.properties.q"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("dropped_patterns = %v, want %v", got, want)
+	}
+}
+
+func TestToolSchemasWithoutPatternsAreNotReencoded(t *testing.T) {
+	gotBody := make(chan []byte, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		gotBody <- body
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"msg_1","type":"message","role":"assistant","model":"deepseek-flash","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":8,"output_tokens":1}}`)
+	}))
+	defer upstream.Close()
+
+	// Key order inside a tool is the sender's; an untouched tools array must
+	// keep it, which shows the array itself was not decoded and re-encoded.
+	const tools = `[{"name":"Read","description":"read","input_schema":{"type":"object","properties":{"path":{"type":"string","pattern":"^(?!\\.)[^\\x00]+$"}}}}]`
+	body := `{"model":"deepseek-flash","max_tokens":16,"tools":` + tools + `,"messages":[{"role":"user","content":"hi"}]}`
+	if _, err := callLeg(t, testLeg(t, upstream.URL), "deepseek-flash", body, false, false, nil); err != nil {
+		t.Fatalf("Messages: %v", err)
+	}
+	var request map[string]json.RawMessage
+	raw := <-gotBody
+	if err := json.Unmarshal(raw, &request); err != nil {
+		t.Fatalf("invalid rewritten request: %s", raw)
+	}
+	if got := string(request["tools"]); got != tools {
+		t.Errorf("tools were re-encoded:\n got %s\nwant %s", got, tools)
 	}
 }
 

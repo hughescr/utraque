@@ -132,7 +132,7 @@ func (l *Leg) CountTokens(w http.ResponseWriter, r *http.Request, rq *router.Req
 	if rq == nil || rq.Dec.Backend != router.BackendDeepSeek || rq.Dec.UpstreamModel == "" {
 		return apierr.InvalidRequest("deepseek request has no resolved model")
 	}
-	if _, err := rewriteRequest(rq.Raw, rq.Dec.UpstreamModel); err != nil {
+	if _, _, err := rewriteRequest(rq.Raw, rq.Dec.UpstreamModel); err != nil {
 		return err
 	}
 	var request schema.CountTokensRequest
@@ -162,10 +162,11 @@ func (l *Leg) forward(w http.ResponseWriter, r *http.Request, rq *router.Request
 	if err != nil {
 		return err
 	}
-	body, err := rewriteRequest(raw, rq.Dec.UpstreamModel)
+	body, report, err := rewriteRequest(raw, rq.Dec.UpstreamModel)
 	if err != nil {
 		return err
 	}
+	l.logRewrite(r.Context(), rq, report)
 
 	ctx, idle := l.withIdleDeadline(r.Context())
 	defer idle.stop()
@@ -218,6 +219,28 @@ func (l *Leg) forward(w http.ResponseWriter, r *http.Request, rq *router.Request
 		return l.streamResponse(w, r, idle, resp, rq.Dec.UpstreamModel)
 	}
 	return l.jsonResponse(w, r, idle, resp, rq.Dec.UpstreamModel, responseHasModel)
+}
+
+// logRewrite records, at DEBUG, what rewriteRequest changed in a tool schema:
+// the same rewritten_patterns and dropped_patterns attributes the codex leg
+// logs for its translation, so a tool that stopped enforcing a constraint can
+// be traced to the rewrite without re-deriving it. Requests whose schemas went
+// through untouched log nothing.
+func (l *Leg) logRewrite(ctx context.Context, rq *router.Request, report rewriteReport) {
+	if len(report.RewrittenPatterns) == 0 && len(report.DroppedPatterns) == 0 {
+		return
+	}
+	if !l.log.Enabled(ctx, slog.LevelDebug) {
+		return
+	}
+	attrs := []slog.Attr{slog.String("upstream_model", rq.Dec.UpstreamModel)}
+	if len(report.RewrittenPatterns) > 0 {
+		attrs = append(attrs, slog.Any("rewritten_patterns", report.RewrittenPatterns))
+	}
+	if len(report.DroppedPatterns) > 0 {
+		attrs = append(attrs, slog.Any("dropped_patterns", report.DroppedPatterns))
+	}
+	l.log.LogAttrs(ctx, slog.LevelDebug, "rewrote tool schema patterns for the deepseek backend", attrs...)
 }
 
 func (l *Leg) requestBody(r *http.Request, rq *router.Request) ([]byte, error) {

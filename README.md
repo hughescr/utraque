@@ -115,6 +115,13 @@ DeepSeek has no documented deferral mechanism. The model therefore receives
 both the discovery result and the callable definition. Missing definitions and
 unknown content-block types remain request errors rather than being forwarded.
 
+DeepSeek also validates every tool schema `pattern` as a regular expression
+before the model runs, in a dialect that is not quite the one Anthropic
+clients write for. Utraque translates each pattern to the DeepSeek dialect
+before forwarding, so a tool such as Claude Code's Artifact tool — whose
+`^[^\0]*$` DeepSeek rejects outright — no longer fails every request on a
+DeepSeek route. See *Tool schemas on a GPT or DeepSeek route* for the rules.
+
 ## Install & run
 
 ### Prerequisites
@@ -297,32 +304,52 @@ Typed names and agent frontmatter never depended on discovery and are
 unaffected, which is why they are listed first. The merged catalog is still
 served and is still useful to any client that does ask for it.
 
-### Tool schemas on a GPT route
+### Tool schemas on a GPT or DeepSeek route
 
-The Codex backend validates every tool's parameter schema before a model runs,
-but its accepted regex subset is narrower than the patterns some Anthropic
-clients send. A tool whose pattern uses an unsupported form — Claude Code's
-Artifact tool has a `\p{Cc}` Unicode class, and some email schemas use
-lookaround — can fail every request on a GPT route with `Invalid schema for
-function ... is not a 'regex'`. Lookaround currently reports a more specific
-`Invalid JSON schema: regex lookaround is not supported` error.
+The Codex and DeepSeek backends both validate every tool's parameter schema
+before a model runs, and each accepts its own regex dialect, narrower or
+merely different from the patterns Anthropic clients send. A tool whose
+pattern uses a form the backend rejects fails every request on that route
+with `Invalid schema for function ... is not a 'regex'`. Claude Code's
+Artifact tool trips both: its `field` pattern has lookahead and a `\p{Cc}`
+Unicode class, which Codex rejects (lookahead currently reports a more
+specific `Invalid JSON schema: regex lookaround is not supported`), and its
+`file_paths` pattern has a `\0`, which DeepSeek rejects.
 
-The request translator applies narrow, known compatibility rewrites before a
-schema goes out. Unicode property classes become explicit codepoint ranges from
-Go's own Unicode tables, `(?<name>…)` becomes `(?P<name>…)`, `\k<name>` becomes
-`(?P=name)`, `\z` becomes `\Z`, and `\x{HHHH}` becomes `\uHHHH`. Lookaround
-(`(?=...)`, `(?!...)`, `(?<=...)`, and `(?<!...)`) is dropped because Codex
-schema validation rejects it. Atomic groups, possessive quantifiers,
-`\Q…\E`, POSIX classes, and a property-class expansion that would run to
-hundreds of ranges are also dropped. For each dropped pattern, its original
-text is appended to the property's description so the constraint remains in
-the tool declaration. A dropped pattern is no longer enforced by Codex schema
-validation, so callers or tool implementations that require enforcement must
-validate the input themselves.
+Both legs run the same schema walker, parameterized by a per-backend dialect
+(`internal/toolschema`). Each pattern is either rewritten to the spelling the
+backend accepts or, where no compatible spelling exists, dropped from the
+schema with its original text appended to the property's description so the
+constraint remains in the tool declaration. A dropped pattern is no longer
+enforced by backend schema validation, so callers or tool implementations that
+require enforcement must validate the input themselves. Untouched schemas go
+through byte-for-byte.
 
-Untouched schemas go through byte-for-byte. The translation log line names
-each rewritten node as `rewritten_patterns` and each dropped one as
-`dropped_patterns`, in `Tool.properties.field` form.
+**Codex dialect.** Unicode property classes become explicit codepoint ranges
+from Go's own Unicode tables, `(?<name>…)` becomes `(?P<name>…)`, `\k<name>`
+becomes `(?P=name)`, `\z` becomes `\Z`, and `\x{HHHH}` becomes `\uHHHH`.
+Lookaround (`(?=...)`, `(?!...)`, `(?<=...)`, and `(?<!...)`) is dropped
+because Codex schema validation rejects it. Atomic groups, possessive
+quantifiers, `\Q…\E`, POSIX classes, and a property-class expansion that would
+run to hundreds of ranges are also dropped.
+
+**DeepSeek dialect.** The engine is a Rust one with fancy-regex extensions, so
+it accepts most of what Codex rejects — lookaround, atomic groups, possessive
+quantifiers, `\p{…}` by name, `(?<name>…)`, `\k<name>`, POSIX classes, `\G`,
+and the `x` and `u` inline flags all pass through untouched. What it rejects
+was established empirically, one pattern per request against the live
+endpoint: `\0` (read as a backreference outside a class and refused inside
+one) is rewritten to `\x00`, and `\0` followed by octal digits to the matching
+`\xHH`; `\Z` becomes `\z` (the reverse of the Codex rewrite); `\p{^Name}`
+becomes `\P{Name}`; and inside a bracket expression a bare `[` is escaped,
+because the engine reads it as a nested class, as is each `&` or `~` that is
+followed by another, which it reads as a set operator. `\C`, `\R`, `\Q…\E`,
+`\N{…}`, `\o{…}`, `\g<…>`, unknown letter escapes such as `\y`, and a numbered
+backreference inside a class are dropped.
+
+The translation log line for either leg names each rewritten node as
+`rewritten_patterns` and each dropped one as `dropped_patterns`, in
+`Tool.properties.field` form.
 
 
 ### Unattended, on demand (macOS)

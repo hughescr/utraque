@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "action": {
+      "description": "One of 'publish', 'list', 'read', 'delete', 'open', 'pin', 'unpin', 'quickstart'. Omitting it means 'publish'.",
+      "enum": ["publish", "list", "read", "delete", "open", "pin", "unpin", "quickstart"],
+      "type": "string"
+    },
+    "after": {
+      "description": "list with scope 'assets' only: the `next` value from a previous listing, passed to continue it.",
+      "pattern": "^[A-Za-z0-9_=-]{1,4096}$",
+      "type": "string"
+    },
+    "asset_ids": {
+      "description": "publish with `asset: true` and `from_url` only: 1-10 distinct asset ids from the source artifact.",
+      "items": { "pattern": "^[0-9a-f]{32}$", "type": "string" },
+      "maxItems": 10,
+      "minItems": 1,
+      "type": "array"
+    },
+    "contract": {
+      "anyOf": [
+        { "const": "latest", "type": "string" },
+        { "pattern": "^(0|[1-9]\\d{0,3})\\.(0|[1-9]\\d{0,4})\\.(0|[1-9]\\d{0,5})$", "type": "string" }
+      ],
+      "description": "publish: the artifact's runtime version."
+    },
+    "file_path": {
+      "description": "publish: the local page Claude publishes (.html, or .md only when a skill says so).",
+      "type": "string"
+    },
+    "file_paths": {
+      "description": "publish with `asset: true` only: several local image, video, PDF, font, stylesheet or script files in place of `file_path`, up to 25 in one call.",
+      "items": { "maxLength": 1024, "minLength": 1, "pattern": "^[^\\0]*$", "type": "string" },
+      "maxItems": 25,
+      "minItems": 1,
+      "type": "array"
+    },
+    "url": {
+      "description": "An existing artifact's claude.ai URL.",
+      "type": "string"
+    }
+  },
+  "type": "object"
+}

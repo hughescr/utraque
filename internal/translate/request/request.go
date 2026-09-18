@@ -27,6 +27,7 @@ import (
 	aschema "github.com/hughescr/utraque/internal/anthropic/schema"
 	cschema "github.com/hughescr/utraque/internal/codex/schema"
 	"github.com/hughescr/utraque/internal/router"
+	"github.com/hughescr/utraque/internal/toolschema"
 )
 
 // DefaultMutatingTools is the built-in set of tool names that, when present in
@@ -174,7 +175,7 @@ type Metadata struct {
 	DroppedImages []string
 	// RewrittenPatterns names, as "<tool>.<json path>", each tool schema node
 	// whose "pattern" keyword was translated for backend compatibility (see
-	// pattern.go). DroppedPatterns names the nodes whose pattern could not be
+	// internal/toolschema). DroppedPatterns names the nodes whose pattern could not be
 	// sent compatibly and was removed, with its text folded into the node's
 	// description so the constraint remains in the tool declaration.
 	RewrittenPatterns []string
@@ -550,7 +551,7 @@ func withImagePlaceholder(text string, n int) string {
 // translateTools maps Anthropic tool declarations onto Responses function
 // tools, carrying the input_schema through as the parameters. The schema is
 // byte-identical to the input unless it carries a "pattern" the backend cannot
-// accept (see pattern.go), in which case the pattern is rewritten for
+// accept (see internal/toolschema), in which case the pattern is rewritten for
 // compatibility or, failing that, dropped. The affected nodes are named
 // "<tool>.<path>" in the returned rewritten and dropped lists. A nil tool list
 // yields nil (the field is omitted).
@@ -560,12 +561,12 @@ func translateTools(tools []aschema.Tool) (out []cschema.Tool, rewritten, droppe
 	}
 	out = make([]cschema.Tool, 0, len(tools))
 	for _, t := range tools {
-		params, res := sanitizeToolSchema(t.InputSchema)
+		params, res := toolschema.Sanitize(toolschema.Codex, t.InputSchema)
 		for _, p := range res.Rewritten {
-			rewritten = append(rewritten, t.Name+droppedPatternSep+p)
+			rewritten = append(rewritten, t.Name+toolschema.PathSep+p)
 		}
 		for _, p := range res.Dropped {
-			dropped = append(dropped, t.Name+droppedPatternSep+p)
+			dropped = append(dropped, t.Name+toolschema.PathSep+p)
 		}
 		out = append(out, cschema.FunctionTool(t.Name, t.Description, params))
 	}
