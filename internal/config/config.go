@@ -283,9 +283,13 @@ type Log struct {
 	Format string // UTRAQUE_LOG_FORMAT: json|text
 }
 
-// Reporting configures the loopback-only provider report. External
+// Reporting configures the loopback-only provider report. Most external
 // helper availability is checked only when the endpoint is requested, so a
-// missing helper can never prevent inference from starting.
+// missing ccusage/Claude-plan helper cannot prevent inference from starting.
+// CodexExecutable is the exception: when Codex.ClientVersion is not set
+// explicitly, startup runs CodexExecutable --version to discover it (see
+// Codex.ClientVersion and cmd/utraque's resolveCodexClientVersion), so a
+// missing or misconfigured Codex executable does block startup in that case.
 type Reporting struct {
 	CCUsageRunner        string
 	CCUsageExecutable    string
@@ -297,8 +301,10 @@ type Reporting struct {
 	ClaudePlanMultiplier *float64
 }
 
-// Config is the whole configuration surface. LocalToken is a secret and is
-// never rendered in full by String or LogValue.
+// Config is the whole configuration surface except request tracing:
+// UTRAQUE_TRACE_DIR is read directly by internal/obs (TracerFromEnv), not
+// through Config. LocalToken is a secret and is never rendered in full by
+// String or LogValue.
 type Config struct {
 	Listen     string // UTRAQUE_LISTEN
 	LocalToken string // UTRAQUE_LOCAL_TOKEN (secret)

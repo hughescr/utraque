@@ -81,7 +81,9 @@ func (s *Summary) set(f func()) {
 	f()
 }
 
-// SetRoute names the backend that served the request ("anthropic" or "codex").
+// SetRoute names what served the request: one of the three inference legs
+// ("anthropic", "codex", "deepseek") or "discovery" for a model-picker
+// request that never reached a leg.
 func (s *Summary) SetRoute(route string) { s.set(func() { s.route = route }) }
 
 // SetModels records the model the client asked for and the slug it routed to.
@@ -89,7 +91,12 @@ func (s *Summary) SetModels(client, upstream string) {
 	s.set(func() { s.clientModel, s.upstreamModel = client, upstream })
 }
 
-// SetEffort records the resolved reasoning effort.
+// SetEffort records the effort field on the request line. The router sets it
+// first, to the requested effort suffix (right after routing, in
+// cmd/utraque/main.go's dispatch); the Codex leg later overwrites it with the
+// applied (possibly clamped) effort once translation resolves one
+// (internal/codex/leg/leg.go). A Codex request that fails before translation
+// leaves the requested value in place.
 func (s *Summary) SetEffort(effort string) { s.set(func() { s.effort = effort }) }
 
 // SetStream records whether the client asked for a streamed answer.
@@ -119,11 +126,15 @@ func (s *Summary) SetOutputTokens(n int) {
 
 // SetInputTokens records the prompt token counts under Anthropic semantics:
 // uncached is the part of the prompt billed at full price and cached is the
-// part the upstream served from its prompt cache, so the whole prompt is their
-// sum. Every leg reports this way — the Codex leg subtracts the cached count
-// out of the inclusive figure Responses gives it (see stream.mapUsage) — so
-// the logged input_tokens and cache_read_input_tokens add up the same way a
-// Claude Code transcript's do.
+// part the upstream served from its prompt cache. Only the Codex and DeepSeek
+// legs call this — the Codex leg subtracts the cached count out of the
+// inclusive figure Responses gives it (see stream.mapUsage); DeepSeek reads
+// its own Anthropic-shaped usage block directly. The Anthropic passthrough
+// leg never calls it: it relays the upstream response unparsed and sets none
+// of the token fields. These two slots are uncached and cache-read only;
+// cache_creation_input_tokens, the third component of "the whole prompt" (see
+// stream.promptTokens), has no slot here and is not part of either logged
+// field.
 //
 // Both go on the request line because the RATIO is the diagnostic: the hit
 // rate is cached / (uncached + cached), and a cached count that stays flat

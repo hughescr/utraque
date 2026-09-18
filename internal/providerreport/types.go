@@ -50,13 +50,36 @@ type DateRange struct {
 }
 
 type ProviderReport struct {
-	Provider        string                     `json:"provider"`
-	Status          string                     `json:"status"`
-	LastAttempt     time.Time                  `json:"last_attempt"`
-	LastSuccess     *time.Time                 `json:"last_success,omitempty"`
-	SourceFreshness Freshness                  `json:"source_freshness"`
-	Errors          []ReportError              `json:"errors"`
-	QuotaBefore     *providerquota.Observation `json:"quota_before,omitempty"`
+	Provider string `json:"provider"`
+	Status   string `json:"status"`
+	// LastAttempt is normally this collection's end time (report.go's
+	// buildProvider receives it as ended). The one exception: when the quota
+	// leg's error carries a non-zero AttemptedAt, LastAttempt is overridden
+	// to that value (report.go:114-118) so it reflects the most recent real
+	// upstream attempt rather than this collection's end time. That
+	// AttemptedAt may come from the current live 429 (httpSettings.finish
+	// stamps it with the request just made) or from a prior attempt carried
+	// through cooldown suppression (a read denied locally without going
+	// upstream is stamped with the earlier attempt that started the
+	// cooldown) — both cases are covered, not only the suppressed-read one.
+	LastAttempt time.Time `json:"last_attempt"`
+	// LastSuccess means "at least one section (quota or history) succeeded in
+	// this collection attempt" — it is set whenever Status is "ok" or
+	// "partial", not only on a fully-successful attempt (report.go:148-161).
+	// Contrast ProviderSnapshot.LastSuccess below, which is a stricter
+	// predicate.
+	LastSuccess     *time.Time    `json:"last_success,omitempty"`
+	SourceFreshness Freshness     `json:"source_freshness"`
+	Errors          []ReportError `json:"errors"`
+	// QuotaBefore and Paired are never assigned by the current collector —
+	// buildProvider only ever sets QuotaAfter (report.go:121), and
+	// markCodexUnavailable (handler.go:186) explicitly nils all three. Their
+	// JSON names are kept as-is for schema v1 compatibility; see QuotaAfter.
+	QuotaBefore *providerquota.Observation `json:"quota_before,omitempty"`
+	// QuotaAfter is the only one of the three quota fields the current
+	// collector assigns (report.go:121); the "_after" name is a holdover
+	// from a discontinued before/after bracket measurement and is kept for
+	// schema v1 compatibility rather than renamed to "quota".
 	QuotaAfter      *providerquota.Observation `json:"quota_after,omitempty"`
 	Paired          *PairedMeasurement         `json:"paired_measurement,omitempty"`
 	History         *HistorySummary            `json:"history,omitempty"`
@@ -71,8 +94,18 @@ type ProviderReport struct {
 // ProviderSnapshot preserves a previously successful, internally coherent
 // measurement when the latest attempt is partial or failed.
 type ProviderSnapshot struct {
-	LastSuccess *time.Time                 `json:"last_success,omitempty"`
-	Freshness   Freshness                  `json:"source_freshness"`
+	// LastSuccess here means "the complete measurement succeeded": a
+	// ProviderSnapshot is only newly built from an attempt whose top-level
+	// Status was "ok" (handler.go's storeAttempt, ~250-266), so this field
+	// (copied from that attempt's ProviderReport.LastSuccess) records when
+	// every section succeeded together, not merely one of them. Contrast
+	// ProviderReport.LastSuccess above, which is the looser "any section"
+	// predicate.
+	LastSuccess *time.Time `json:"last_success,omitempty"`
+	Freshness   Freshness  `json:"source_freshness"`
+	// QuotaBefore and Paired are copied straight from the source
+	// ProviderReport and are likewise never non-nil in practice; see
+	// ProviderReport.QuotaBefore.
 	QuotaBefore *providerquota.Observation `json:"quota_before,omitempty"`
 	QuotaAfter  *providerquota.Observation `json:"quota_after,omitempty"`
 	Paired      *PairedMeasurement         `json:"paired_measurement,omitempty"`

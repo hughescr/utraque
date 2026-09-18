@@ -1,8 +1,14 @@
 // Package auth manages the Codex (OpenAI) OAuth credential utraque replays
-// against the ChatGPT backend. It reads {CODEX_HOME:-~/.codex}/auth.json,
-// decodes the access token's expiry, refreshes the token when it is near
-// expiry (or was rejected upstream), and writes the rotated credential back —
-// all while sharing the file safely with the Codex CLI, which owns it.
+// against the ChatGPT backend. It reads the auth.json path passed in as
+// Options.Path — this package does not default or resolve that path itself;
+// the {CODEX_HOME:-~/.codex}/auth.json fallback lives in the caller
+// (internal/config's resolveCodexAuthFile), which hands New the already-
+// selected path (not necessarily absolute — a bare relative
+// UTRAQUE_CODEX_AUTH_FILE or CODEX_HOME is passed through unresolved). Given
+// that path, auth decodes the access token's expiry, refreshes the token when
+// it is near expiry (or was rejected upstream), and writes the rotated
+// credential back — all while sharing the file safely with the Codex CLI,
+// which owns it.
 //
 // The credential file is precious: clobbering it can log the user out of their
 // own Codex CLI. Every write is therefore made atomic (temp file + rename) and

@@ -398,7 +398,7 @@ except the Codex CLI's own `CODEX_HOME` and DeepSeek's conventional
 default cannot be overridden to the empty string. Anything invalid fails at
 startup with a named error rather than being quietly ignored.
 
-This is the whole surface.
+This is the whole configuration surface; `UTRAQUE_TRACE_DIR` is the separate tracing switch read directly by `internal/obs`.
 
 ### Server
 
@@ -505,23 +505,25 @@ browser would be dishonest for no benefit.
 | `utls` | Always present a Chrome-shaped TLS ClientHello. Only the handshake differs — no forged browser headers, and the `originator` stays honestly `codex_cli_rs`. |
 
 A hand-rolled TLS stack is a strictly larger attack surface, which is why uTLS
-is never the starting point. The two legs hold separate transports and therefore
-separate connection pools, so a switch on the Codex side cannot disturb an
-in-flight Anthropic stream. The Codex model catalog dials on the Codex transport
-too — `{base}/models` and `{base}/responses` are the same host — so a flip
-carries the picker and the effort clamping with it instead of leaving them
-gated. `/healthz` reports **both** legs (`anthropic` is always `std`; `codex` is
-the one that can move), read fresh each time, because `auto` can change it
-mid-process. The per-request `transport` field is recorded by the leg that
-dispatched the request, immediately before it goes out, so the request that
-trips a gate reads `std` and its successor reads `utls`.
+is never the starting point. The three inference legs use two transports: Anthropic
+and DeepSeek share one connection pool, while Codex has the other, so a switch on
+the Codex side cannot disturb an in-flight Anthropic or DeepSeek stream. The
+Codex model catalog dials on the Codex transport too — `{base}/models` and
+`{base}/responses` are the same host — so a flip carries the picker and the
+effort clamping with it instead of leaving them gated. `/healthz` reports **both**
+transports (`anthropic`, shared with DeepSeek, is always `std`; `codex` is the one
+that can move), read fresh each time, because `auto` can change it mid-process.
+The per-request `transport` field is recorded by the leg that dispatched the
+request, immediately before it goes out, so the request that trips a gate reads
+`std` and its successor reads `utls`.
 
 ## Logging and traces
 
 One structured line per request, on stderr (launchd captures it), carrying
 `request_id`, `method`, `path`, `status`, `req_bytes`, `resp_bytes`, `ttfb_ms`,
-`total_ms`, `route`, `client_model`, `upstream_model`, `effort`, `stream`,
-`upstream_status`, `output_tokens`, `input_tokens`, `cache_read_input_tokens`,
+`total_ms`, `route` (`anthropic`, `codex`, `deepseek`, or `discovery`),
+`client_model`, `upstream_model`, `effort`, `stream`, `upstream_status`,
+`output_tokens`, `input_tokens`, `cache_read_input_tokens`,
 `estimated_input_tokens`, `stop_reason`, `interrupted`, `transport`, and `err`
 when there was one.
 
@@ -531,20 +533,19 @@ with — an upstream 200 whose body carried no events becomes a 502 downstream,
 and an upstream 401 becomes a refresh and a retry. `interrupted` separates "you
 hung up" from "it broke", so a cancelled turn never reads as an incident.
 
-`input_tokens` and `cache_read_input_tokens` are the pair to watch on the Codex
-leg, because their RATIO is the only visible sign of whether the prompt cache is
-working. Both follow Anthropic semantics on every leg: `input_tokens` is the
-UNCACHED part of the prompt, `cache_read_input_tokens` the part served from the
-cache, and the whole prompt is their sum — so the hit rate is
-`cache_read_input_tokens / (input_tokens + cache_read_input_tokens)`. (The
-Responses API reports its `input_tokens` inclusive of the cached count; the
-translator subtracts it out, so the Codex leg's numbers add up the same way a
-Claude Code transcript's do and ccusage does not double count the cached
-part.) In a healthy agentic loop the cached count tracks the prompt as the
-conversation grows and `input_tokens` stays small. A cached count that stays
-FLAT while `input_tokens` climbs means the replayed history has stopped matching
-what the model saw, and every turn is paying full price for the whole
-conversation — see *Prompt caching*.
+On the Codex and DeepSeek legs, `input_tokens` and `cache_read_input_tokens` are
+the two fields to watch for prompt-cache behavior. `input_tokens` is the
+UNCACHED part of the prompt and `cache_read_input_tokens` the part served from
+the cache, so their hit rate is `cache_read_input_tokens / (input_tokens +
+cache_read_input_tokens)`. This two-slot figure does not include
+`cache_creation_input_tokens`, which is also part of the prompt under Anthropic
+semantics. (The Responses API reports its `input_tokens` inclusive of the cached
+count; the translator subtracts it out, so the Codex leg's two logged counts do
+not double count the cached part.) In a healthy agentic loop the cached count
+tracks the prompt as the conversation grows and `input_tokens` stays small. A
+cached count that stays FLAT while `input_tokens` climbs means the replayed
+history has stopped matching what the model saw, and every turn is paying full
+price for the whole conversation — see *Prompt caching*.
 
 `estimated_input_tokens` is the prompt count utraque computed locally and
 seeded into `message_start` before the backend reported the real usage. It is
@@ -583,16 +584,19 @@ Codex request that got as far as opening a stream — `<id>.upstream.sse` and
 `<id>.downstream.sse` beside it (a non-streaming answer lands in
 `<id>.downstream.json`). An Anthropic passthrough, a `/healthz` poll, a
 `/v1/models` open, or a Codex request that failed before the stream opened leave
-the manifest alone. The same redaction is applied, manifest included. They double
-as test fixtures: the bytes received and the bytes sent, side by side, turn a
-translation bug into a reproducible case. **A trace holds the prompt text and the
-model's output in the clear**, which is why enabling it logs a loud `WARN` at
-startup.
+the manifest alone. The same redaction is applied, manifest included. They are
+source material for test fixtures: the bytes received and the bytes sent, side
+by side, can turn a translation bug into a reproducible case. **A trace holds
+the prompt text and the model's output in the clear**, which is why enabling it
+logs a loud `WARN` at startup.
 
-A caller-supplied `X-Request-Id` is echoed back, logged, and used to name the
-trace files, so an id that is itself credential-shaped is refused and a
-generated one used instead. That is a backstop and not a guarantee: an opaque
-high-entropy string is exactly what a request id looks like.
+A caller may supply `X-Request-Id`; when accepted, it is logged and its
+filesystem-safe form names the trace files. Utraque echoes the chosen request id
+in the separate `X-Utraque-Request-Id` response header, leaving a passthrough
+response's `X-Request-Id` available to Anthropic. An id that is itself
+credential-shaped is refused and a generated one used instead. That is a
+backstop and not a guarantee: an opaque high-entropy string is exactly what a
+request id looks like.
 
 ## Prompt caching
 
@@ -647,6 +651,16 @@ Anthropic's billing system and means nothing to the Codex backend, so the Codex
 leg drops it and records `system:billing-header` as a drop. The Anthropic leg is
 untouched: that is a byte-for-byte passthrough and the header reaches Anthropic
 exactly as Claude Code wrote it.
+
+**Serial tool calls.** The Codex leg sends `parallel_tool_calls:false` when a
+request contains any tool in its built-in mutating-tools set or when the client
+sets `tool_choice.disable_parallel_tool_use`. Its `MutatingTools` override is
+programmatic only; there is no environment or configuration setting for it. The
+DEBUG translation line records `parallel_tool_calls_disabled` alongside
+`upstream_model`, `effort`, `effort_requested`, `effort_source`, and
+`effort_clamped`, plus applicable `reasoning_replayed`, `reasoning_unreplayable`,
+`dropped`, `orphaned_tool_results`, `dropped_images`, `rewritten_patterns`, and
+`dropped_patterns`.
 
 **`session_id`.** Derived from the same hash, so the header and the body always
 name the same conversation. The Codex CLI sends one, the backend is
@@ -811,12 +825,32 @@ configured.
 Every response is `Cache-Control: no-store`. Utraque collects 30 inclusive UTC
 dates of local `ccusage` history while reading each provider's live quota once.
 The schema-v1 field remains named `quota_after` for compatibility; the one live
-reading does not imply that it was taken after local-history collection. Cached
-responses retain each source's original timestamp and identify cached and stale
-sources explicitly. Providers fail independently, so a
+reading does not imply that it was taken after local-history collection. The
+current collector never produces `quota_before` or `paired_measurement`; it sets
+only `quota_after`. The collector records
+`paired_quota_measurement_unavailable` on every fresh Anthropic build, never
+the result of a paired measurement. Freshness post-processing may replace it
+with `quota_window_reset_after_collection` or `cached_measurement_expired`.
+Cached responses retain each source's original timestamp and
+identify cached and stale sources explicitly. Providers fail independently, so a
 DeepSeek balance can still be returned when local history fails, and local
 history can still be returned when a live provider reading fails. A previous
 complete snapshot may accompany a partial attempt as a separate stale object.
+
+`last_success` on a provider is per attempt: it means this collection had at
+least one successful quota or history section, including a partial collection.
+`last_complete_snapshot.last_success` instead records the time a complete
+measurement succeeded. `last_attempt` is normally the collection end time; for a
+quota rate-limit error with a recorded real upstream attempt it uses that attempt
+time, which can predate `collection_started_at` during a cooldown.
+
+In schema version 1, `source` has a field-specific value space: `quota_after`
+uses the leg name; `history.source` is `ccusage`; `models[].source` is the
+ccusage agent label of the local log (such as `claude`, `codex`, or
+`opencode`);
+`history.blocks[].source` is always `claude`, because blocks are collected from
+the Claude log only; `reference_prices.source` is `models.dev`; and
+`configured_plan.source` is `configured`.
 
 An abbreviated response looks like this:
 
@@ -872,8 +906,10 @@ effective rates are weighted historical observations and remain unavailable
 when any included usage is unpriced.
 
 Each provider may also carry `reference_prices`, an independent public
-models.dev snapshot denominated in USD per million tokens. Model ids are exact
-author-catalog ids. `eligible: true` identifies current selectable candidates:
+models.dev snapshot denominated in USD per million tokens. The `codex`
+reference-price section carries the OpenAI API list prices that models.dev labels
+`openai`. Model ids are exact author-catalog ids. `eligible: true` identifies
+current selectable candidates:
 the held live Codex routing catalog (or its startup seed), the built-in current
 Claude fallback list, and the two DeepSeek routes when configured. A model seen
 in local history is included with `eligible: false` when it is no longer in

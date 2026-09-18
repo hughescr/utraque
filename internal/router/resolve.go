@@ -236,9 +236,14 @@ func resolveGPTSlug(lower, clientModel string) (Decision, bool) {
 // advertised and the ordinary grammar should decide.
 //
 // An Anthropic-backed picker route carries the undecorated model id in
-// UpstreamModel; that becomes the Decision's ClientModel so a leg that does
-// rewrite the body has the name Anthropic will accept, and Decision.
-// UpstreamModel stays empty as the Anthropic backend's contract requires.
+// UpstreamModel; on that branch it is substituted into the Decision's
+// ClientModel, and Decision.UpstreamModel stays empty as the Anthropic
+// backend's contract requires. The Anthropic leg itself does not rewrite the
+// request body — it forwards Request.Raw byte-for-byte (see
+// anthropic/passthrough.go's requestBody) — so this substitution changes only
+// the ClientModel value the leg sees, not anything sent upstream; whether it
+// is still needed, or the decorated-id case it exists for should carry its
+// own Decision.UpstreamModel instead, is an open maintainer decision.
 func resolvePicker(reg *Registry, lower, clientModel string) (Decision, bool) {
 	route, ok := reg.PickerRoute(lower)
 	if !ok {

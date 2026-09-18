@@ -81,10 +81,16 @@ const (
 
 // Decision is the routing verdict for one client-supplied model string.
 //
-// ClientModel is preserved exactly as the caller wrote it (case included) so
-// the Anthropic leg can forward it byte-for-byte. UpstreamModel is the slug the
-// Codex leg should ask for, and is empty for the Anthropic backend, which does
-// not rewrite the model.
+// ClientModel is ordinarily the caller's model string, whitespace-trimmed,
+// case preserved: ResolveWith trims on every path before deriving a
+// Decision, so this is not a byte-exact copy of what the caller sent. The
+// byte-exact spelling, when something needs it, is Request.Raw — the
+// Anthropic leg forwards that untouched. The one exception is an
+// Anthropic-backed picker route: resolvePicker substitutes the route's
+// UpstreamModel into ClientModel there (see resolvePicker), so on that path
+// ClientModel can differ from the caller's string by more than trimming.
+// UpstreamModel is the slug the Codex leg should ask for, and is empty for
+// the Anthropic backend, which does not rewrite the model.
 type Decision struct {
 	Backend       Backend
 	UpstreamModel string

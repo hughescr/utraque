@@ -76,7 +76,7 @@ type Response struct {
 const emptyBody = `{"data":[],"has_more":false}` + "\n"
 
 // RouteName is what a model-picker request is called on the request line,
-// alongside the "anthropic" and "codex" inference legs.
+// alongside the "anthropic", "codex", and "deepseek" inference legs.
 const RouteName = "discovery"
 
 // Handler serves the merged catalog. It is safe for concurrent use.

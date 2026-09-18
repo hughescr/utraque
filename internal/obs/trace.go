@@ -25,8 +25,17 @@ const EnvTraceDir = "UTRAQUE_TRACE_DIR"
 const TraceWarning = "REQUEST TRACING IS ENABLED: trace dumps contain PROMPT TEXT and model output in the clear. " +
 	"Credentials are redacted, the conversation is NOT. Unset " + EnvTraceDir + " to turn this off."
 
-// Trace file suffixes. Three files per request, named by request id, so a
-// trace can be replayed as a test fixture:
+// Trace file suffixes. Every traced request writes a manifest, named by
+// request id; a successful Codex request also writes up to two companion
+// files. These dumps are source material for a test fixture, not a format
+// any fixture reader accepts as-is today — a fixture test unmarshals a bare
+// request body, not this envelope shape or these file names.
+//
+// Anthropic passthrough, DeepSeek, discovery, health checks, and a Codex
+// request that fails before its upstream stream opens write only the
+// manifest. Once a Codex request's upstream stream opens, it also gets the
+// upstream file, plus exactly one of the two downstream files, depending on
+// whether the client asked to stream:
 //
 //	<id>.request.json    the inbound request: method, path, allowlisted
 //	                     headers, and the body as it was received
@@ -102,6 +111,15 @@ func (t *Tracer) Begin(id string) *Trace {
 // safeFileID reduces a request id to something that can only ever name a file
 // inside the trace directory. A caller-supplied X-Request-Id reaches this
 // function, so path separators and dot segments must not survive it.
+//
+// The result is a sanitised derivative of id, not id itself: id is trimmed
+// of surrounding whitespace, truncated to 128 bytes, and then every
+// remaining byte outside [A-Za-z0-9_-] is replaced with '_'. Any of those
+// three steps can make distinct ids collide on one stem — trimming and
+// truncation drop bytes rather than replace them, and the replacement step
+// alone already collapses ids that differ only in a disallowed byte (e.g.
+// "a/b" and "a.b") — and on the same trace directory a collision means both
+// ids name the same files.
 func safeFileID(id string) string {
 	id = strings.TrimSpace(id)
 	if id == "" {
@@ -127,9 +145,16 @@ func safeFileID(id string) string {
 	return out
 }
 
-// traceMeta is the <id>.request.json shape. It doubles as a test fixture
-// manifest: everything needed to replay the request is here, and nothing that
-// would be unsafe to commit.
+// traceMeta is the <id>.request.json shape: source material for a test
+// fixture, not a fixture itself and not commit-safe as written. Headers only
+// holds the redactor's small allowlist (protocol version, capability flags,
+// media type, caller); Withheld names everything else that arrived and was
+// left out. Body/BodyRaw run through ScrubBytes, but that scrubber is a
+// credential-shaped-string backstop, not a scrubber of conversation content
+// — the body is still prompt text in the clear (see TraceWarning). A
+// manifest must be reviewed, scrubbed of anything sensitive, and converted
+// into an actual fixture before it is fit to commit; this exact (unexported)
+// shape is not one any fixture reader in this repo consumes as-is.
 type traceMeta struct {
 	RequestID string              `json:"request_id"`
 	Method    string              `json:"method,omitempty"`
@@ -147,7 +172,7 @@ type traceMeta struct {
 // different goroutines.
 type Trace struct {
 	tracer *Tracer
-	id     string
+	id     string // sanitised stem from safeFileID, not the caller's raw id
 
 	mu       sync.Mutex
 	meta     traceMeta

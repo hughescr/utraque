@@ -101,10 +101,16 @@ var (
 )
 
 // Options configure a Translator. The zero value is usable except for Model,
-// which should be the client-requested model string echoed back in
-// message_start.
+// which should be the upstream slug echoed back in message_start.
 type Options struct {
-	// Model is the client-requested model string, echoed in message_start.model.
+	// Model is echoed in message_start.model. Despite the name, it is not the
+	// client-requested model string: translatorOptions, internal/codex/leg's
+	// only PRODUCTION caller, deliberately passes the upstream (Codex catalog)
+	// slug utraque actually called, not the string the client wrote — because
+	// Claude Code records what it receives into its own session log, and that
+	// log should name the model that really served the turn. See
+	// translatorOptions for the full reasoning. (Tests construct Options
+	// directly and may set Model to whatever the case needs.)
 	Model string
 	// InputTokens seeds message_start usage.input_tokens (an estimate, or 0).
 	// InputTokensFunc, when set, supplies that seed lazily instead and takes
