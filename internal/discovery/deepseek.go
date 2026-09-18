@@ -6,11 +6,11 @@ import "github.com/hughescr/utraque/internal/router"
 // discovery filter. Router.Resolve understands the same namespace without any
 // in-memory registration, so a selection remains routable after a restart.
 var deepSeekPickerModels = []struct {
-	model Model
+	model PickerRow
 	route router.PickerRoute
 }{
 	{
-		model: Model{
+		model: PickerRow{
 			ID:          "anthropic-compat.deepseek-flash",
 			DisplayName: "DeepSeek V4.1 Flash",
 			Type:        modelType,
@@ -21,7 +21,7 @@ var deepSeekPickerModels = []struct {
 		},
 	},
 	{
-		model: Model{
+		model: PickerRow{
 			ID:          "anthropic-compat.deepseek-v4-pro",
 			DisplayName: "DeepSeek V4 Pro 0813",
 			Type:        modelType,

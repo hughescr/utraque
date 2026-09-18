@@ -80,7 +80,7 @@ const DefaultCatalogTimeout = 2 * time.Second
 // reasoning levels used to clamp effort. It matches catalog.Catalog's Models
 // method, so *catalog.Client satisfies it directly.
 type Catalog interface {
-	Models(ctx context.Context, cred auth.Credential) ([]cschema.Model, error)
+	Models(ctx context.Context, cred auth.Credential) ([]cschema.CatalogModel, error)
 }
 
 // Options configures a Leg. Only Client is required.
@@ -108,7 +108,7 @@ type Options struct {
 	// on the registry. It runs inline on the request path, so it must be cheap
 	// and must not block; the caller is expected to no-op on an unchanged list.
 	// The slice is the leg's own copy and is not retained.
-	OnCatalog func([]cschema.Model)
+	OnCatalog func([]cschema.CatalogModel)
 
 	// OnUnknownEvents, when set, receives the per-type counts of Codex stream
 	// events the Translator did not recognise, once per completed stream. It is
@@ -149,7 +149,7 @@ type Leg struct {
 	creds          auth.CredentialSource
 	cat            Catalog
 	catalogTimeout time.Duration
-	onCatalog      func([]cschema.Model)
+	onCatalog      func([]cschema.CatalogModel)
 	onUnknown      func(map[string]int)
 	est            tokens.RequestEstimator
 	emitReasoning  string
@@ -293,7 +293,7 @@ func (l *Leg) CountTokens(w http.ResponseWriter, r *http.Request, rq *router.Req
 		System:     req.System,
 		Tools:      req.Tools,
 		ToolChoice: req.ToolChoice,
-	}, rq.Dec, cschema.Model{}, request.Options{Summary: l.summary})
+	}, rq.Dec, cschema.CatalogModel{}, request.Options{Summary: l.summary})
 	if err != nil {
 		return apierr.Wrap(err, apierr.TypeInvalidRequest, "translating the request for the codex backend failed")
 	}
@@ -399,7 +399,7 @@ func (l *Leg) translatorOptions(ctx context.Context, rq *router.Request, seed *s
 		// has to price. The reasoning effort is deliberately left off: it is not
 		// part of the model's identity, and the client does not record it for
 		// Anthropic models either.
-		Model:           upstreamModel(rq),
+		UpstreamModel:   upstreamModel(rq),
 		InputTokensFunc: func() int { return seed.Value(ctx) },
 		EmitReasoning:   l.emitReasoning,
 		OnTruncate:      l.onTruncate,
@@ -517,9 +517,9 @@ func classifyStreamFailure(err error) *apierr.Error {
 // catalog, a fetch error, an unknown slug — yields the zero Model, which leaves
 // the requested effort unclamped. A picker open must never be blocked on this,
 // and neither must an inference request.
-func (l *Leg) catalogModel(ctx context.Context, cred auth.Credential, slug string, log *slog.Logger) cschema.Model {
+func (l *Leg) catalogModel(ctx context.Context, cred auth.Credential, slug string, log *slog.Logger) cschema.CatalogModel {
 	if l.cat == nil || slug == "" {
-		return cschema.Model{}
+		return cschema.CatalogModel{}
 	}
 	lookupCtx, cancel := context.WithTimeout(ctx, l.catalogTimeout)
 	defer cancel()
@@ -529,7 +529,7 @@ func (l *Leg) catalogModel(ctx context.Context, cred auth.Credential, slug strin
 		log.LogAttrs(ctx, slog.LevelDebug,
 			"codex catalog unavailable; sending the requested reasoning effort unclamped",
 			slog.String("slug", slug), slog.String("err", err.Error()))
-		return cschema.Model{}
+		return cschema.CatalogModel{}
 	}
 	// The same read that clamps effort is also the freshest view of what Codex
 	// serves, so it is what keeps the router's aliases current. Doing it here
@@ -544,7 +544,7 @@ func (l *Leg) catalogModel(ctx context.Context, cred auth.Credential, slug strin
 	}
 	log.LogAttrs(ctx, slog.LevelDebug, "codex catalog has no entry for the routed slug",
 		slog.String("slug", slug))
-	return cschema.Model{}
+	return cschema.CatalogModel{}
 }
 
 func (l *Leg) logger(rq *router.Request) *slog.Logger {

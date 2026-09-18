@@ -613,7 +613,7 @@ const catalogWarmTimeout = 30 * time.Second
 // It also detaches from the caller's context for cancellation while keeping its
 // values, so a warm in flight does not hold up shutdown and does not die the
 // instant run's context is replaced.
-func newCatalogWarmer(cat *catalog.Client, credSource *auth.Source, loadAliases func([]cschema.Model), st *catalogState, log *slog.Logger) func(context.Context) {
+func newCatalogWarmer(cat *catalog.Client, credSource *auth.Source, loadAliases func([]cschema.CatalogModel), st *catalogState, log *slog.Logger) func(context.Context) {
 	return func(ctx context.Context) {
 		if credSource == nil {
 			st.unavailable("no codex credential is configured")
@@ -657,13 +657,13 @@ func newCatalogWarmer(cat *catalog.Client, credSource *auth.Source, loadAliases 
 // auth.Source.Get can trigger a refresh and an auth.json write-back shared with
 // the Codex CLI. A live token serves real rows; anything else serves none,
 // which the handler already degrades to gracefully.
-func newDiscovery(cfg config.Config, tr transport.Transport, cat *catalog.Client, credSource *auth.Source, loadAliases func([]cschema.Model), catState *catalogState, log *slog.Logger) (http.Handler, error) {
+func newDiscovery(cfg config.Config, tr transport.Transport, cat *catalog.Client, credSource *auth.Source, loadAliases func([]cschema.CatalogModel), catState *catalogState, log *slog.Logger) (http.Handler, error) {
 	anthCat, err := anthropic.NewCatalog(cfg.Anthropic.BaseURL, tr, anthropic.WithCatalogLogger(log))
 	if err != nil {
 		return nil, err
 	}
 
-	codexCat := discovery.CodexCatalogFunc(func(ctx context.Context) ([]cschema.Model, error) {
+	codexCat := discovery.CodexCatalogFunc(func(ctx context.Context) ([]cschema.CatalogModel, error) {
 		if credSource == nil {
 			err := errors.New("no codex credential is configured")
 			catState.unavailable(err.Error())
@@ -715,12 +715,12 @@ func newDiscovery(cfg config.Config, tr transport.Transport, cat *catalog.Client
 // actually needs the catalog. An unchanged list is a no-op, so the common case
 // costs one fingerprint comparison rather than rebuilding three maps under the
 // registry's write lock while every Resolve waits.
-func newAliasLoader(reg *router.Registry, log *slog.Logger) func([]cschema.Model) {
+func newAliasLoader(reg *router.Registry, log *slog.Logger) func([]cschema.CatalogModel) {
 	var (
 		mu   sync.Mutex
 		last string
 	)
-	return func(models []cschema.Model) {
+	return func(models []cschema.CatalogModel) {
 		if len(models) == 0 {
 			// Never clear the registry on an empty read: an empty catalog would
 			// un-route every model, and "we could not see the catalog" is far
@@ -737,14 +737,14 @@ func newAliasLoader(reg *router.Registry, log *slog.Logger) func([]cschema.Model
 		last = fp
 		log.Info("router aliases republished from the live codex catalog",
 			slog.Int("models", len(models)),
-			slog.Any("families", reg.Families()))
+			slog.Any("families", reg.BareAliases()))
 	}
 }
 
 // catalogFingerprint identifies a model list by exactly the data the alias
 // tiers are derived from — the listed slugs and their priorities — so a catalog
 // that only changed a display name does not churn the registry.
-func catalogFingerprint(models []cschema.Model) string {
+func catalogFingerprint(models []cschema.CatalogModel) string {
 	entries := catalog.ListedEntries(models)
 	parts := make([]string, 0, len(entries))
 	for _, e := range entries {
@@ -1011,7 +1011,7 @@ func (h *healthReporter) extra(context.Context) map[string]any {
 	// The alias families the router currently routes. It is the quickest way to
 	// see whether the live catalog has been loaded or the static seed is still
 	// in force.
-	out["codex_routing"] = map[string]any{"families": router.DefaultRegistry.Families()}
+	out["codex_routing"] = map[string]any{"families": router.DefaultRegistry.BareAliases()}
 	return out
 }
 

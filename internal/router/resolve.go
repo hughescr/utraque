@@ -6,7 +6,7 @@ import (
 	"github.com/hughescr/utraque/internal/apierr"
 )
 
-// anthropicFamilies are non-"claude"/"anthropic"-prefixed shorthands that
+// anthropicPrefixes are non-"claude"/"anthropic"-prefixed shorthands that
 // still route to the Anthropic leg. This is a Phase 1 placeholder for
 // whatever bare picker/agent-frontmatter names actually reach the proxy
 // unprefixed (model-selection's existing Claude route vocabulary); extend
@@ -18,7 +18,7 @@ import (
 // model field. Matching exactly would hard-404 a Claude model on the
 // officially supported leg, which is a worse failure than forwarding a name
 // Anthropic itself will reject authoritatively.
-var anthropicFamilies = []string{"opus", "sonnet", "haiku", "fable"}
+var anthropicPrefixes = []string{"opus", "sonnet", "haiku", "fable"}
 
 // isAnthropicName reports whether an already-lowercased model name belongs to
 // the Anthropic leg.
@@ -26,7 +26,7 @@ func isAnthropicName(lower string) bool {
 	if strings.HasPrefix(lower, "claude") || strings.HasPrefix(lower, "anthropic") {
 		return true
 	}
-	for _, f := range anthropicFamilies {
+	for _, f := range anthropicPrefixes {
 		if strings.HasPrefix(lower, f) {
 			return true
 		}
@@ -211,7 +211,7 @@ func ResolveWith(reg *Registry, model string, betaHeader string) (Decision, erro
 }
 
 // resolveGPTSlug is the generic "gpt-*" fallback: not a known alias, but shaped
-// like a Codex slug, so route it there as raw-slug passthrough. The live catalog
+// like a Codex slug, so route it there as raw-slug fallback. The live catalog
 // confirms or rejects it upstream; router does not validate existence beyond the
 // registry it holds.
 func resolveGPTSlug(lower, clientModel string) (Decision, bool) {
@@ -267,7 +267,7 @@ func resolvePicker(reg *Registry, lower, clientModel string) (Decision, bool) {
 // resolveCodex resolves a (already-lowercased, "anthropic-compat."-stripped)
 // name against DefaultRegistry, after stripping any effort suffix. ok=false
 // means no registry match — callers fall through to the generic "gpt-*"
-// passthrough or to the unknown-model error.
+// fallback or to the unknown-model error.
 func resolveCodex(reg *Registry, lower string, clientModel string) (Decision, bool) {
 	// The whole name is tried against the registry first. A catalog slug whose
 	// own last token happens to be an effort word ("gpt-5.7-max") must resolve
@@ -303,9 +303,9 @@ func resolveCodex(reg *Registry, lower string, clientModel string) (Decision, bo
 }
 
 // unknownModelError builds the 404 Anthropic-shaped error main renders for
-// a model Resolve couldn't place in any backend, listing the known route
-// families so the caller can see what would have worked.
+// a model Resolve couldn't place in any backend, listing the accepted model
+// patterns so the caller can see what would have worked.
 func unknownModelError(reg *Registry, model string) error {
-	families := append([]string{"claude-*", "anthropic-*", "deepseek-flash", "deepseek-v4-pro", "gpt-*"}, reg.Families()...)
-	return apierr.UnknownModel(model, families)
+	acceptedModelPatterns := append([]string{"claude-*", "anthropic-*", "deepseek-flash", "deepseek-v4-pro", "gpt-*"}, reg.BareAliases()...)
+	return apierr.NotFound("model %q not recognised; known route families: %s", model, strings.Join(acceptedModelPatterns, ", "))
 }

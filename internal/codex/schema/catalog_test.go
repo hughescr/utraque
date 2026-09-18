@@ -96,14 +96,14 @@ func TestCacheUnmarshal(t *testing.T) {
 }
 
 func TestListed(t *testing.T) {
-	if !(cschema.Model{Visibility: "list"}).Listed() {
+	if !(cschema.CatalogModel{Visibility: "list"}).Listed() {
 		t.Error(`Visibility "list" should be Listed`)
 	}
 	// Fail closed: hidden and empty visibility are not advertised.
-	if (cschema.Model{Visibility: "hide"}).Listed() {
+	if (cschema.CatalogModel{Visibility: "hide"}).Listed() {
 		t.Error(`Visibility "hide" should not be Listed`)
 	}
-	if (cschema.Model{}).Listed() {
+	if (cschema.CatalogModel{}).Listed() {
 		t.Error("empty visibility should not be Listed")
 	}
 }

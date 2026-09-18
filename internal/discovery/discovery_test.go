@@ -29,8 +29,8 @@ import (
 // codexFixture mirrors the live catalog shapes the plan recorded: two codenamed
 // models at the same version, two version-only models, and one hidden
 // irregular slug.
-func codexFixture() []cschema.Model {
-	return []cschema.Model{
+func codexFixture() []cschema.CatalogModel {
+	return []cschema.CatalogModel{
 		{
 			Slug: "gpt-5.6-sol", DisplayName: "GPT-5.6-Sol", Visibility: cschema.VisibilityList,
 			ContextWindow: 400000, DefaultReasoningLevel: "low", Priority: 10,
@@ -82,13 +82,13 @@ func loadRegistry(t *testing.T) *router.Registry {
 }
 
 func codexOK() discovery.CodexCatalog {
-	return discovery.CodexCatalogFunc(func(context.Context) ([]cschema.Model, error) {
+	return discovery.CodexCatalogFunc(func(context.Context) ([]cschema.CatalogModel, error) {
 		return codexFixture(), nil
 	})
 }
 
 func codexFailing() discovery.CodexCatalog {
-	return discovery.CodexCatalogFunc(func(context.Context) ([]cschema.Model, error) {
+	return discovery.CodexCatalogFunc(func(context.Context) ([]cschema.CatalogModel, error) {
 		return nil, fmt.Errorf("codex catalog unavailable")
 	})
 }
@@ -283,9 +283,9 @@ func TestEveryEmittedIDPassesTheFilterAndRoutesBack(t *testing.T) {
 			CatalogMode: discovery.CatalogModeStatic, Codex: codexOK(),
 			Alias: discovery.AliasOptions{Strategy: discovery.AliasEffortVariants},
 		}},
-		{"alias_passthrough", discovery.Options{
+		{"alias_raw", discovery.Options{
 			CatalogMode: discovery.CatalogModeStatic, Codex: codexOK(),
-			Alias: discovery.AliasOptions{Strategy: discovery.AliasPassthrough},
+			Alias: discovery.AliasOptions{Strategy: discovery.AliasRaw},
 		}},
 		{"alias_off", discovery.Options{
 			CatalogMode: discovery.CatalogModeStatic, Codex: codexOK(),
@@ -438,7 +438,7 @@ func TestAliasStrategies(t *testing.T) {
 				"anthropic-compat.5.5", "anthropic-compat.5.4-mini",
 			},
 			wantAbsent: []string{
-				"anthropic-compat.gpt-5.6-sol", // raw slug is the passthrough strategy's job
+				"anthropic-compat.gpt-5.6-sol", // raw slug is the raw strategy's job
 				"anthropic-compat.sol-high",    // effort rows are effort_variants' job
 			},
 		},
@@ -457,8 +457,8 @@ func TestAliasStrategies(t *testing.T) {
 			},
 		},
 		{
-			name:  "passthrough emits raw slugs only",
-			alias: discovery.AliasOptions{Strategy: discovery.AliasPassthrough},
+			name:  "raw emits raw slugs only",
+			alias: discovery.AliasOptions{Strategy: discovery.AliasRaw},
 			want: []string{
 				"anthropic-compat.gpt-5.6-sol", "anthropic-compat.gpt-5.6-terra",
 				"anthropic-compat.gpt-5.5", "anthropic-compat.gpt-5.4-mini",
@@ -875,7 +875,7 @@ func TestDeadlineIsHonouredWithASlowCodexCatalog(t *testing.T) {
 	loadRegistry(t)
 	const deadline = 150 * time.Millisecond
 
-	slowCodex := discovery.CodexCatalogFunc(func(ctx context.Context) ([]cschema.Model, error) {
+	slowCodex := discovery.CodexCatalogFunc(func(ctx context.Context) ([]cschema.CatalogModel, error) {
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
@@ -895,7 +895,7 @@ func TestDeadlineIsHonouredWithASlowCodexCatalog(t *testing.T) {
 		t.Errorf("Models took %s; the %s deadline was not enforced", elapsed, deadline)
 	}
 	if !hasID(resp, "claude-opus-5") {
-		t.Errorf("a slow Codex read must not take the Claude half down with it; ids = %v", ids(resp))
+		t.Errorf("a slow Codex read must not take the Anthropic half down with it; ids = %v", ids(resp))
 	}
 }
 
@@ -1124,8 +1124,8 @@ func TestAdvertisedIDsSurviveAPickerTierReset(t *testing.T) {
 // picker tier that recorded it survives, so it must not be offered at all.
 func TestUnparseableEffortVariantsAreNotAdvertised(t *testing.T) {
 	reg := loadRegistry(t)
-	exotic := discovery.CodexCatalogFunc(func(context.Context) ([]cschema.Model, error) {
-		return []cschema.Model{{
+	exotic := discovery.CodexCatalogFunc(func(context.Context) ([]cschema.CatalogModel, error) {
+		return []cschema.CatalogModel{{
 			Slug: "gpt-5.6-sol", DisplayName: "GPT-5.6-Sol", Visibility: cschema.VisibilityList,
 			SupportedReasoningLevels: []cschema.ReasoningLevel{
 				{Effort: "high"},    // the grammar knows this one

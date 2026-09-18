@@ -42,10 +42,10 @@ const (
 	// reasoning effort the model supports ("sol-high", "sol-5.6-high"). Useful,
 	// and long: a five-effort model turns two rows into twelve.
 	AliasEffortVariants = "effort_variants"
-	// AliasPassthrough emits one row per upstream slug ("gpt-5.6-sol") through
+	// AliasRaw emits one row per upstream slug ("gpt-5.6-sol") through
 	// IDTemplate, with no synthesised aliases. For when you want the picker to
 	// name exactly what Codex serves.
-	AliasPassthrough = "passthrough"
+	AliasRaw = "raw"
 )
 
 // Defaults for the handler.
@@ -85,14 +85,14 @@ func PassesClientFilter(id string) bool { return clientFilter.MatchString(id) }
 // package's job, and discovery must never be a reason to rotate it. The caller
 // adapts its catalog client to this shape (see CodexCatalogFunc).
 type CodexCatalog interface {
-	Models(ctx context.Context) ([]cschema.Model, error)
+	Models(ctx context.Context) ([]cschema.CatalogModel, error)
 }
 
 // CodexCatalogFunc adapts a function to CodexCatalog.
-type CodexCatalogFunc func(ctx context.Context) ([]cschema.Model, error)
+type CodexCatalogFunc func(ctx context.Context) ([]cschema.CatalogModel, error)
 
 // Models implements CodexCatalog.
-func (f CodexCatalogFunc) Models(ctx context.Context) ([]cschema.Model, error) { return f(ctx) }
+func (f CodexCatalogFunc) Models(ctx context.Context) ([]cschema.CatalogModel, error) { return f(ctx) }
 
 // AliasOptions governs the Codex half of the merged catalog.
 //
@@ -147,7 +147,7 @@ func (a AliasOptions) displayTemplate() string {
 }
 
 // Options configures a Handler. Every field has a working default; New with a
-// zero Options serves the static Claude list plus nothing else, which is a
+// zero Options serves the static Anthropic list plus nothing else, which is a
 // valid — if dull — catalog.
 type Options struct {
 	// Deadline bounds the whole merge, upstream reads included. Zero or
@@ -158,10 +158,10 @@ type Options struct {
 	CatalogMode string
 
 	// Anthropic reads Anthropic's own catalog. Nil behaves like
-	// CatalogModeStatic for the Claude half.
+	// CatalogModeStatic for the Anthropic half.
 	Anthropic anthropic.Catalog
 
-	// StaticAnthropicModels overrides the built-in Claude fallback list. Nil
+	// StaticAnthropicModels overrides the built-in Anthropic fallback list. Nil
 	// means StaticAnthropicModels(). An explicitly empty (non-nil) slice means
 	// "no static fallback", which is how a caller asks for upstream-or-nothing
 	// without giving up the merge mode's other behaviour.
@@ -206,7 +206,7 @@ func (o Options) catalogMode() string {
 
 func (o Options) staticModels() []anthropic.CatalogModel {
 	if o.StaticAnthropicModels == nil {
-		return staticClaudeModels
+		return staticAnthropicModels
 	}
 	return o.StaticAnthropicModels
 }
@@ -224,10 +224,10 @@ func (o Options) validate() error {
 	switch strategy {
 	case AliasOff:
 		return nil
-	case AliasTemplate, AliasEffortVariants, AliasPassthrough:
+	case AliasTemplate, AliasEffortVariants, AliasRaw:
 	default:
 		return fmt.Errorf("utraque/discovery: alias strategy %q: want %s|%s|%s|%s",
-			o.Alias.Strategy, AliasOff, AliasTemplate, AliasEffortVariants, AliasPassthrough)
+			o.Alias.Strategy, AliasOff, AliasTemplate, AliasEffortVariants, AliasRaw)
 	}
 
 	tmpl := o.Alias.idTemplate()

@@ -10,7 +10,7 @@ import (
 
 // codexRow pairs an emitted picker row with the route that makes it work.
 type codexRow struct {
-	model Model
+	model PickerRow
 	route router.PickerRoute
 }
 
@@ -23,14 +23,14 @@ type codexRow struct {
 // slug the registry has never seen — a hidden model, or one that arrived
 // between catalog refreshes — which is offered under its raw slug and made
 // routable by the picker-route registration.
-func (h *Handler) codexRows(models []cschema.Model) []codexRow {
+func (h *Handler) codexRows(models []cschema.CatalogModel) []codexRow {
 	strategy := h.alias.strategy()
 	if strategy == AliasOff || len(models) == 0 {
 		return nil
 	}
 
 	// Eligible catalog models, keyed by slug.
-	bySlug := make(map[string]cschema.Model, len(models))
+	bySlug := make(map[string]cschema.CatalogModel, len(models))
 	slugs := make([]string, 0, len(models))
 	for _, m := range models {
 		slug := strings.ToLower(strings.TrimSpace(m.Slug))
@@ -59,7 +59,7 @@ func (h *Handler) codexRows(models []cschema.Model) []codexRow {
 	})
 
 	// Registry aliases grouped by the slug they resolve to. Raw-tier names are
-	// kept separately: AliasPassthrough wants exactly those, and the other
+	// kept separately: AliasRaw wants exactly those, and the other
 	// strategies want exactly the derived ones.
 	derived := make(map[string][]string)
 	for _, a := range h.reg.AliasList() {
@@ -81,7 +81,7 @@ func (h *Handler) codexRows(models []cschema.Model) []codexRow {
 
 		var names []string
 		switch strategy {
-		case AliasPassthrough:
+		case AliasRaw:
 			names = []string{slug}
 		default:
 			names = orderAliases(derived[slug])
@@ -124,7 +124,7 @@ func (h *Handler) codexRows(models []cschema.Model) []codexRow {
 func (h *Handler) codexRow(idTmpl, displayTmpl, alias, slug, display, effort string) codexRow {
 	vars := templateVars{Alias: alias, Slug: slug, Display: display, Effort: effort}
 	return codexRow{
-		model: Model{
+		model: PickerRow{
 			ID:          render(idTmpl, vars),
 			DisplayName: render(displayTmpl, vars),
 			Type:        modelType,

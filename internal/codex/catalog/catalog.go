@@ -75,7 +75,7 @@ const (
 type Catalog interface {
 	// Models returns the current catalog, fetching or revalidating as the
 	// staleness rules require. cred signs the request; it is never stored.
-	Models(ctx context.Context, cred auth.Credential) ([]cschema.Model, error)
+	Models(ctx context.Context, cred auth.Credential) ([]cschema.CatalogModel, error)
 	// Age reports how long ago the held snapshot was fetched, or 0 if none has
 	// been obtained yet.
 	Age() time.Duration
@@ -134,7 +134,7 @@ type Client struct {
 
 // state is the in-memory snapshot.
 type state struct {
-	models    []cschema.Model
+	models    []cschema.CatalogModel
 	etag      string
 	fetchedAt time.Time
 	loaded    bool
@@ -196,7 +196,7 @@ func New(opts Options) *Client {
 }
 
 // Models implements Catalog.
-func (c *Client) Models(ctx context.Context, cred auth.Credential) ([]cschema.Model, error) {
+func (c *Client) Models(ctx context.Context, cred auth.Credential) ([]cschema.CatalogModel, error) {
 	c.ensureDiskLoaded()
 
 	c.mu.RLock()
@@ -512,11 +512,11 @@ func (c *Client) writeDisk(ns state) {
 // Each Model's SupportedReasoningLevels slice is copied too — a shallow copy
 // would leave callers sharing (and able to mutate) the cached backing array,
 // racing the goroutines that read the held snapshot.
-func cloneModels(in []cschema.Model) []cschema.Model {
+func cloneModels(in []cschema.CatalogModel) []cschema.CatalogModel {
 	if len(in) == 0 {
 		return nil
 	}
-	out := make([]cschema.Model, len(in))
+	out := make([]cschema.CatalogModel, len(in))
 	copy(out, in)
 	for i := range out {
 		if len(out[i].SupportedReasoningLevels) > 0 {
@@ -534,7 +534,7 @@ func cloneModels(in []cschema.Model) []cschema.Model {
 // detached background refresh — a caller about to install the result into the
 // live router (see RefreshRegistry) must not publish a stale list and report
 // success. On fetch failure it returns the error and no models.
-func (c *Client) currentModels(ctx context.Context, cred auth.Credential) ([]cschema.Model, error) {
+func (c *Client) currentModels(ctx context.Context, cred auth.Credential) ([]cschema.CatalogModel, error) {
 	c.ensureDiskLoaded()
 	c.mu.RLock()
 	st := c.st

@@ -190,7 +190,7 @@ func TestCatalogModelFallsBackWhenUnavailable(t *testing.T) {
 
 type failingCatalog struct{}
 
-func (failingCatalog) Models(context.Context, auth.Credential) ([]cschema.Model, error) {
+func (failingCatalog) Models(context.Context, auth.Credential) ([]cschema.CatalogModel, error) {
 	return nil, errors.New("catalog unavailable")
 }
 

@@ -199,7 +199,7 @@ type Metadata struct {
 // model is the catalog entry for that slug (used to clamp effort and to source
 // the default summary) — pass the zero Model when the catalog has no entry, and
 // effort is left unclamped. It never mutates its inputs.
-func Translate(req *aschema.MessagesRequest, dec router.Decision, model cschema.Model, opts Options) (*cschema.ResponsesRequest, Metadata, error) {
+func Translate(req *aschema.MessagesRequest, dec router.Decision, model cschema.CatalogModel, opts Options) (*cschema.ResponsesRequest, Metadata, error) {
 	if req == nil {
 		return nil, Metadata{}, fmt.Errorf("translate: nil request")
 	}
@@ -616,7 +616,7 @@ func disableParallel(tools []aschema.Tool, mutating map[string]bool) (bool, []st
 // supported levels, and the summary (config override else catalog default,
 // with "none" meaning omit). It returns nil reasoning only when there is no
 // effort and no summary to send.
-func translateReasoning(dec router.Decision, model cschema.Model, opts Options) (*cschema.Reasoning, EffortResult, string) {
+func translateReasoning(dec router.Decision, model cschema.CatalogModel, opts Options) (*cschema.Reasoning, EffortResult, string) {
 	requested, source := chooseEffort(dec, model, opts)
 	applied, clamped := clampEffort(requested, model)
 	res := EffortResult{Requested: requested, Applied: applied, Source: source, Clamped: clamped}
@@ -640,7 +640,7 @@ func translateReasoning(dec router.Decision, model cschema.Model, opts Options) 
 // its provenance, before any clamping. A model-name suffix (already parsed by
 // the router into the Decision) wins; then the anthropic-beta signal; then the
 // per-model config override; then the catalog default.
-func chooseEffort(dec router.Decision, model cschema.Model, opts Options) (effort, source string) {
+func chooseEffort(dec router.Decision, model cschema.CatalogModel, opts Options) (effort, source string) {
 	if dec.EffortSource == router.EffortSourceSuffix && dec.Effort != "" {
 		return dec.Effort, router.EffortSourceSuffix
 	}
@@ -662,7 +662,7 @@ func chooseEffort(dec router.Decision, model cschema.Model, opts Options) (effor
 // below every supported level, UP to the lowest supported one). A model that
 // declares no supported levels leaves the request unchanged (nothing to clamp
 // against). Returns the applied level and whether clamping changed it.
-func clampEffort(requested string, model cschema.Model) (applied string, clamped bool) {
+func clampEffort(requested string, model cschema.CatalogModel) (applied string, clamped bool) {
 	if requested == "" {
 		return "", false
 	}

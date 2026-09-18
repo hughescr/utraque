@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"strings"
 
 	"github.com/hughescr/utraque/internal/anthropic/schema"
 )
@@ -130,13 +129,6 @@ func Permission(format string, args ...any) *Error {
 // NotFound builds a 404.
 func NotFound(format string, args ...any) *Error {
 	return New(TypeNotFound, format, args...)
-}
-
-// UnknownModel is a router-facing convenience over NotFound: a model name
-// Resolve couldn't place in any backend, rendered as a 404 listing the
-// known route families so the caller can see what would have worked.
-func UnknownModel(model string, families []string) *Error {
-	return NotFound("model %q not recognised; known route families: %s", model, strings.Join(families, ", "))
 }
 
 // RequestTooLarge builds a 413.

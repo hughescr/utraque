@@ -61,7 +61,7 @@ func runOneEvent(t *testing.T, typ string) stream.Result {
 	body := frameOf(cschema.EventResponseCreated,
 		`{"type":"`+cschema.EventResponseCreated+`","response":{"id":"resp_handled"}}`) +
 		frameOf(typ, fmt.Sprintf(`{"type":%q}`, typ))
-	tr := stream.New(stream.Options{Model: "sol"})
+	tr := stream.New(stream.Options{UpstreamModel: "sol"})
 	res, _ := tr.Run(context.Background(), strings.NewReader(body), &recordingSink{})
 	return res
 }

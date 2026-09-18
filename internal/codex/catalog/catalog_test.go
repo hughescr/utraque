@@ -60,7 +60,7 @@ type fakeCatalog struct {
 	t *testing.T
 
 	mu               sync.Mutex
-	models           []cschema.Model
+	models           []cschema.CatalogModel
 	etag             string
 	status304        bool // when true and If-None-Match matches, answer 304
 	calls            int
@@ -73,11 +73,11 @@ type fakeCatalog struct {
 	requestSignal    chan struct{}
 }
 
-func newFakeCatalog(t *testing.T, models []cschema.Model, etag string) *fakeCatalog {
+func newFakeCatalog(t *testing.T, models []cschema.CatalogModel, etag string) *fakeCatalog {
 	return &fakeCatalog{t: t, models: models, etag: etag, requestSignal: make(chan struct{}, 16)}
 }
 
-func (f *fakeCatalog) set(models []cschema.Model, etag string, status304 bool) {
+func (f *fakeCatalog) set(models []cschema.CatalogModel, etag string, status304 bool) {
 	f.mu.Lock()
 	f.models, f.etag, f.status304 = models, etag, status304
 	f.mu.Unlock()
@@ -140,19 +140,19 @@ func eventually(t *testing.T, timeout time.Duration, cond func() bool) {
 	t.Fatalf("condition not met within %s", timeout)
 }
 
-func solModel() cschema.Model {
-	return cschema.Model{Slug: "gpt-5.6-sol", Visibility: "list", ContextWindow: 400000,
+func solModel() cschema.CatalogModel {
+	return cschema.CatalogModel{Slug: "gpt-5.6-sol", Visibility: "list", ContextWindow: 400000,
 		DefaultReasoningLevel: "low", Priority: 10}
 }
 
-func terraModel() cschema.Model {
-	return cschema.Model{Slug: "gpt-5.6-terra", Visibility: "list", Priority: 8}
+func terraModel() cschema.CatalogModel {
+	return cschema.CatalogModel{Slug: "gpt-5.6-terra", Visibility: "list", Priority: 8}
 }
 
 // --- fetch + header tests -------------------------------------------------
 
 func TestFetchSendsRequiredHeadersAndParses(t *testing.T) {
-	fake := newFakeCatalog(t, []cschema.Model{solModel()}, `W/"v1"`)
+	fake := newFakeCatalog(t, []cschema.CatalogModel{solModel()}, `W/"v1"`)
 	srv := httptest.NewServer(fake)
 	t.Cleanup(srv.Close)
 
@@ -187,7 +187,7 @@ func TestFetchSendsRequiredHeadersAndParses(t *testing.T) {
 // the request outright ("field required" at query.client_version) when it is
 // absent, so a regression here would silently reproduce that outage.
 func TestFetchSendsClientVersionQueryParam(t *testing.T) {
-	fake := newFakeCatalog(t, []cschema.Model{solModel()}, `W/"v1"`)
+	fake := newFakeCatalog(t, []cschema.CatalogModel{solModel()}, `W/"v1"`)
 	srv := httptest.NewServer(fake)
 	t.Cleanup(srv.Close)
 
@@ -242,7 +242,7 @@ func TestBadRequestNamesClientVersionInError(t *testing.T) {
 }
 
 func TestTTLFreshServesWithoutSecondCall(t *testing.T) {
-	fake := newFakeCatalog(t, []cschema.Model{solModel()}, `W/"v1"`)
+	fake := newFakeCatalog(t, []cschema.CatalogModel{solModel()}, `W/"v1"`)
 	srv := httptest.NewServer(fake)
 	t.Cleanup(srv.Close)
 
@@ -263,7 +263,7 @@ func TestTTLFreshServesWithoutSecondCall(t *testing.T) {
 }
 
 func TestStaleWhileRevalidateServesStaleThenRefreshes(t *testing.T) {
-	fake := newFakeCatalog(t, []cschema.Model{solModel()}, `W/"v1"`)
+	fake := newFakeCatalog(t, []cschema.CatalogModel{solModel()}, `W/"v1"`)
 	srv := httptest.NewServer(fake)
 	t.Cleanup(srv.Close)
 
@@ -280,7 +280,7 @@ func TestStaleWhileRevalidateServesStaleThenRefreshes(t *testing.T) {
 
 	// Go stale, and change what the server will return on revalidation.
 	clk.advance(120 * time.Second)
-	fake.set([]cschema.Model{solModel(), terraModel()}, `W/"v2"`, false)
+	fake.set([]cschema.CatalogModel{solModel(), terraModel()}, `W/"v2"`, false)
 
 	// The stale read returns the OLD snapshot immediately.
 	stale, err := c.Models(context.Background(), fakeCred())
@@ -302,7 +302,7 @@ func TestStaleWhileRevalidateServesStaleThenRefreshes(t *testing.T) {
 }
 
 func TestETag304ReusesModels(t *testing.T) {
-	fake := newFakeCatalog(t, []cschema.Model{solModel()}, `W/"v1"`)
+	fake := newFakeCatalog(t, []cschema.CatalogModel{solModel()}, `W/"v1"`)
 	srv := httptest.NewServer(fake)
 	t.Cleanup(srv.Close)
 
@@ -315,7 +315,7 @@ func TestETag304ReusesModels(t *testing.T) {
 
 	// Go stale; server now answers 304 to a matching If-None-Match.
 	clk.advance(120 * time.Second)
-	fake.set([]cschema.Model{solModel()}, `W/"v1"`, true)
+	fake.set([]cschema.CatalogModel{solModel()}, `W/"v1"`, true)
 
 	// Trigger background revalidation.
 	if _, err := c.Models(context.Background(), fakeCred()); err != nil {
@@ -361,7 +361,7 @@ func TestUnauthorizedIsAuthenticationError(t *testing.T) {
 // --- disk cache tests ------------------------------------------------------
 
 func TestFetchWritesInteroperableDiskCache(t *testing.T) {
-	fake := newFakeCatalog(t, []cschema.Model{solModel()}, `W/"v1"`)
+	fake := newFakeCatalog(t, []cschema.CatalogModel{solModel()}, `W/"v1"`)
 	srv := httptest.NewServer(fake)
 	t.Cleanup(srv.Close)
 
@@ -415,7 +415,7 @@ func TestFreshDiskCacheServedWithoutNetwork(t *testing.T) {
 		ClientVersion: "x",
 		ETag:          `W/"disk"`,
 		FetchedAt:     clk.now(),
-		Models:        []cschema.Model{solModel()},
+		Models:        []cschema.CatalogModel{solModel()},
 	}
 	b, _ := json.Marshal(cache)
 	if err := os.WriteFile(cachePath, b, 0o644); err != nil {
@@ -450,7 +450,7 @@ func TestFreshDiskCacheServedWithoutNetwork(t *testing.T) {
 
 func TestPopulateRegistryTiersAndVisibility(t *testing.T) {
 	reg := router.NewRegistry()
-	models := []cschema.Model{
+	models := []cschema.CatalogModel{
 		{Slug: "gpt-5.6-sol", Visibility: "list", Priority: 10},
 		{Slug: "gpt-5.7-sol", Visibility: "list", Priority: 1}, // newer version wins bare despite lower priority
 		{Slug: "gpt-5.5", Visibility: "list"},
@@ -482,7 +482,7 @@ func TestPopulateRegistryTiersAndVisibility(t *testing.T) {
 		t.Errorf(`Resolve("gpt-5.9-ghost") = %q, want not-found (model is hidden)`, u)
 	}
 
-	fams := reg.Families()
+	fams := reg.BareAliases()
 	if !containsStr(fams, "sol") || !containsStr(fams, "5.5") || containsStr(fams, "ghost") {
 		t.Errorf("Families = %v, want sol and 5.5 present, ghost absent", fams)
 	}
@@ -494,7 +494,7 @@ func TestPopulateRegistryPriorityBreaksSameVersionTie(t *testing.T) {
 	// SAME codename+version, so only priority separates them for the bare name.
 	reg.SetOverride("gpt-5.6-zed-a", "zed", "5.6", "")
 	reg.SetOverride("gpt-5.6-zed-b", "zed", "5.6", "")
-	models := []cschema.Model{
+	models := []cschema.CatalogModel{
 		{Slug: "gpt-5.6-zed-a", Visibility: "list", Priority: 3},
 		{Slug: "gpt-5.6-zed-b", Visibility: "list", Priority: 9},
 	}
@@ -506,7 +506,7 @@ func TestPopulateRegistryPriorityBreaksSameVersionTie(t *testing.T) {
 }
 
 func TestRefreshRegistryFromLiveCatalog(t *testing.T) {
-	fake := newFakeCatalog(t, []cschema.Model{solModel(), terraModel(),
+	fake := newFakeCatalog(t, []cschema.CatalogModel{solModel(), terraModel(),
 		{Slug: "gpt-5.9-ghost", Visibility: "hide"}}, `W/"v1"`)
 	srv := httptest.NewServer(fake)
 	t.Cleanup(srv.Close)
@@ -534,7 +534,7 @@ func TestRefreshRegistryFromLiveCatalog(t *testing.T) {
 // Models would serve immediately while revalidating in the background) and call
 // that success.
 func TestRefreshRegistryBlocksForCurrentCatalogWhenStale(t *testing.T) {
-	fake := newFakeCatalog(t, []cschema.Model{solModel()}, `W/"v1"`)
+	fake := newFakeCatalog(t, []cschema.CatalogModel{solModel()}, `W/"v1"`)
 	srv := httptest.NewServer(fake)
 	t.Cleanup(srv.Close)
 
@@ -548,7 +548,7 @@ func TestRefreshRegistryBlocksForCurrentCatalogWhenStale(t *testing.T) {
 
 	// Go stale and change what the server advertises to sol+terra.
 	clk.advance(120 * time.Second)
-	fake.set([]cschema.Model{solModel(), terraModel()}, `W/"v2"`, false)
+	fake.set([]cschema.CatalogModel{solModel(), terraModel()}, `W/"v2"`, false)
 
 	reg := router.NewRegistry()
 	if err := c.RefreshRegistry(context.Background(), fakeCred(), reg); err != nil {
@@ -565,7 +565,7 @@ func TestRefreshRegistryBlocksForCurrentCatalogWhenStale(t *testing.T) {
 // held validator instead of retaining the previous one — otherwise a later 304
 // for the old validator could wrongly mark the new body fresh.
 func TestMissingETagOn200ClearsValidator(t *testing.T) {
-	fake := newFakeCatalog(t, []cschema.Model{solModel()}, `W/"e1"`)
+	fake := newFakeCatalog(t, []cschema.CatalogModel{solModel()}, `W/"e1"`)
 	srv := httptest.NewServer(fake)
 	t.Cleanup(srv.Close)
 
@@ -579,7 +579,7 @@ func TestMissingETagOn200ClearsValidator(t *testing.T) {
 
 	// Go stale; server now returns a new body with NO ETag.
 	clk.advance(120 * time.Second)
-	fake.set([]cschema.Model{solModel(), terraModel()}, "", false)
+	fake.set([]cschema.CatalogModel{solModel(), terraModel()}, "", false)
 	if _, err := c.Models(context.Background(), fakeCred()); err != nil {
 		t.Fatalf("stale Models: %v", err)
 	}
@@ -611,13 +611,13 @@ func TestDiskCacheIgnoredOnClientVersionMismatch(t *testing.T) {
 	clk := newClock()
 
 	// A fresh (within-TTL) disk cache tagged with an OLD client version.
-	cache := cschema.Cache{ClientVersion: "old", ETag: `W/"d"`, FetchedAt: clk.now(), Models: []cschema.Model{solModel()}}
+	cache := cschema.Cache{ClientVersion: "old", ETag: `W/"d"`, FetchedAt: clk.now(), Models: []cschema.CatalogModel{solModel()}}
 	b, _ := json.Marshal(cache)
 	if err := os.WriteFile(cachePath, b, 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	fake := newFakeCatalog(t, []cschema.Model{solModel(), terraModel()}, `W/"v2"`)
+	fake := newFakeCatalog(t, []cschema.CatalogModel{solModel(), terraModel()}, `W/"v2"`)
 	srv := httptest.NewServer(fake)
 	t.Cleanup(srv.Close)
 
@@ -646,13 +646,13 @@ func TestDiskCacheIgnoredWhenFetchedAtInFuture(t *testing.T) {
 	cachePath := filepath.Join(dir, "utraque-models_cache.json")
 	clk := newClock()
 
-	cache := cschema.Cache{ETag: `W/"d"`, FetchedAt: clk.now().Add(time.Hour), Models: []cschema.Model{solModel()}}
+	cache := cschema.Cache{ETag: `W/"d"`, FetchedAt: clk.now().Add(time.Hour), Models: []cschema.CatalogModel{solModel()}}
 	b, _ := json.Marshal(cache)
 	if err := os.WriteFile(cachePath, b, 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	fake := newFakeCatalog(t, []cschema.Model{solModel(), terraModel()}, `W/"v2"`)
+	fake := newFakeCatalog(t, []cschema.CatalogModel{solModel(), terraModel()}, `W/"v2"`)
 	srv := httptest.NewServer(fake)
 	t.Cleanup(srv.Close)
 
@@ -676,7 +676,7 @@ func TestDiskCacheIgnoredWhenFetchedAtInFuture(t *testing.T) {
 func TestModelsReturnsDeepCopiedReasoningLevels(t *testing.T) {
 	m := solModel()
 	m.SupportedReasoningLevels = []cschema.ReasoningLevel{{Effort: "low"}, {Effort: "high"}}
-	fake := newFakeCatalog(t, []cschema.Model{m}, `W/"v1"`)
+	fake := newFakeCatalog(t, []cschema.CatalogModel{m}, `W/"v1"`)
 	srv := httptest.NewServer(fake)
 	t.Cleanup(srv.Close)
 

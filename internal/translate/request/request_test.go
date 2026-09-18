@@ -25,8 +25,8 @@ const requestsDir = "../../../testdata/requests"
 
 // --- catalog model fixtures (shapes copied from the real Codex catalog) ---
 
-func solModel() cschema.Model {
-	return cschema.Model{
+func solModel() cschema.CatalogModel {
+	return cschema.CatalogModel{
 		Slug:                    "gpt-5.6-sol",
 		DefaultReasoningLevel:   cschema.EffortLow,
 		DefaultReasoningSummary: "none",
@@ -36,8 +36,8 @@ func solModel() cschema.Model {
 	}
 }
 
-func lunaModel() cschema.Model {
-	return cschema.Model{
+func lunaModel() cschema.CatalogModel {
+	return cschema.CatalogModel{
 		Slug:                    "gpt-5.6-luna",
 		DefaultReasoningLevel:   cschema.EffortMedium,
 		DefaultReasoningSummary: "none",
@@ -47,8 +47,8 @@ func lunaModel() cschema.Model {
 	}
 }
 
-func gpt54Model() cschema.Model {
-	return cschema.Model{
+func gpt54Model() cschema.CatalogModel {
+	return cschema.CatalogModel{
 		Slug:                    "gpt-5.4",
 		DefaultReasoningLevel:   cschema.EffortMedium,
 		DefaultReasoningSummary: "none",
@@ -70,7 +70,7 @@ func levels(efforts ...string) []cschema.ReasoningLevel {
 // defaultCase.
 type caseCfg struct {
 	dec   router.Decision
-	model cschema.Model
+	model cschema.CatalogModel
 	opts  request.Options
 }
 
@@ -165,7 +165,7 @@ func TestEffortMatrix(t *testing.T) {
 	cases := []struct {
 		name        string
 		dec         router.Decision
-		model       cschema.Model
+		model       cschema.CatalogModel
 		opts        request.Options
 		wantApplied string
 		wantSource  string
@@ -197,13 +197,13 @@ func TestEffortMatrix(t *testing.T) {
 			cschema.EffortMax, router.EffortSourceSuffix, false},
 		// Clamp UP: a model whose floor is medium, request low.
 		{"clamp_up_to_floor", suffix(cschema.EffortLow),
-			cschema.Model{DefaultReasoningLevel: cschema.EffortMedium,
+			cschema.CatalogModel{DefaultReasoningLevel: cschema.EffortMedium,
 				SupportedReasoningLevels: levels(cschema.EffortMedium, cschema.EffortHigh)},
 			request.Options{},
 			cschema.EffortMedium, router.EffortSourceSuffix, true},
 		// No catalog levels: request passes through unclamped.
 		{"no_catalog_levels", suffix(cschema.EffortUltra),
-			cschema.Model{}, request.Options{},
+			cschema.CatalogModel{}, request.Options{},
 			cschema.EffortUltra, router.EffortSourceSuffix, false},
 	}
 

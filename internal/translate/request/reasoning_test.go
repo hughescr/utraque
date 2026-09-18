@@ -35,7 +35,7 @@ func TestReasoningSurvivesTheRoundTrip(t *testing.T) {
 	var buf bytes.Buffer
 	w := stream.NewSSEWriter(&buf)
 	tr := stream.New(stream.Options{
-		Model: "gpt-5.6-sol", EmitReasoning: "thinking", OnTruncate: "error",
+		UpstreamModel: "gpt-5.6-sol", EmitReasoning: "thinking", OnTruncate: "error",
 		Heartbeat: -1, UpstreamIdle: -1,
 	})
 	if _, err := tr.Run(context.Background(), bytes.NewReader(raw), w); err != nil {
@@ -62,7 +62,7 @@ func TestReasoningSurvivesTheRoundTrip(t *testing.T) {
 	}
 	out, meta, err := request.Translate(
 		&aschema.MessagesRequest{Model: "sol-high", Messages: msgs},
-		decisionFor("gpt-5.6-sol"), cschema.Model{}, request.Options{},
+		decisionFor("gpt-5.6-sol"), cschema.CatalogModel{}, request.Options{},
 	)
 	if err != nil {
 		t.Fatalf("request translate: %v", err)
@@ -158,7 +158,7 @@ func TestUnreplayableThinkingIsDroppedAndCounted(t *testing.T) {
 	}
 	out, meta, err := request.Translate(
 		&aschema.MessagesRequest{Model: "sol-high", Messages: msgs},
-		decisionFor("gpt-5.6-sol"), cschema.Model{}, request.Options{},
+		decisionFor("gpt-5.6-sol"), cschema.CatalogModel{}, request.Options{},
 	)
 	if err != nil {
 		t.Fatalf("translate: %v", err)
@@ -174,7 +174,7 @@ func TestUnreplayableThinkingIsDroppedAndCounted(t *testing.T) {
 
 func keyFor(t *testing.T, req *aschema.MessagesRequest, upstream string) string {
 	t.Helper()
-	out, meta, err := request.Translate(req, decisionFor(upstream), cschema.Model{}, request.Options{})
+	out, meta, err := request.Translate(req, decisionFor(upstream), cschema.CatalogModel{}, request.Options{})
 	if err != nil {
 		t.Fatalf("translate: %v", err)
 	}
@@ -271,7 +271,7 @@ func TestBillingHeaderDoesNotMoveTheCacheKey(t *testing.T) {
 
 func translateFor(t *testing.T, req *aschema.MessagesRequest) (*cschema.ResponsesRequest, request.Metadata) {
 	t.Helper()
-	out, meta, err := request.Translate(req, decisionFor("gpt-5.6-sol"), cschema.Model{}, request.Options{})
+	out, meta, err := request.Translate(req, decisionFor("gpt-5.6-sol"), cschema.CatalogModel{}, request.Options{})
 	if err != nil {
 		t.Fatalf("translate: %v", err)
 	}

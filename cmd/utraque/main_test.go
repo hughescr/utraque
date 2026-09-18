@@ -309,7 +309,7 @@ func TestUnknownModelReturns404Envelope(t *testing.T) {
 		t.Errorf("message = %q, want it to name the rejected model", ev.Error.Message)
 	}
 	if !strings.Contains(ev.Error.Message, "claude-*") {
-		t.Errorf("message = %q, want it to list the known route families", ev.Error.Message)
+		t.Errorf("message = %q, want it to list the accepted model patterns", ev.Error.Message)
 	}
 	if n := hits.Load(); n != 0 {
 		t.Errorf("upstream was contacted %d times for an unknown model, want 0", n)

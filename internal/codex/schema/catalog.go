@@ -27,9 +27,9 @@ type ReasoningLevel struct {
 	Description string `json:"description,omitempty"`
 }
 
-// Model is one entry in the Codex model catalog. Unknown fields are ignored on
+// CatalogModel is one entry in the Codex model catalog. Unknown fields are ignored on
 // decode; the fields here are the ones utraque routes and reasons about.
-type Model struct {
+type CatalogModel struct {
 	Slug                     string           `json:"slug"`
 	DisplayName              string           `json:"display_name,omitempty"`
 	Description              string           `json:"description,omitempty"`
@@ -45,12 +45,12 @@ type Model struct {
 // listed only when its visibility is exactly VisibilityList; an empty or
 // unknown visibility is treated as not-listed (fail closed — never advertise a
 // model the catalog did not explicitly mark for listing).
-func (m Model) Listed() bool { return m.Visibility == VisibilityList }
+func (m CatalogModel) Listed() bool { return m.Visibility == VisibilityList }
 
 // SupportedEfforts returns the effort levels this model accepts, in catalog
 // order. It flattens the object array into the effort strings callers clamp
 // against.
-func (m Model) SupportedEfforts() []string {
+func (m CatalogModel) SupportedEfforts() []string {
 	if len(m.SupportedReasoningLevels) == 0 {
 		return nil
 	}
@@ -66,7 +66,7 @@ func (m Model) SupportedEfforts() []string {
 // SupportsEffort reports whether level is one of the model's supported
 // reasoning efforts. An empty level, or a model that declares no levels,
 // reports false.
-func (m Model) SupportsEffort(level string) bool {
+func (m CatalogModel) SupportsEffort(level string) bool {
 	if level == "" {
 		return false
 	}
@@ -83,7 +83,7 @@ func (m Model) SupportsEffort(level string) bool {
 // (etag/fetched_at/client_version) never leaks into what we treat as a live
 // wire response.
 type ModelsResponse struct {
-	Models []Model `json:"models"`
+	Models []CatalogModel `json:"models"`
 }
 
 // Cache is the on-disk catalog shape: the model list plus the metadata needed
@@ -92,8 +92,8 @@ type ModelsResponse struct {
 // utraque writes is structurally interoperable with the CLI's cache. utraque
 // still keeps its OWN cache file by default and never overwrites the CLI's.
 type Cache struct {
-	ClientVersion string    `json:"client_version,omitempty"`
-	ETag          string    `json:"etag,omitempty"`
-	FetchedAt     time.Time `json:"fetched_at"`
-	Models        []Model   `json:"models"`
+	ClientVersion string         `json:"client_version,omitempty"`
+	ETag          string         `json:"etag,omitempty"`
+	FetchedAt     time.Time      `json:"fetched_at"`
+	Models        []CatalogModel `json:"models"`
 }

@@ -335,12 +335,12 @@ func (r *Registry) Resolve(name string) (upstream string, ok bool) {
 	return "", false
 }
 
-// Families lists the known *bare* (rolling) route family names — e.g. "sol",
+// BareAliases lists the known bare (rolling) alias names — e.g. "sol",
 // "spark", "5.4-mini" — sorted, for the unknown-model 404 message. Raw and
 // pinned keys are deliberately excluded to keep that message short; the
-// wildcard families (claude-*, anthropic-*, gpt-*) are prepended by the
+// wildcard patterns (claude-*, anthropic-*, gpt-*) are prepended by the
 // caller in resolve.go, not here.
-func (r *Registry) Families() []string {
+func (r *Registry) BareAliases() []string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	out := make([]string, 0, len(r.bare))

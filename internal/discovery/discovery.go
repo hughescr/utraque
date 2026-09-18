@@ -53,10 +53,11 @@ import (
 	"github.com/hughescr/utraque/internal/router"
 )
 
-// Model is one row of the merged catalog. ID and DisplayName are the only
-// fields the client reads; Type and CreatedAt are carried so the body matches
-// the shape of Anthropic's real response.
-type Model struct {
+// PickerRow is the normalised picker row. Both Anthropic and Codex rows are
+// copied into it; it is not interchangeable with anthropic.CatalogModel because
+// display_name and type are required here. CreatedAt is carried so the body
+// matches the shape of Anthropic's real response.
+type PickerRow struct {
 	ID          string `json:"id"`
 	DisplayName string `json:"display_name"`
 	Type        string `json:"type"`
@@ -65,10 +66,10 @@ type Model struct {
 
 // Response is the GET /v1/models body.
 type Response struct {
-	Data    []Model `json:"data"`
-	HasMore bool    `json:"has_more"`
-	FirstID string  `json:"first_id,omitempty"`
-	LastID  string  `json:"last_id,omitempty"`
+	Data    []PickerRow `json:"data"`
+	HasMore bool        `json:"has_more"`
+	FirstID string      `json:"first_id,omitempty"`
+	LastID  string      `json:"last_id,omitempty"`
 }
 
 // emptyBody is what we serve when even encoding fails. It is a literal so that
@@ -195,7 +196,7 @@ func (h *Handler) Models(ctx context.Context, cred anthropic.Credential) Respons
 	var (
 		wg         sync.WaitGroup
 		anthModels []anthropic.CatalogModel
-		codexList  []cschema.Model
+		codexList  []cschema.CatalogModel
 	)
 	wg.Add(2)
 	go func() {
@@ -208,11 +209,11 @@ func (h *Handler) Models(ctx context.Context, cred anthropic.Credential) Respons
 	}()
 	wg.Wait()
 
-	rows := make([]Model, 0, len(anthModels)+len(codexList)*2+len(deepSeekPickerModels))
+	rows := make([]PickerRow, 0, len(anthModels)+len(codexList)*2+len(deepSeekPickerModels))
 	routes := make(map[string]router.PickerRoute)
 	seen := make(map[string]struct{})
 
-	add := func(m Model, route router.PickerRoute, hasRoute bool) {
+	add := func(m PickerRow, route router.PickerRoute, hasRoute bool) {
 		id := strings.TrimSpace(m.ID)
 		if id == "" {
 			return
@@ -241,7 +242,7 @@ func (h *Handler) Models(ctx context.Context, cred anthropic.Credential) Respons
 	}
 
 	for _, m := range anthModels {
-		base := Model{ID: m.ID, DisplayName: m.DisplayName, Type: m.Type, CreatedAt: m.CreatedAt}
+		base := PickerRow{ID: m.ID, DisplayName: m.DisplayName, Type: m.Type, CreatedAt: m.CreatedAt}
 		if base.DisplayName == "" {
 			base.DisplayName = base.ID
 		}
@@ -271,7 +272,7 @@ func (h *Handler) Models(ctx context.Context, cred anthropic.Credential) Respons
 	return resp
 }
 
-// anthropicModels resolves the Claude half per the configured catalog mode,
+// anthropicModels resolves the Anthropic half per the configured catalog mode,
 // falling back to the static list wherever upstream cannot answer.
 func (h *Handler) anthropicModels(ctx context.Context, cred anthropic.Credential) []anthropic.CatalogModel {
 	if h.mode == CatalogModeStatic || h.anth == nil {
@@ -319,7 +320,7 @@ func (h *Handler) anthropicModels(ctx context.Context, cred anthropic.Credential
 }
 
 // codexModels reads the Codex catalog, treating any failure as "no GPT rows".
-func (h *Handler) codexModels(ctx context.Context) []cschema.Model {
+func (h *Handler) codexModels(ctx context.Context) []cschema.CatalogModel {
 	if h.codex == nil || h.alias.strategy() == AliasOff {
 		return nil
 	}

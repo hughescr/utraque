@@ -985,7 +985,7 @@ A failed or refused upstream read is **negative-cached for ~60s**, so a
 credential that cannot read that endpoint costs one slow picker open, not every
 one. Note also that Claude Code will not request this catalog at all in the
 recommended setup: `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL=1` disables its
-gateway discovery, as *Using a GPT route* explains. The Claude half is served
+gateway discovery, as *Using a GPT route* explains. The Anthropic half is served
 from the static list in normal use, which is why the fallback, not the upstream
 read, is the load-bearing path.
 
@@ -1003,7 +1003,7 @@ Four emission strategies, alias emission **on by default**:
 | --- | --- |
 | `template` (default) | The rolling and pinned aliases: `anthropic-compat.sol`, `anthropic-compat.sol-5.6` |
 | `effort_variants` | The above plus one row per supported reasoning effort: `anthropic-compat.sol-high`, `anthropic-compat.sol-5.6-ultra` |
-| `passthrough` | One row per raw upstream slug: `anthropic-compat.gpt-5.6-sol` |
+| `raw` | One row per raw upstream slug: `anthropic-compat.gpt-5.6-sol` |
 | `off` | No Codex rows. GPT names still route when typed or set in agent frontmatter — they just don't appear in the picker. |
 
 An id template that could not produce a filter-passing id is rejected at

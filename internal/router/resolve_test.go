@@ -87,7 +87,7 @@ func TestResolve(t *testing.T) {
 			want: router.Decision{Backend: router.BackendCodex, UpstreamModel: "gpt-5.6-sol", ClientModel: "anthropic-compat.sol-high", Effort: "high", EffortSource: router.EffortSourceSuffix}},
 		{name: "picker variant mixed case", model: "Anthropic-Compat.SOL-High",
 			want: router.Decision{Backend: router.BackendCodex, UpstreamModel: "gpt-5.6-sol", ClientModel: "Anthropic-Compat.SOL-High", Effort: "high", EffortSource: router.EffortSourceSuffix}},
-		{name: "unknown gpt-* slug falls through to raw codex passthrough", model: "gpt-6.0-nova",
+		{name: "unknown gpt-* slug falls through to raw Codex fallback", model: "gpt-6.0-nova",
 			want: router.Decision{Backend: router.BackendCodex, UpstreamModel: "gpt-6.0-nova", ClientModel: "gpt-6.0-nova", EffortSource: router.EffortSourceNone}},
 		{name: "unknown gpt-* slug with effort suffix and mixed case", model: "GPT-6.0-Nova-high",
 			want: router.Decision{Backend: router.BackendCodex, UpstreamModel: "gpt-6.0-nova", ClientModel: "GPT-6.0-Nova-high", Effort: "high", EffortSource: router.EffortSourceSuffix}},
@@ -123,6 +123,19 @@ func TestResolve(t *testing.T) {
 				t.Fatalf("Resolve(%q) = %+v, want %+v", tc.model, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestUnknownModelMessage(t *testing.T) {
+	_, err := router.ResolveWith(router.NewRegistry(), "banana", "")
+	var apiErr *apierr.Error
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("ResolveWith unknown model error = %v, want *apierr.Error", err)
+	}
+
+	const want = `model "banana" not recognised; known route families: claude-*, anthropic-*, deepseek-flash, deepseek-v4-pro, gpt-*`
+	if apiErr.Message != want {
+		t.Errorf("404 message = %q, want %q", apiErr.Message, want)
 	}
 }
 
