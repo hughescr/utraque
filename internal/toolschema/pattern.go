@@ -23,6 +23,10 @@
 // so the enclosing parens are still balanced, and a literal where it was an
 // atom, so a following quantifier still has an operand.
 //
+// Only syntax is checked. A backreference naming a group that does not
+// exist (\3 with two groups, \k<name> with no such group) is a well-formed
+// pattern that the backend may still reject; that is not detected here.
+//
 // The dialect rules are documented on Codex and DeepSeek.
 package toolschema
 
@@ -39,6 +43,15 @@ import (
 // PathSep joins the segments of a Result entry: "<tool>.<json path>" names
 // the schema node, e.g. "Artifact.properties.field".
 const PathSep = "."
+
+// NodePath names a schema node for a log line: "<tool>.<path>", or just the
+// tool name when path is "" (a pattern on the schema root).
+func NodePath(tool, path string) string {
+	if path == "" {
+		return tool
+	}
+	return tool + PathSep + path
+}
 
 // PatternNote is the sentence appended to a property description when its
 // pattern is dropped, so the model still sees the constraint.
@@ -62,8 +75,6 @@ func (r Result) Empty() bool {
 // rejects, and the spelling it wants for the forms it accepts under a
 // different name. The two implementations are Codex and DeepSeek.
 type Dialect interface {
-	// Name identifies the dialect in logs and test output.
-	Name() string
 	// escape translates the escape sequence at the start of s, which begins
 	// with a backslash and has at least one byte after it. It writes to w and
 	// returns how many bytes of s it consumed, or false when the escape is one
@@ -85,10 +96,12 @@ type Dialect interface {
 
 // Sanitize returns a copy of raw with every "pattern" keyword translated for
 // d, or removed where no compatible form exists. When nothing needs to change
-// the input bytes are returned as-is so the wire form of an untouched tool
-// stays byte-identical. A schema that is not a JSON object is passed through
-// untouched: the backend will reject it with a clearer error than anything
-// this function could add.
+// the input bytes are returned as-is: the caller re-encodes the request with
+// encoding/json, which keeps the schema's key order and number spelling but
+// compacts whitespace and escape spellings, so "untouched" means unchanged
+// content, not identical bytes. A schema that is not a JSON object is passed
+// through untouched: the backend will reject it with a clearer error than
+// anything this function could add.
 func Sanitize(d Dialect, raw json.RawMessage) (json.RawMessage, Result) {
 	var res Result
 	if len(raw) == 0 {
@@ -221,8 +234,12 @@ func (w *writer) split(wire, gochk string) {
 // form or the pattern is malformed in a way every engine would reject.
 func (w *writer) run(d Dialect, p string) bool {
 	inClass := false // inside [...]: ( is literal, escapes may differ
+	q := qNone       // what quantifier the previous token was
 	for i := 0; i < len(p); i++ {
 		c := p[i]
+		// Every branch but the quantifier ones ends a quantifier run.
+		prev := q
+		q = qNone
 		switch {
 		case c == '\\':
 			if i+1 >= len(p) {
@@ -270,15 +287,11 @@ func (w *writer) run(d Dialect, p string) bool {
 				return false
 			}
 			i += n - 1
-		case c == '+' && i > 0 && strings.IndexByte("+*?}", p[i-1]) >= 0:
-			if !d.possessive(w) {
+		case c == '*' || c == '+' || c == '?' || c == '{':
+			n, ok := w.quantifier(d, p[i:], prev, &q)
+			if !ok {
 				return false
 			}
-		case c == '{':
-			// Go caps a repeat count at 1000 where the backends accept far
-			// more (the Artifact tool has {1,4096}), so the twin sees a
-			// clamped count and the wire keeps the real one.
-			n := w.repeat(p[i:])
 			i += n - 1
 		default:
 			w.both(string(c))
@@ -287,31 +300,106 @@ func (w *writer) run(d Dialect, p string) bool {
 	return !inClass
 }
 
+// quantState records what the previous token was, so a '?' or '+' after a
+// quantifier is read as its lazy or possessive suffix rather than as a
+// quantifier of its own, and a quantifier after a possessive one is rejected.
+type quantState int
+
+const (
+	qNone       quantState = iota // not a quantifier
+	qGreedy                       // *, +, ? or {n,m}
+	qLazy                         // a greedy quantifier plus ?
+	qPossessive                   // a greedy or lazy quantifier plus +
+)
+
+// quantifier handles the *, +, ? or { at the start of s, given what the
+// previous token was, and sets q for the next token. It returns how many
+// bytes it consumed.
+//
+// A quantifier directly after a possessive one is rejected here because the
+// twin cannot show it: the possessive '+' has no Go spelling and is omitted,
+// so a following quantifier would look valid to Go while every backend
+// rejects it. Any other stacking (a**, a+{2}) reaches the twin as written,
+// and Go rejects it as a nested repetition. A lazy quantifier followed by a
+// possessive '+' is accepted by the DeepSeek engine and passed through; the
+// Codex dialect drops every possessive form anyway.
+func (w *writer) quantifier(d Dialect, s string, prev quantState, q *quantState) (int, bool) {
+	c := s[0]
+	if prev == qPossessive {
+		if c != '{' || isRepeat(s) {
+			return 0, false
+		}
+	}
+	switch {
+	case c == '+' && (prev == qGreedy || prev == qLazy):
+		if !d.possessive(w) {
+			return 0, false
+		}
+		*q = qPossessive
+		return 1, true
+	case c == '?' && prev == qGreedy:
+		w.both("?")
+		*q = qLazy
+		return 1, true
+	case c == '{':
+		return w.repeat(s, q)
+	default:
+		w.both(string(c))
+		*q = qGreedy
+		return 1, true
+	}
+}
+
 // maxTwinRepeat is Go's regexp/syntax repeat-count limit.
 const maxTwinRepeat = 1000
 
-// repeat handles a '{' at the start of s. A well-formed {n}, {n,} or {n,m}
-// goes to the wire verbatim and to the twin with each count clamped to Go's
-// limit; anything else is a literal brace and echoed to both. It returns how
-// many bytes it consumed.
-func (w *writer) repeat(s string) int {
+// isRepeat reports whether s starts with a well-formed {n}, {n,} or {n,m}.
+func isRepeat(s string) bool {
+	_, _, n := repeatBounds(s)
+	return n > 0
+}
+
+// repeatBounds parses the {n}, {n,} or {n,m} at the start of s, returning the
+// two decimal bounds (hi is "" for {n} and {n,}), the length of the span, and
+// false when s does not start with a well-formed repeat.
+func repeatBounds(s string) (lo, hi string, n int) {
 	end := strings.IndexByte(s, '}')
 	if end < 0 {
-		w.both("{")
-		return 1
+		return "", "", 0
 	}
 	lo, hi, hasComma := strings.Cut(s[1:end], ",")
-	if !isDigits(lo) || lo == "" || (hasComma && hi != "" && !isDigits(hi)) {
+	if lo == "" || !isDigits(lo) || (hasComma && hi != "" && !isDigits(hi)) {
+		return "", "", 0
+	}
+	if !hasComma {
+		hi = lo
+	}
+	return lo, hi, end + 1
+}
+
+// repeat handles a '{' at the start of s. A well-formed {n}, {n,} or {n,m}
+// goes to the wire verbatim and to the twin with each count clamped to Go's
+// limit of 1000, which the backends exceed (the Artifact tool has {1,4096}).
+// Clamping would hide an inverted {n,m} from the twin, so that is rejected
+// here first. Anything else is a literal brace and echoed to both. It returns
+// how many bytes it consumed.
+func (w *writer) repeat(s string, q *quantState) (int, bool) {
+	lo, hi, n := repeatBounds(s)
+	if n == 0 {
 		w.both("{")
-		return 1
+		return 1, true
+	}
+	if hi != "" && compareDecimal(lo, hi) > 0 {
+		return 0, false
 	}
 	twin := "{" + clampRepeat(lo)
-	if hasComma {
-		twin += "," + clampRepeat(hi)
+	if _, rest, hasComma := strings.Cut(s[1:n-1], ","); hasComma {
+		twin += "," + clampRepeat(rest)
 	}
 	twin += "}"
-	w.split(s[:end+1], twin)
-	return end + 1
+	w.split(s[:n], twin)
+	*q = qGreedy
+	return n, true
 }
 
 func isDigits(s string) bool {
@@ -321,6 +409,16 @@ func isDigits(s string) bool {
 		}
 	}
 	return true
+}
+
+// compareDecimal orders two unsigned decimal strings of any length.
+func compareDecimal(a, b string) int {
+	a = strings.TrimLeft(a, "0")
+	b = strings.TrimLeft(b, "0")
+	if len(a) != len(b) {
+		return len(a) - len(b)
+	}
+	return strings.Compare(a, b)
 }
 
 // clampRepeat returns the decimal count s, or Go's limit when s exceeds it.

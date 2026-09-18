@@ -36,8 +36,6 @@ const maxPropertyRanges = 64
 
 type codexDialect struct{}
 
-func (codexDialect) Name() string { return "codex" }
-
 func (codexDialect) escape(w *writer, s string, inClass bool) (int, bool) {
 	switch s[1] {
 	case 'p', 'P':

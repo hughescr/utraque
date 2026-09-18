@@ -34,6 +34,8 @@ func TestCodexPatternUnchanged(t *testing.T) {
 		`a{2000}b{2000,}`,
 		`a{`,
 		`a{x}`,
+		`a\++`,  // an escaped plus is an atom, not a quantifier
+		`a{x}+`, // a literal brace is an atom, not a repeat
 	}
 	for _, p := range unchanged {
 		got, ok := translate(Codex, p)
@@ -93,6 +95,13 @@ func TestCodexPatternDropped(t *testing.T) {
 		`[abc`:                 "unbalanced bracket",
 		`a{2,1}`:               "bad repetition",
 		`a{4096,10}`:           "bad repetition past the twin's clamp",
+		`a{2000,1001}`:         "inverted bounds both past the twin's clamp",
+		`a{4096,2000}`:         "inverted bounds both past the twin's clamp",
+		`a+++`:                 "possessive, then another quantifier",
+		`a++?`:                 "possessive, then a lazy suffix",
+		`a*++`:                 "possessive, then another quantifier",
+		`a+?+`:                 "possessive suffix on a lazy quantifier",
+		`a{2}+`:                "possessive repeat",
 		`abc\`:                 "trailing backslash",
 		`(?<n`:                 "unterminated named group",
 		`\k<n`:                 "unterminated named backreference",
@@ -175,6 +184,21 @@ func TestCodexSanitizeUntouchedIsIdentical(t *testing.T) {
 		if string(out) != string(bad) || !res.Empty() {
 			t.Errorf("%q: want passthrough, got %q %+v", bad, out, res)
 		}
+	}
+}
+
+func TestNodePathOmitsSeparatorAtRoot(t *testing.T) {
+	raw := json.RawMessage(`{"type":"string","pattern":"\\p{L}+","properties":{"x":{"type":"string","pattern":"(?<d>x)"}}}`)
+	_, res := Sanitize(Codex, raw)
+	want := Result{Rewritten: []string{"properties.x"}, Dropped: []string{""}}
+	if !reflect.DeepEqual(res, want) {
+		t.Fatalf("result = %+v\nwant     %+v", res, want)
+	}
+	if got := NodePath("Tool", res.Dropped[0]); got != "Tool" {
+		t.Errorf("root path = %q, want %q", got, "Tool")
+	}
+	if got := NodePath("Tool", res.Rewritten[0]); got != "Tool.properties.x" {
+		t.Errorf("nested path = %q, want %q", got, "Tool.properties.x")
 	}
 }
 

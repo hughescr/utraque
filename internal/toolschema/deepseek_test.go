@@ -12,7 +12,7 @@ const artifactFilePathsPattern = `^[^\0]*$`
 
 // The accepted forms are the rows of the empirical acceptance matrix probed
 // one request at a time against the live endpoint. Each must reach the wire
-// byte-identical: an over-stripped pattern loses a constraint for nothing.
+// unchanged: an over-stripped pattern loses a constraint for nothing.
 func TestDeepSeekPatternUnchanged(t *testing.T) {
 	unchanged := []string{
 		// escapes that both engines share
@@ -27,7 +27,7 @@ func TestDeepSeekPatternUnchanged(t *testing.T) {
 		`(?i)(?<n>a)\k<n>`, `(a)\1`, `(a|b)`, `(?#comment)a`,
 		// lookaround, atomic and possessive forms
 		`(?=a)b`, `(?!a)b`, `(?<=a)b`, `(?<!a)b`, `(?=\x00)a`, `^(?!\.)(?!.*\.\.)a+$`,
-		`(?>a)`, `a++`, `a*+`, `a?+`, `a{2}+`,
+		`(?>a)`, `a++`, `a*+`, `a?+`, `a{2}+`, `a+?+`, `a\++`, `a{x}+`, `a{2}?`, `a+?b*?c??`,
 		// anchors
 		`\A`, `\z`, `\b`, `\B`, `\G`, `a\Kb`, `[\z]`, `[\A]`, `[\b]`, `[\G]`,
 		// inline flags
@@ -113,6 +113,18 @@ func TestDeepSeekPatternDropped(t *testing.T) {
 		`[[:alpha]`:       "unterminated POSIX class",
 		`a{2,1}`:          "bad repetition",
 		`a{4096,10}`:      "bad repetition past the twin's clamp",
+		`a{2000,1001}`:    "inverted bounds both past the twin's clamp",
+		`a{4096,2000}`:    "inverted bounds both past the twin's clamp",
+		`a{01000,999}`:    "inverted bounds with a leading zero",
+		`a+++`:            "quantifier after a possessive one",
+		`a++?`:            "lazy suffix after a possessive quantifier",
+		`a*++`:            "quantifier after a possessive one",
+		`a?++`:            "quantifier after a possessive one",
+		`a++{2}`:          "repeat after a possessive quantifier",
+		`a+*`:             "stacked quantifiers",
+		`a+{2}`:           "repeat after a quantifier",
+		`a{2}{3}`:         "stacked repeats",
+		`+a`:              "nothing to repeat",
 		`abc\`:            "trailing backslash",
 		`(?<n`:            "unterminated named group",
 		`\k<n`:            "unterminated named backreference",
@@ -177,7 +189,7 @@ func TestDeepSeekSanitizeArtifactFilePaths(t *testing.T) {
 
 func TestDeepSeekSanitizeUntouchedIsIdentical(t *testing.T) {
 	// The Codex dialect drops this email pattern (lookahead); the DeepSeek
-	// dialect passes it through, so the schema stays byte-identical.
+	// dialect passes it through, so the input bytes come back as they went in.
 	raw := json.RawMessage(`{"type":"object",   "properties": {"to": {"type":"string","pattern":"^(?!\\.)(?!.*\\.\\.)[A-Za-z0-9.!#$%&'*+/=?^_{|}~-]+@[A-Za-z0-9.-]+$"}}}`)
 	out, res := Sanitize(DeepSeek, raw)
 	if !res.Empty() {

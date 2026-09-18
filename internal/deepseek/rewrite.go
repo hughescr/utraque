@@ -167,10 +167,10 @@ func rewriteTools(raw json.RawMessage, referenced map[string]struct{}, report *r
 		tool["input_schema"] = schema
 		changed = true
 		for _, p := range res.Rewritten {
-			report.RewrittenPatterns = append(report.RewrittenPatterns, name+toolschema.PathSep+p)
+			report.RewrittenPatterns = append(report.RewrittenPatterns, toolschema.NodePath(name, p))
 		}
 		for _, p := range res.Dropped {
-			report.DroppedPatterns = append(report.DroppedPatterns, name+toolschema.PathSep+p)
+			report.DroppedPatterns = append(report.DroppedPatterns, toolschema.NodePath(name, p))
 		}
 	}
 	if !changed {

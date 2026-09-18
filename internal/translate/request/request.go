@@ -549,10 +549,10 @@ func withImagePlaceholder(text string, n int) string {
 }
 
 // translateTools maps Anthropic tool declarations onto Responses function
-// tools, carrying the input_schema through as the parameters. The schema is
-// byte-identical to the input unless it carries a "pattern" the backend cannot
-// accept (see internal/toolschema), in which case the pattern is rewritten for
-// compatibility or, failing that, dropped. The affected nodes are named
+// tools, carrying the input_schema through as the parameters. The schema's
+// content is unchanged (the encoder compacts its formatting) unless it carries
+// a "pattern" the backend cannot accept (see internal/toolschema), in which
+// case the pattern is rewritten for compatibility or, failing that, dropped. The affected nodes are named
 // "<tool>.<path>" in the returned rewritten and dropped lists. A nil tool list
 // yields nil (the field is omitted).
 func translateTools(tools []aschema.Tool) (out []cschema.Tool, rewritten, dropped []string) {
@@ -563,10 +563,10 @@ func translateTools(tools []aschema.Tool) (out []cschema.Tool, rewritten, droppe
 	for _, t := range tools {
 		params, res := toolschema.Sanitize(toolschema.Codex, t.InputSchema)
 		for _, p := range res.Rewritten {
-			rewritten = append(rewritten, t.Name+toolschema.PathSep+p)
+			rewritten = append(rewritten, toolschema.NodePath(t.Name, p))
 		}
 		for _, p := range res.Dropped {
-			dropped = append(dropped, t.Name+toolschema.PathSep+p)
+			dropped = append(dropped, toolschema.NodePath(t.Name, p))
 		}
 		out = append(out, cschema.FunctionTool(t.Name, t.Description, params))
 	}

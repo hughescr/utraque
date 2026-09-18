@@ -40,8 +40,6 @@ var DeepSeek Dialect = deepseekDialect{}
 
 type deepseekDialect struct{}
 
-func (deepseekDialect) Name() string { return "deepseek" }
-
 func (deepseekDialect) escape(w *writer, s string, inClass bool) (int, bool) {
 	c := s[1]
 	switch c {

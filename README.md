@@ -322,8 +322,11 @@ backend accepts or, where no compatible spelling exists, dropped from the
 schema with its original text appended to the property's description so the
 constraint remains in the tool declaration. A dropped pattern is no longer
 enforced by backend schema validation, so callers or tool implementations that
-require enforcement must validate the input themselves. Untouched schemas go
-through byte-for-byte.
+require enforcement must validate the input themselves. An untouched schema is
+forwarded with its content unchanged: the leg re-encodes the request with Go's
+`encoding/json`, which keeps key order and number spelling but compacts
+whitespace and escape spellings, so what changes is the formatting, never the
+constraint.
 
 **Codex dialect.** Unicode property classes become explicit codepoint ranges
 from Go's own Unicode tables, `(?<name>…)` becomes `(?P<name>…)`, `\k<name>`
