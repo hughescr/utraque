@@ -12,7 +12,7 @@ import (
 
 	"github.com/hughescr/utraque/internal/anthropic/schema"
 	"github.com/hughescr/utraque/internal/apierr"
-	cschema "github.com/hughescr/utraque/internal/codex/schema"
+	"github.com/hughescr/utraque/internal/codex/schema"
 	"github.com/hughescr/utraque/internal/sse"
 )
 
@@ -219,7 +219,7 @@ type Translator struct {
 	sawToolUse          bool
 	incomplete          bool
 	incompleteMaxTokens bool
-	usage               schema.Usage
+	usage               aschema.Usage
 	usageSeen           bool
 	seedResolved        bool
 	unknown             map[string]int
@@ -279,7 +279,7 @@ func (t *Translator) reset() {
 	t.sawToolUse = false
 	t.incomplete = false
 	t.incompleteMaxTokens = false
-	t.usage = schema.Usage{}
+	t.usage = aschema.Usage{}
 	t.usageSeen = false
 	t.seedResolved = false
 	t.unknown = make(map[string]int)
@@ -441,7 +441,7 @@ func (t *Translator) handle(sink Sink, fr sse.Frame) (bool, error) {
 			return false, err
 		}
 		b := t.blockFor(ev.OutputIndex, kindText)
-		return false, t.pushDelta(sink, b, schema.Delta{Type: schema.DeltaText, Text: ev.Delta})
+		return false, t.pushDelta(sink, b, aschema.Delta{Type: aschema.DeltaText, Text: ev.Delta})
 
 	case cschema.EventOutputTextDone:
 		b := t.blockFor(ev.OutputIndex, kindText)
@@ -455,7 +455,7 @@ func (t *Translator) handle(sink Sink, fr sse.Frame) (bool, error) {
 			return false, err
 		}
 		b := t.blockFor(ev.OutputIndex, kindThinking)
-		return false, t.pushDelta(sink, b, schema.Delta{Type: schema.DeltaThinking, Thinking: ev.Delta})
+		return false, t.pushDelta(sink, b, aschema.Delta{Type: aschema.DeltaThinking, Thinking: ev.Delta})
 
 	case cschema.EventReasoningSummaryTextDone, cschema.EventReasoningTextDone:
 		// Deliberately NOT a close. A reasoning item's encrypted content arrives
@@ -478,7 +478,7 @@ func (t *Translator) handle(sink Sink, fr sse.Frame) (bool, error) {
 		t.sawToolUse = true
 		b := t.blockFor(ev.OutputIndex, kindToolUse)
 		b.argsSeen = true
-		return false, t.pushDelta(sink, b, schema.Delta{Type: schema.DeltaInputJSON, PartialJSON: ev.Delta})
+		return false, t.pushDelta(sink, b, aschema.Delta{Type: aschema.DeltaInputJSON, PartialJSON: ev.Delta})
 
 	case cschema.EventFunctionCallArgumentsDone:
 		b := t.blockFor(ev.OutputIndex, kindToolUse)
@@ -709,7 +709,7 @@ func (t *Translator) emitMidStreamError(sink Sink, message string) error {
 		// fabricated arguments: the stream is broken, and inventing "{}" would
 		// present an unmade call as a made one.
 		if b.kind == kindThinking {
-			sig := schema.Delta{Type: schema.DeltaSignature, Signature: t.syntheticSignature(b)}
+			sig := aschema.Delta{Type: aschema.DeltaSignature, Signature: t.syntheticSignature(b)}
 			if err := sink.BlockDelta(b.index, sig); err != nil {
 				return err
 			}
@@ -722,7 +722,7 @@ func (t *Translator) emitMidStreamError(sink Sink, message string) error {
 	}
 	t.terminated = true
 	t.errored = true
-	return sink.Error(schema.ErrorBody{Type: string(apierr.TypeAPI), Message: message})
+	return sink.Error(aschema.ErrorBody{Type: string(apierr.TypeAPI), Message: message})
 }
 
 // finalizeClean drains every block, then emits message_delta and message_stop.
@@ -778,7 +778,7 @@ func (t *Translator) recordUsage(u *cschema.Usage) {
 // construction — which is the whole point of the Sink seam. Doing it in the
 // Aggregator alone (as it once was) let the streaming path emit
 // "input_tokens":0 for a request whose non-streaming twin reported the estimate.
-func (t *Translator) terminalUsage() schema.Usage {
+func (t *Translator) terminalUsage() aschema.Usage {
 	u := t.usage
 	if !t.usageSeen || promptTokens(u) == 0 {
 		u.InputTokens = t.seed()
@@ -800,7 +800,7 @@ func (t *Translator) seed() int {
 
 // promptTokens is the whole prompt under Anthropic semantics: the uncached
 // input plus every cached part.
-func promptTokens(u schema.Usage) int {
+func promptTokens(u aschema.Usage) int {
 	return u.InputTokens + u.CacheReadInputTokens + u.CacheCreationInputTokens
 }
 
@@ -809,11 +809,11 @@ func promptTokens(u schema.Usage) int {
 func (t *Translator) stopReason() string {
 	switch {
 	case t.sawToolUse:
-		return schema.StopToolUse
+		return aschema.StopToolUse
 	case t.incompleteMaxTokens:
-		return schema.StopMaxTokens
+		return aschema.StopMaxTokens
 	default:
-		return schema.StopEndTurn
+		return aschema.StopEndTurn
 	}
 }
 
@@ -857,12 +857,12 @@ func (t *Translator) countUnknown(typ string) {
 // The count is clamped at zero: cached_tokens is defined as a subset of
 // input_tokens, so a larger value is an upstream bug that must not surface as
 // a negative prompt.
-func mapUsage(u *cschema.Usage) schema.Usage {
+func mapUsage(u *cschema.Usage) aschema.Usage {
 	if u == nil {
-		return schema.Usage{}
+		return aschema.Usage{}
 	}
 	cached := u.CachedTokens()
-	return schema.Usage{
+	return aschema.Usage{
 		InputTokens:          max(0, u.InputTokens-cached),
 		OutputTokens:         u.OutputTokens,
 		CacheReadInputTokens: cached,

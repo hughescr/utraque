@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	aschema "github.com/hughescr/utraque/internal/anthropic/schema"
+	"github.com/hughescr/utraque/internal/anthropic/schema"
 	"github.com/hughescr/utraque/internal/apierr"
 	"github.com/hughescr/utraque/internal/translate/stream"
 )

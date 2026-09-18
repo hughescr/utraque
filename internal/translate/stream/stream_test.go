@@ -18,7 +18,7 @@ import (
 	"time"
 
 	"github.com/hughescr/utraque/internal/anthropic"
-	schema "github.com/hughescr/utraque/internal/anthropic/schema"
+	"github.com/hughescr/utraque/internal/anthropic/schema"
 	"github.com/hughescr/utraque/internal/apierr"
 	"github.com/hughescr/utraque/internal/sse"
 	"github.com/hughescr/utraque/internal/translate/stream"
@@ -624,7 +624,7 @@ type anthEvent struct {
 			InputTokens int `json:"input_tokens"`
 		} `json:"usage"`
 	} `json:"message"`
-	Usage *schema.Usage `json:"usage"`
+	Usage *aschema.Usage `json:"usage"`
 	Error *struct {
 		Type    string `json:"type"`
 		Message string `json:"message"`
@@ -800,13 +800,13 @@ func (s *recordingSink) MessageStart(m stream.MessageStart) error {
 	return nil
 }
 
-func (s *recordingSink) BlockStart(i int, b schema.ContentBlock) error {
+func (s *recordingSink) BlockStart(i int, b aschema.ContentBlock) error {
 	s.recs = append(s.recs, fmt.Sprintf("block_start %d type=%s text=%q thinking=%q id=%s name=%s input=%s",
 		i, b.Type, b.Text, b.Thinking, b.ID, b.Name, string(b.Input)))
 	return nil
 }
 
-func (s *recordingSink) BlockDelta(i int, d schema.Delta) error {
+func (s *recordingSink) BlockDelta(i int, d aschema.Delta) error {
 	s.recs = append(s.recs, fmt.Sprintf("block_delta %d type=%s text=%q json=%q thinking=%q sig=%q",
 		i, d.Type, d.Text, d.PartialJSON, d.Thinking, d.Signature))
 	return nil
@@ -828,7 +828,7 @@ func (s *recordingSink) MessageStop() error {
 	return nil
 }
 
-func (s *recordingSink) Error(e schema.ErrorBody) error {
+func (s *recordingSink) Error(e aschema.ErrorBody) error {
 	s.recs = append(s.recs, fmt.Sprintf("error type=%s msg=%s", e.Type, e.Message))
 	return nil
 }
@@ -859,7 +859,7 @@ func replayInto(frames []sse.Frame, sink stream.Sink) error {
 			}
 			err = sink.MessageStart(m)
 		case "content_block_start":
-			cb := schema.ContentBlock{
+			cb := aschema.ContentBlock{
 				Type:     ev.ContentBlock.Type,
 				Text:     ev.ContentBlock.Text,
 				Thinking: ev.ContentBlock.Thinking,
@@ -869,7 +869,7 @@ func replayInto(frames []sse.Frame, sink stream.Sink) error {
 			}
 			err = sink.BlockStart(ev.Index, cb)
 		case "content_block_delta":
-			d := schema.Delta{
+			d := aschema.Delta{
 				Type:        ev.Delta.Type,
 				Text:        ev.Delta.Text,
 				PartialJSON: ev.Delta.PartialJSON,
@@ -884,7 +884,7 @@ func replayInto(frames []sse.Frame, sink stream.Sink) error {
 			if ev.Delta.StopReason != nil {
 				stop = *ev.Delta.StopReason
 			}
-			u := schema.Usage{}
+			u := aschema.Usage{}
 			if ev.Usage != nil {
 				u = *ev.Usage
 			}
@@ -892,9 +892,9 @@ func replayInto(frames []sse.Frame, sink stream.Sink) error {
 		case "message_stop":
 			err = sink.MessageStop()
 		case "error":
-			b := schema.ErrorBody{}
+			b := aschema.ErrorBody{}
 			if ev.Error != nil {
-				b = schema.ErrorBody{Type: ev.Error.Type, Message: ev.Error.Message}
+				b = aschema.ErrorBody{Type: ev.Error.Type, Message: ev.Error.Message}
 			}
 			err = sink.Error(b)
 		case "ping":
@@ -1046,7 +1046,7 @@ func TestTerminalUsageAnthropicSemantics(t *testing.T) {
 			}
 			// The request log is recorded from the same numbers the client saw.
 			var wantUsage struct {
-				Usage schema.Usage `json:"usage"`
+				Usage aschema.Usage `json:"usage"`
 			}
 			if err := json.Unmarshal([]byte("{"+c.want+"}"), &wantUsage); err != nil {
 				t.Fatalf("parse want: %v", err)

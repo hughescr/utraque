@@ -1,4 +1,4 @@
-package schema
+package aschema
 
 import "encoding/json"
 

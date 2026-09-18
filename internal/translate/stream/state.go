@@ -11,9 +11,9 @@ import (
 // Block kinds map one-to-one onto the Anthropic content block types utraque
 // emits from a Codex stream.
 const (
-	kindText     = schema.BlockText
-	kindThinking = schema.BlockThinking
-	kindToolUse  = schema.BlockToolUse
+	kindText     = aschema.BlockText
+	kindThinking = aschema.BlockThinking
+	kindToolUse  = aschema.BlockToolUse
 )
 
 // block is the per-output-index state for one Anthropic content block. At most
@@ -45,8 +45,8 @@ type block struct {
 	reasoningID  string
 	reasoningEnc string
 
-	pending []schema.Delta // deltas buffered while another block is active
-	bytes   int            // size of buffered deltas, for the overflow bound
+	pending []aschema.Delta // deltas buffered while another block is active
+	bytes   int             // size of buffered deltas, for the overflow bound
 }
 
 // blockFor returns the block for outIdx, creating it (and registering it in the
@@ -67,12 +67,12 @@ func (t *Translator) blockFor(outIdx int, kind string) *block {
 
 // contentBlock builds the content_block_start payload for b. The SSEWriter
 // renders the empty-field forms ("text":"", input {}) exactly.
-func contentBlock(b *block) schema.ContentBlock {
+func contentBlock(b *block) aschema.ContentBlock {
 	switch b.kind {
 	case kindToolUse:
-		return schema.ContentBlock{Type: kindToolUse, ID: b.callID, Name: b.name, Input: json.RawMessage(`{}`)}
+		return aschema.ContentBlock{Type: kindToolUse, ID: b.callID, Name: b.name, Input: json.RawMessage(`{}`)}
 	default:
-		return schema.ContentBlock{Type: b.kind}
+		return aschema.ContentBlock{Type: b.kind}
 	}
 }
 
@@ -123,7 +123,7 @@ func (t *Translator) stopBlock(sink Sink, b *block) error {
 	}
 	switch b.kind {
 	case kindThinking:
-		sig := schema.Delta{Type: schema.DeltaSignature, Signature: t.syntheticSignature(b)}
+		sig := aschema.Delta{Type: aschema.DeltaSignature, Signature: t.syntheticSignature(b)}
 		if err := sink.BlockDelta(b.index, sig); err != nil {
 			return err
 		}
@@ -133,7 +133,7 @@ func (t *Translator) stopBlock(sink Sink, b *block) error {
 			if args == "" {
 				args = "{}"
 			}
-			d := schema.Delta{Type: schema.DeltaInputJSON, PartialJSON: args}
+			d := aschema.Delta{Type: aschema.DeltaInputJSON, PartialJSON: args}
 			if err := sink.BlockDelta(b.index, d); err != nil {
 				return err
 			}
@@ -152,7 +152,7 @@ func (t *Translator) stopBlock(sink Sink, b *block) error {
 // pushDelta routes one delta for block b. Fast path when b is the active block;
 // lazy-open when nothing is active; otherwise buffer under b (never closing the
 // active block early), enforcing the pending bounds.
-func (t *Translator) pushDelta(sink Sink, b *block, d schema.Delta) error {
+func (t *Translator) pushDelta(sink Sink, b *block, d aschema.Delta) error {
 	if b.dropped || b.stopped {
 		return nil
 	}
@@ -303,6 +303,6 @@ func (t *Translator) syntheticSignature(b *block) string {
 }
 
 // deltaSize is the buffered byte cost of one delta.
-func deltaSize(d schema.Delta) int {
+func deltaSize(d aschema.Delta) int {
 	return len(d.Text) + len(d.PartialJSON) + len(d.Thinking) + len(d.Signature)
 }

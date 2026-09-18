@@ -1,4 +1,4 @@
-package schema
+package aschema
 
 // SSE event names.
 const (

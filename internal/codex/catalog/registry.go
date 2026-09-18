@@ -17,7 +17,7 @@ import (
 // Priority is carried through because it is the tiebreaker in the registry's
 // bare-alias collision rule: same codename, same version -> higher priority
 // wins the rolling bare name.
-func ListedEntries(models []schema.Model) []router.CatalogEntry {
+func ListedEntries(models []cschema.Model) []router.CatalogEntry {
 	out := make([]router.CatalogEntry, 0, len(models))
 	for _, m := range models {
 		if !m.Listed() || m.Slug == "" {
@@ -40,7 +40,7 @@ func ListedEntries(models []schema.Model) []router.CatalogEntry {
 // like gpt-5.3-codex-spark) is handled by an override registered on reg via
 // reg.SetOverride before this call; LoadCatalog consults the registered
 // overrides on every rebuild.
-func PopulateRegistry(reg *router.Registry, models []schema.Model) {
+func PopulateRegistry(reg *router.Registry, models []cschema.Model) {
 	reg.LoadCatalog(ListedEntries(models))
 }
 

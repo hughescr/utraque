@@ -30,7 +30,7 @@ import (
 	"github.com/hughescr/utraque/internal/codex/catalog"
 	"github.com/hughescr/utraque/internal/codex/leg"
 	"github.com/hughescr/utraque/internal/codex/responses"
-	cschema "github.com/hughescr/utraque/internal/codex/schema"
+	"github.com/hughescr/utraque/internal/codex/schema"
 	"github.com/hughescr/utraque/internal/config"
 	"github.com/hughescr/utraque/internal/deepseek"
 	"github.com/hughescr/utraque/internal/discovery"

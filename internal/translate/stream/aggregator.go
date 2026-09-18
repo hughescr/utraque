@@ -42,10 +42,10 @@ type Aggregator struct {
 	started    bool
 	stopped    bool
 	stopReason string
-	usage      schema.Usage
+	usage      aschema.Usage
 
 	failed  bool
-	errBody schema.ErrorBody
+	errBody aschema.ErrorBody
 }
 
 var _ Sink = (*Aggregator)(nil)
@@ -66,7 +66,7 @@ type aggBlock struct {
 	signature strings.Builder
 	args      strings.Builder
 
-	raw     schema.ContentBlock // verbatim start payload, for unknown kinds
+	raw     aschema.ContentBlock // verbatim start payload, for unknown kinds
 	stopped bool
 }
 
@@ -88,14 +88,14 @@ func (a *Aggregator) MessageStart(m MessageStart) error {
 	a.started = true
 	a.id = m.ID
 	a.model = m.Model
-	a.usage = schema.Usage{InputTokens: m.InputTokens}
+	a.usage = aschema.Usage{InputTokens: m.InputTokens}
 	return nil
 }
 
 // BlockStart opens a block. The Sink contract guarantees one block open at a
 // time with strictly increasing indices; violating it is a translator bug, so
 // it is reported rather than papered over.
-func (a *Aggregator) BlockStart(index int, blk schema.ContentBlock) error {
+func (a *Aggregator) BlockStart(index int, blk aschema.ContentBlock) error {
 	if !a.started {
 		return aggErrf("content_block_start(%d) before message_start", index)
 	}
@@ -117,19 +117,19 @@ func (a *Aggregator) BlockStart(index int, blk schema.ContentBlock) error {
 }
 
 // BlockDelta appends one delta to the open block.
-func (a *Aggregator) BlockDelta(index int, d schema.Delta) error {
+func (a *Aggregator) BlockDelta(index int, d aschema.Delta) error {
 	if a.open == nil || a.open.index != index {
 		return aggErrf("content_block_delta(%d) with no matching open block", index)
 	}
 	b := a.open
 	switch d.Type {
-	case schema.DeltaText:
+	case aschema.DeltaText:
 		b.text.WriteString(d.Text)
-	case schema.DeltaThinking:
+	case aschema.DeltaThinking:
 		b.thinking.WriteString(d.Thinking)
-	case schema.DeltaSignature:
+	case aschema.DeltaSignature:
 		b.signature.WriteString(d.Signature)
-	case schema.DeltaInputJSON:
+	case aschema.DeltaInputJSON:
 		b.args.WriteString(d.PartialJSON)
 	default:
 		// An unfoldable delta would silently vanish from the non-streaming
@@ -177,7 +177,7 @@ func (a *Aggregator) MessageStop() error {
 }
 
 // Error records a mid-stream failure; Message then reports it to the caller.
-func (a *Aggregator) Error(e schema.ErrorBody) error {
+func (a *Aggregator) Error(e aschema.ErrorBody) error {
 	a.failed = true
 	a.errBody = e
 	return nil
@@ -195,15 +195,15 @@ func (a *Aggregator) Failed() bool { return a.failed }
 // mid-flight, when nothing was emitted at all, or when no terminus arrived. The
 // error is an *apierr.Error the caller can render directly as an Anthropic
 // error envelope with a matching HTTP status.
-func (a *Aggregator) Message() (*schema.MessagesResponse, error) {
+func (a *Aggregator) Message() (*aschema.MessagesResponse, error) {
 	blocks, err := a.finishedBlocks()
 	if err != nil {
 		return nil, err
 	}
-	return &schema.MessagesResponse{
+	return &aschema.MessagesResponse{
 		ID:      a.id,
 		Type:    "message",
-		Role:    schema.RoleAssistant,
+		Role:    aschema.RoleAssistant,
 		Model:   a.model,
 		Content: blocks,
 		// stop_sequence stays null: the Codex leg has no stop-sequence concept,
@@ -235,19 +235,19 @@ func (a *Aggregator) MessageJSON() ([]byte, error) {
 	}
 	for _, b := range msg.Content {
 		switch b.Type {
-		case schema.BlockText:
-			out.Content = append(out.Content, wireRespText{Type: schema.BlockText, Text: b.Text})
-		case schema.BlockThinking:
+		case aschema.BlockText:
+			out.Content = append(out.Content, wireRespText{Type: aschema.BlockText, Text: b.Text})
+		case aschema.BlockThinking:
 			out.Content = append(out.Content, wireRespThinking{
-				Type: schema.BlockThinking, Thinking: b.Thinking, Signature: b.Signature,
+				Type: aschema.BlockThinking, Thinking: b.Thinking, Signature: b.Signature,
 			})
-		case schema.BlockToolUse:
+		case aschema.BlockToolUse:
 			input := b.Input
 			if len(input) == 0 {
 				input = json.RawMessage(`{}`)
 			}
 			out.Content = append(out.Content, wireStartToolUse{
-				Type: schema.BlockToolUse, ID: b.ID, Name: b.Name, Input: input,
+				Type: aschema.BlockToolUse, ID: b.ID, Name: b.Name, Input: input,
 			})
 		default:
 			out.Content = append(out.Content, b)
@@ -258,7 +258,7 @@ func (a *Aggregator) MessageJSON() ([]byte, error) {
 
 // finishedBlocks materialises every accumulated block, after enforcing the
 // conditions under which a complete message may be claimed at all.
-func (a *Aggregator) finishedBlocks() ([]schema.ContentBlock, error) {
+func (a *Aggregator) finishedBlocks() ([]aschema.ContentBlock, error) {
 	if a.failed {
 		kind := apierr.Type(a.errBody.Type)
 		if kind == "" {
@@ -287,7 +287,7 @@ func (a *Aggregator) finishedBlocks() ([]schema.ContentBlock, error) {
 			"the upstream stream ended before the message was complete")
 	}
 
-	blocks := make([]schema.ContentBlock, 0, len(a.content))
+	blocks := make([]aschema.ContentBlock, 0, len(a.content))
 	for _, b := range a.content {
 		if !b.stopped {
 			return nil, apierr.Wrap(ErrIncomplete, apierr.TypeAPI,
@@ -297,7 +297,7 @@ func (a *Aggregator) finishedBlocks() ([]schema.ContentBlock, error) {
 		// A tool_use whose arguments are not parseable JSON is unusable to the
 		// client. The Translator refuses to reach a clean terminus over one, so
 		// this is a belt-and-braces guard against ever shipping one.
-		if cb.Type == schema.BlockToolUse && !json.Valid(cb.Input) {
+		if cb.Type == aschema.BlockToolUse && !json.Valid(cb.Input) {
 			return nil, apierr.API("the upstream tool call %q produced invalid JSON arguments", cb.Name)
 		}
 		blocks = append(blocks, cb)
@@ -306,23 +306,23 @@ func (a *Aggregator) finishedBlocks() ([]schema.ContentBlock, error) {
 }
 
 // finish renders one accumulated block as its Anthropic content block.
-func (b *aggBlock) finish() schema.ContentBlock {
+func (b *aggBlock) finish() aschema.ContentBlock {
 	switch b.kind {
-	case schema.BlockText:
-		return schema.ContentBlock{Type: schema.BlockText, Text: b.text.String()}
-	case schema.BlockThinking:
-		return schema.ContentBlock{
-			Type:      schema.BlockThinking,
+	case aschema.BlockText:
+		return aschema.ContentBlock{Type: aschema.BlockText, Text: b.text.String()}
+	case aschema.BlockThinking:
+		return aschema.ContentBlock{
+			Type:      aschema.BlockThinking,
 			Thinking:  b.thinking.String(),
 			Signature: b.signature.String(),
 		}
-	case schema.BlockToolUse:
+	case aschema.BlockToolUse:
 		args := b.args.String()
 		if args == "" {
 			args = "{}"
 		}
-		return schema.ContentBlock{
-			Type:  schema.BlockToolUse,
+		return aschema.ContentBlock{
+			Type:  aschema.BlockToolUse,
 			ID:    b.id,
 			Name:  b.name,
 			Input: json.RawMessage(args),
@@ -346,12 +346,12 @@ type wireRespThinking struct {
 }
 
 type wireResponse struct {
-	ID           string       `json:"id"`
-	Type         string       `json:"type"`
-	Role         string       `json:"role"`
-	Model        string       `json:"model"`
-	Content      []any        `json:"content"`
-	StopReason   *string      `json:"stop_reason"`
-	StopSequence *string      `json:"stop_sequence"`
-	Usage        schema.Usage `json:"usage"`
+	ID           string        `json:"id"`
+	Type         string        `json:"type"`
+	Role         string        `json:"role"`
+	Model        string        `json:"model"`
+	Content      []any         `json:"content"`
+	StopReason   *string       `json:"stop_reason"`
+	StopSequence *string       `json:"stop_sequence"`
+	Usage        aschema.Usage `json:"usage"`
 }

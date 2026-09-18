@@ -70,9 +70,9 @@ func post(t *testing.T, url string, body string, set func(http.Header)) *http.Re
 }
 
 // decodeEnvelope reads an Anthropic error envelope off a response.
-func decodeEnvelope(t *testing.T, resp *http.Response) schema.ErrorEvent {
+func decodeEnvelope(t *testing.T, resp *http.Response) aschema.ErrorEvent {
 	t.Helper()
-	var ev schema.ErrorEvent
+	var ev aschema.ErrorEvent
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		t.Fatalf("read error body: %v", err)

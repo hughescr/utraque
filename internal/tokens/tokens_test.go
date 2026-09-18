@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	aschema "github.com/hughescr/utraque/internal/anthropic/schema"
-	cschema "github.com/hughescr/utraque/internal/codex/schema"
+	"github.com/hughescr/utraque/internal/anthropic/schema"
+	"github.com/hughescr/utraque/internal/codex/schema"
 	"github.com/hughescr/utraque/internal/tokens"
 )
 

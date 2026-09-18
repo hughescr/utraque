@@ -363,15 +363,15 @@ func rewriteStreamFrame(frame sse.Frame, canonical string) ([]byte, string, erro
 	}
 
 	switch eventType {
-	case schema.EventMessageStop:
+	case aschema.EventMessageStop:
 		return frame.Data, eventType, nil
-	case schema.EventError:
-		var event schema.ErrorEvent
+	case aschema.EventError:
+		var event aschema.ErrorEvent
 		if err := json.Unmarshal(frame.Data, &event); err != nil || event.Error.Type == "" || event.Error.Message == "" {
 			return nil, "", fmt.Errorf("error event has no valid error object")
 		}
 		return frame.Data, eventType, nil
-	case schema.EventMessageStart:
+	case aschema.EventMessageStart:
 		// Continue below to normalize and validate the response identity.
 	default:
 		return frame.Data, eventType, nil
@@ -401,7 +401,7 @@ func rewriteStreamFrame(frame sse.Frame, canonical string) ([]byte, string, erro
 }
 
 func isCoreStreamEvent(event string) bool {
-	return event == schema.EventMessageStart || event == schema.EventMessageStop || event == schema.EventError
+	return event == aschema.EventMessageStart || event == aschema.EventMessageStop || event == aschema.EventError
 }
 
 func responseModel(raw json.RawMessage, requested string) (string, error) {

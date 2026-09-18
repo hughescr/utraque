@@ -75,7 +75,7 @@ const (
 type Catalog interface {
 	// Models returns the current catalog, fetching or revalidating as the
 	// staleness rules require. cred signs the request; it is never stored.
-	Models(ctx context.Context, cred auth.Credential) ([]schema.Model, error)
+	Models(ctx context.Context, cred auth.Credential) ([]cschema.Model, error)
 	// Age reports how long ago the held snapshot was fetched, or 0 if none has
 	// been obtained yet.
 	Age() time.Duration
@@ -134,7 +134,7 @@ type Client struct {
 
 // state is the in-memory snapshot.
 type state struct {
-	models    []schema.Model
+	models    []cschema.Model
 	etag      string
 	fetchedAt time.Time
 	loaded    bool
@@ -196,7 +196,7 @@ func New(opts Options) *Client {
 }
 
 // Models implements Catalog.
-func (c *Client) Models(ctx context.Context, cred auth.Credential) ([]schema.Model, error) {
+func (c *Client) Models(ctx context.Context, cred auth.Credential) ([]cschema.Model, error) {
 	c.ensureDiskLoaded()
 
 	c.mu.RLock()
@@ -340,7 +340,7 @@ func (c *Client) fetch(ctx context.Context, cred auth.Credential) (state, error)
 		if err != nil {
 			return state{}, apierr.Wrap(err, apierr.TypeAPI, "codex catalog: read body")
 		}
-		var parsed schema.ModelsResponse
+		var parsed cschema.ModelsResponse
 		if err := json.Unmarshal(body, &parsed); err != nil {
 			return state{}, apierr.Wrap(err, apierr.TypeAPI, "codex catalog: decode body")
 		}
@@ -417,7 +417,7 @@ func (c *Client) ensureDiskLoaded() {
 	if err != nil {
 		return
 	}
-	var cache schema.Cache
+	var cache cschema.Cache
 	if err := json.Unmarshal(b, &cache); err != nil {
 		return
 	}
@@ -460,7 +460,7 @@ func (c *Client) writeDisk(ns state) {
 	if c.cachePath == "" {
 		return
 	}
-	cache := schema.Cache{
+	cache := cschema.Cache{
 		ClientVersion: c.clientVersion,
 		ETag:          ns.etag,
 		FetchedAt:     ns.fetchedAt,
@@ -512,15 +512,15 @@ func (c *Client) writeDisk(ns state) {
 // Each Model's SupportedReasoningLevels slice is copied too — a shallow copy
 // would leave callers sharing (and able to mutate) the cached backing array,
 // racing the goroutines that read the held snapshot.
-func cloneModels(in []schema.Model) []schema.Model {
+func cloneModels(in []cschema.Model) []cschema.Model {
 	if len(in) == 0 {
 		return nil
 	}
-	out := make([]schema.Model, len(in))
+	out := make([]cschema.Model, len(in))
 	copy(out, in)
 	for i := range out {
 		if len(out[i].SupportedReasoningLevels) > 0 {
-			lv := make([]schema.ReasoningLevel, len(out[i].SupportedReasoningLevels))
+			lv := make([]cschema.ReasoningLevel, len(out[i].SupportedReasoningLevels))
 			copy(lv, out[i].SupportedReasoningLevels)
 			out[i].SupportedReasoningLevels = lv
 		}
@@ -534,7 +534,7 @@ func cloneModels(in []schema.Model) []schema.Model {
 // detached background refresh — a caller about to install the result into the
 // live router (see RefreshRegistry) must not publish a stale list and report
 // success. On fetch failure it returns the error and no models.
-func (c *Client) currentModels(ctx context.Context, cred auth.Credential) ([]schema.Model, error) {
+func (c *Client) currentModels(ctx context.Context, cred auth.Credential) ([]cschema.Model, error) {
 	c.ensureDiskLoaded()
 	c.mu.RLock()
 	st := c.st

@@ -1,4 +1,4 @@
-package schema_test
+package cschema_test
 
 import (
 	"encoding/json"
@@ -49,7 +49,7 @@ const sampleCache = `{
 }`
 
 func TestCacheUnmarshal(t *testing.T) {
-	var c schema.Cache
+	var c cschema.Cache
 	if err := json.Unmarshal([]byte(sampleCache), &c); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
@@ -96,14 +96,14 @@ func TestCacheUnmarshal(t *testing.T) {
 }
 
 func TestListed(t *testing.T) {
-	if !(schema.Model{Visibility: "list"}).Listed() {
+	if !(cschema.Model{Visibility: "list"}).Listed() {
 		t.Error(`Visibility "list" should be Listed`)
 	}
 	// Fail closed: hidden and empty visibility are not advertised.
-	if (schema.Model{Visibility: "hide"}).Listed() {
+	if (cschema.Model{Visibility: "hide"}).Listed() {
 		t.Error(`Visibility "hide" should not be Listed`)
 	}
-	if (schema.Model{}).Listed() {
+	if (cschema.Model{}).Listed() {
 		t.Error("empty visibility should not be Listed")
 	}
 }
@@ -112,7 +112,7 @@ func TestListed(t *testing.T) {
 // array without the on-disk metadata).
 func TestModelsResponseUnmarshal(t *testing.T) {
 	const body = `{"models":[{"slug":"gpt-5.5","visibility":"list","priority":2}]}`
-	var r schema.ModelsResponse
+	var r cschema.ModelsResponse
 	if err := json.Unmarshal([]byte(body), &r); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}

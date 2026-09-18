@@ -48,11 +48,11 @@ import (
 	"strings"
 	"time"
 
-	aschema "github.com/hughescr/utraque/internal/anthropic/schema"
+	"github.com/hughescr/utraque/internal/anthropic/schema"
 	"github.com/hughescr/utraque/internal/apierr"
 	"github.com/hughescr/utraque/internal/codex/auth"
 	"github.com/hughescr/utraque/internal/codex/responses"
-	cschema "github.com/hughescr/utraque/internal/codex/schema"
+	"github.com/hughescr/utraque/internal/codex/schema"
 	"github.com/hughescr/utraque/internal/obs"
 	"github.com/hughescr/utraque/internal/router"
 	"github.com/hughescr/utraque/internal/tokens"

@@ -1,4 +1,4 @@
-package schema
+package cschema
 
 // This file holds the OpenAI Responses API STREAMING event types utraque reads
 // off the Codex backend's SSE body. Like the rest of this package it is a pure

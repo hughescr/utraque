@@ -10,8 +10,8 @@
 // discarded.
 //
 // This package holds behaviour, not wire types, so it may import the router
-// (for the routing Decision and its effort provenance) and both schema
-// packages. The schema packages themselves stay stdlib-only.
+// (for the routing Decision and its effort provenance) and both the aschema
+// and cschema packages. Those packages themselves stay stdlib-only.
 package request
 
 import (
@@ -24,8 +24,8 @@ import (
 	"strings"
 
 	"github.com/hughescr/utraque/internal/anthropic"
-	aschema "github.com/hughescr/utraque/internal/anthropic/schema"
-	cschema "github.com/hughescr/utraque/internal/codex/schema"
+	"github.com/hughescr/utraque/internal/anthropic/schema"
+	"github.com/hughescr/utraque/internal/codex/schema"
 	"github.com/hughescr/utraque/internal/router"
 	"github.com/hughescr/utraque/internal/toolschema"
 )

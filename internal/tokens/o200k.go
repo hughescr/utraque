@@ -9,7 +9,7 @@ import (
 
 	"github.com/tiktoken-go/tokenizer/codec"
 
-	cschema "github.com/hughescr/utraque/internal/codex/schema"
+	"github.com/hughescr/utraque/internal/codex/schema"
 )
 
 // O200kName is what the exact estimator reports as its Name.

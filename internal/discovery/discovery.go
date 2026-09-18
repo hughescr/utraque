@@ -195,7 +195,7 @@ func (h *Handler) Models(ctx context.Context, cred anthropic.Credential) Respons
 	var (
 		wg         sync.WaitGroup
 		anthModels []anthropic.CatalogModel
-		codexList  []schema.Model
+		codexList  []cschema.Model
 	)
 	wg.Add(2)
 	go func() {
@@ -319,7 +319,7 @@ func (h *Handler) anthropicModels(ctx context.Context, cred anthropic.Credential
 }
 
 // codexModels reads the Codex catalog, treating any failure as "no GPT rows".
-func (h *Handler) codexModels(ctx context.Context) []schema.Model {
+func (h *Handler) codexModels(ctx context.Context) []cschema.Model {
 	if h.codex == nil || h.alias.strategy() == AliasOff {
 		return nil
 	}

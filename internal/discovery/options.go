@@ -85,14 +85,14 @@ func PassesClientFilter(id string) bool { return clientFilter.MatchString(id) }
 // package's job, and discovery must never be a reason to rotate it. The caller
 // adapts its catalog client to this shape (see CodexCatalogFunc).
 type CodexCatalog interface {
-	Models(ctx context.Context) ([]schema.Model, error)
+	Models(ctx context.Context) ([]cschema.Model, error)
 }
 
 // CodexCatalogFunc adapts a function to CodexCatalog.
-type CodexCatalogFunc func(ctx context.Context) ([]schema.Model, error)
+type CodexCatalogFunc func(ctx context.Context) ([]cschema.Model, error)
 
 // Models implements CodexCatalog.
-func (f CodexCatalogFunc) Models(ctx context.Context) ([]schema.Model, error) { return f(ctx) }
+func (f CodexCatalogFunc) Models(ctx context.Context) ([]cschema.Model, error) { return f(ctx) }
 
 // AliasOptions governs the Codex half of the merged catalog.
 //

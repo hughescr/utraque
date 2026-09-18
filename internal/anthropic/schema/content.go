@@ -1,7 +1,7 @@
-// Package schema holds the Anthropic Messages API wire types. It imports
+// Package aschema holds the Anthropic Messages API wire types. It imports
 // nothing beyond the standard library so every translator can share it
 // without an import cycle.
-package schema
+package aschema
 
 import (
 	"bytes"

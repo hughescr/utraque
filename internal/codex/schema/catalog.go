@@ -1,4 +1,4 @@
-// Package schema holds the wire and on-disk types for the Codex backend.
+// Package cschema holds the wire and on-disk types for the Codex backend.
 // It is a pure type package: it imports nothing beyond the standard library so
 // the catalog client, the request translator, and the stream translator can all
 // share these definitions without risking an import cycle.
@@ -6,7 +6,7 @@
 // This file covers the model-catalog shapes (GET /models and the interoperable
 // on-disk cache). The Responses API request/response types land alongside it in
 // a later phase.
-package schema
+package cschema
 
 import "time"
 

@@ -23,14 +23,14 @@ type codexRow struct {
 // slug the registry has never seen — a hidden model, or one that arrived
 // between catalog refreshes — which is offered under its raw slug and made
 // routable by the picker-route registration.
-func (h *Handler) codexRows(models []schema.Model) []codexRow {
+func (h *Handler) codexRows(models []cschema.Model) []codexRow {
 	strategy := h.alias.strategy()
 	if strategy == AliasOff || len(models) == 0 {
 		return nil
 	}
 
 	// Eligible catalog models, keyed by slug.
-	bySlug := make(map[string]schema.Model, len(models))
+	bySlug := make(map[string]cschema.Model, len(models))
 	slugs := make([]string, 0, len(models))
 	for _, m := range models {
 		slug := strings.ToLower(strings.TrimSpace(m.Slug))

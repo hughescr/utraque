@@ -3,7 +3,7 @@ package tokens
 import (
 	"strconv"
 
-	cschema "github.com/hughescr/utraque/internal/codex/schema"
+	"github.com/hughescr/utraque/internal/codex/schema"
 )
 
 // Defaults for the fallback heuristic. All are overridable per instance.

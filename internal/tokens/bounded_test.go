@@ -8,7 +8,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	cschema "github.com/hughescr/utraque/internal/codex/schema"
+	"github.com/hughescr/utraque/internal/codex/schema"
 )
 
 // boundaryCorpus exercises the places a cut around a floored region could

@@ -121,8 +121,8 @@ type Client struct {
 // SSE stream for an already-resolved credential; StreamWithRefresh resolves the
 // credential itself and drives the single 401 retry.
 type Streamer interface {
-	Stream(ctx context.Context, cred auth.Credential, req *schema.ResponsesRequest) (io.ReadCloser, error)
-	StreamWithRefresh(ctx context.Context, src auth.CredentialSource, req *schema.ResponsesRequest) (io.ReadCloser, error)
+	Stream(ctx context.Context, cred auth.Credential, req *cschema.ResponsesRequest) (io.ReadCloser, error)
+	StreamWithRefresh(ctx context.Context, src auth.CredentialSource, req *cschema.ResponsesRequest) (io.ReadCloser, error)
 }
 
 var _ Streamer = (*Client)(nil)
@@ -187,7 +187,7 @@ func (r *Response) Close() error {
 //
 // req is not mutated — stream:true is forced on a copy, since this entry point
 // only ever opens a stream.
-func (c *Client) Stream(ctx context.Context, cred auth.Credential, req *schema.ResponsesRequest) (io.ReadCloser, error) {
+func (c *Client) Stream(ctx context.Context, cred auth.Credential, req *cschema.ResponsesRequest) (io.ReadCloser, error) {
 	resp, err := c.StreamResponse(ctx, cred, req)
 	if err != nil {
 		return nil, err
@@ -197,7 +197,7 @@ func (c *Client) Stream(ctx context.Context, cred auth.Credential, req *schema.R
 
 // StreamResponse is Stream plus the response metadata (status, headers, and the
 // forwarded rate-limit headers) the leg reports on /healthz.
-func (c *Client) StreamResponse(ctx context.Context, cred auth.Credential, req *schema.ResponsesRequest) (*Response, error) {
+func (c *Client) StreamResponse(ctx context.Context, cred auth.Credential, req *cschema.ResponsesRequest) (*Response, error) {
 	if req == nil {
 		return nil, apierr.InvalidRequest("codex responses: no request to send")
 	}
@@ -295,7 +295,7 @@ func (c *Client) noteGate(ue *UpstreamError) {
 // EXACTLY once with a freshly refreshed one. This is the one retry the plan
 // sanctions, and it lives here because only this package can tell a 401 from
 // any other failure.
-func (c *Client) StreamWithRefresh(ctx context.Context, src auth.CredentialSource, req *schema.ResponsesRequest) (io.ReadCloser, error) {
+func (c *Client) StreamWithRefresh(ctx context.Context, src auth.CredentialSource, req *cschema.ResponsesRequest) (io.ReadCloser, error) {
 	resp, err := c.StreamResponseWithRefresh(ctx, src, req)
 	if err != nil {
 		return nil, err
@@ -304,7 +304,7 @@ func (c *Client) StreamWithRefresh(ctx context.Context, src auth.CredentialSourc
 }
 
 // StreamResponseWithRefresh is StreamWithRefresh with the response metadata.
-func (c *Client) StreamResponseWithRefresh(ctx context.Context, src auth.CredentialSource, req *schema.ResponsesRequest) (*Response, error) {
+func (c *Client) StreamResponseWithRefresh(ctx context.Context, src auth.CredentialSource, req *cschema.ResponsesRequest) (*Response, error) {
 	if src == nil {
 		return nil, apierr.API("codex responses: no credential source configured")
 	}
@@ -373,7 +373,7 @@ func (c *Client) logFailure(ue *UpstreamError, cred auth.Credential) {
 
 // encodeRequest marshals req with stream forced on, without mutating the
 // caller's struct.
-func encodeRequest(req *schema.ResponsesRequest) ([]byte, error) {
+func encodeRequest(req *cschema.ResponsesRequest) ([]byte, error) {
 	out := *req // shallow copy: only the Stream flag differs
 	out.Stream = true
 	body, err := json.Marshal(&out)

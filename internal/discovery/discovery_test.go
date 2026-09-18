@@ -29,35 +29,35 @@ import (
 // codexFixture mirrors the live catalog shapes the plan recorded: two codenamed
 // models at the same version, two version-only models, and one hidden
 // irregular slug.
-func codexFixture() []schema.Model {
-	return []schema.Model{
+func codexFixture() []cschema.Model {
+	return []cschema.Model{
 		{
-			Slug: "gpt-5.6-sol", DisplayName: "GPT-5.6-Sol", Visibility: schema.VisibilityList,
+			Slug: "gpt-5.6-sol", DisplayName: "GPT-5.6-Sol", Visibility: cschema.VisibilityList,
 			ContextWindow: 400000, DefaultReasoningLevel: "low", Priority: 10,
-			SupportedReasoningLevels: []schema.ReasoningLevel{
+			SupportedReasoningLevels: []cschema.ReasoningLevel{
 				{Effort: "low"}, {Effort: "medium"}, {Effort: "high"}, {Effort: "max"}, {Effort: "ultra"},
 			},
 		},
 		{
-			Slug: "gpt-5.6-terra", DisplayName: "GPT-5.6-Terra", Visibility: schema.VisibilityList,
+			Slug: "gpt-5.6-terra", DisplayName: "GPT-5.6-Terra", Visibility: cschema.VisibilityList,
 			ContextWindow: 400000, DefaultReasoningLevel: "medium", Priority: 9,
-			SupportedReasoningLevels: []schema.ReasoningLevel{{Effort: "medium"}, {Effort: "high"}},
+			SupportedReasoningLevels: []cschema.ReasoningLevel{{Effort: "medium"}, {Effort: "high"}},
 		},
 		{
-			Slug: "gpt-5.5", DisplayName: "GPT-5.5", Visibility: schema.VisibilityList,
+			Slug: "gpt-5.5", DisplayName: "GPT-5.5", Visibility: cschema.VisibilityList,
 			ContextWindow: 400000, DefaultReasoningLevel: "medium", Priority: 5,
-			SupportedReasoningLevels: []schema.ReasoningLevel{{Effort: "low"}, {Effort: "medium"}, {Effort: "high"}},
+			SupportedReasoningLevels: []cschema.ReasoningLevel{{Effort: "low"}, {Effort: "medium"}, {Effort: "high"}},
 		},
 		{
-			Slug: "gpt-5.4-mini", DisplayName: "GPT-5.4-Mini", Visibility: schema.VisibilityList,
+			Slug: "gpt-5.4-mini", DisplayName: "GPT-5.4-Mini", Visibility: cschema.VisibilityList,
 			ContextWindow: 272000, DefaultReasoningLevel: "medium", Priority: 2,
-			SupportedReasoningLevels: []schema.ReasoningLevel{{Effort: "medium"}},
+			SupportedReasoningLevels: []cschema.ReasoningLevel{{Effort: "medium"}},
 		},
 		{
 			// Hidden, and a slug the alias grammar cannot parse on its own.
-			Slug: "gpt-5.3-codex-spark", DisplayName: "GPT-5.3-Codex-Spark", Visibility: schema.VisibilityHide,
+			Slug: "gpt-5.3-codex-spark", DisplayName: "GPT-5.3-Codex-Spark", Visibility: cschema.VisibilityHide,
 			ContextWindow: 272000, DefaultReasoningLevel: "medium", Priority: 1,
-			SupportedReasoningLevels: []schema.ReasoningLevel{{Effort: "medium"}, {Effort: "high"}},
+			SupportedReasoningLevels: []cschema.ReasoningLevel{{Effort: "medium"}, {Effort: "high"}},
 		},
 	}
 }
@@ -82,13 +82,13 @@ func loadRegistry(t *testing.T) *router.Registry {
 }
 
 func codexOK() discovery.CodexCatalog {
-	return discovery.CodexCatalogFunc(func(context.Context) ([]schema.Model, error) {
+	return discovery.CodexCatalogFunc(func(context.Context) ([]cschema.Model, error) {
 		return codexFixture(), nil
 	})
 }
 
 func codexFailing() discovery.CodexCatalog {
-	return discovery.CodexCatalogFunc(func(context.Context) ([]schema.Model, error) {
+	return discovery.CodexCatalogFunc(func(context.Context) ([]cschema.Model, error) {
 		return nil, fmt.Errorf("codex catalog unavailable")
 	})
 }
@@ -875,7 +875,7 @@ func TestDeadlineIsHonouredWithASlowCodexCatalog(t *testing.T) {
 	loadRegistry(t)
 	const deadline = 150 * time.Millisecond
 
-	slowCodex := discovery.CodexCatalogFunc(func(ctx context.Context) ([]schema.Model, error) {
+	slowCodex := discovery.CodexCatalogFunc(func(ctx context.Context) ([]cschema.Model, error) {
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
@@ -1124,10 +1124,10 @@ func TestAdvertisedIDsSurviveAPickerTierReset(t *testing.T) {
 // picker tier that recorded it survives, so it must not be offered at all.
 func TestUnparseableEffortVariantsAreNotAdvertised(t *testing.T) {
 	reg := loadRegistry(t)
-	exotic := discovery.CodexCatalogFunc(func(context.Context) ([]schema.Model, error) {
-		return []schema.Model{{
-			Slug: "gpt-5.6-sol", DisplayName: "GPT-5.6-Sol", Visibility: schema.VisibilityList,
-			SupportedReasoningLevels: []schema.ReasoningLevel{
+	exotic := discovery.CodexCatalogFunc(func(context.Context) ([]cschema.Model, error) {
+		return []cschema.Model{{
+			Slug: "gpt-5.6-sol", DisplayName: "GPT-5.6-Sol", Visibility: cschema.VisibilityList,
+			SupportedReasoningLevels: []cschema.ReasoningLevel{
 				{Effort: "high"},    // the grammar knows this one
 				{Effort: "minimal"}, // it does not
 			},

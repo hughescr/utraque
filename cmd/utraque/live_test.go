@@ -53,7 +53,7 @@ import (
 	"testing"
 	"time"
 
-	cschema "github.com/hughescr/utraque/internal/codex/schema"
+	"github.com/hughescr/utraque/internal/codex/schema"
 	"github.com/hughescr/utraque/internal/config"
 	"github.com/hughescr/utraque/internal/obs"
 	"github.com/hughescr/utraque/internal/server"

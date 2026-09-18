@@ -17,7 +17,7 @@ import (
 
 	"github.com/hughescr/utraque/internal/apierr"
 	"github.com/hughescr/utraque/internal/codex/auth"
-	cschema "github.com/hughescr/utraque/internal/codex/schema"
+	"github.com/hughescr/utraque/internal/codex/schema"
 	"github.com/hughescr/utraque/internal/obs"
 	"github.com/hughescr/utraque/internal/router"
 	"github.com/hughescr/utraque/internal/tokens"

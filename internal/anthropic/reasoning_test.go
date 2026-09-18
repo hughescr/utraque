@@ -8,8 +8,8 @@ import (
 	"github.com/hughescr/utraque/internal/anthropic/schema"
 )
 
-func schemaThinkingBlock(text, sig string) schema.ContentBlock {
-	return schema.ThinkingBlock(text, sig)
+func schemaThinkingBlock(text, sig string) aschema.ContentBlock {
+	return aschema.ThinkingBlock(text, sig)
 }
 
 func TestReasoningSignatureRoundTrip(t *testing.T) {

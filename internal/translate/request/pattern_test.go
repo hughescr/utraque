@@ -5,7 +5,7 @@ import (
 	"reflect"
 	"testing"
 
-	aschema "github.com/hughescr/utraque/internal/anthropic/schema"
+	"github.com/hughescr/utraque/internal/anthropic/schema"
 	"github.com/hughescr/utraque/internal/toolschema"
 )
 

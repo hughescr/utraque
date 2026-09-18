@@ -49,9 +49,9 @@ func do(t *testing.T, s *server.Server, r *http.Request) *httptest.ResponseRecor
 	return w
 }
 
-func decodeErrorEnvelope(t *testing.T, body []byte) schema.ErrorEvent {
+func decodeErrorEnvelope(t *testing.T, body []byte) aschema.ErrorEvent {
 	t.Helper()
-	var ev schema.ErrorEvent
+	var ev aschema.ErrorEvent
 	if err := json.Unmarshal(body, &ev); err != nil {
 		t.Fatalf("decoding the error envelope %q: %v", body, err)
 	}

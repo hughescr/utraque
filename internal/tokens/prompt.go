@@ -1,7 +1,7 @@
 package tokens
 
 import (
-	aschema "github.com/hughescr/utraque/internal/anthropic/schema"
+	"github.com/hughescr/utraque/internal/anthropic/schema"
 )
 
 // Estimator is the model-agnostic view: it estimates an Anthropic-shaped

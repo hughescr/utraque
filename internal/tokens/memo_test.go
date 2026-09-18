@@ -7,7 +7,7 @@ import (
 	"sync"
 	"testing"
 
-	cschema "github.com/hughescr/utraque/internal/codex/schema"
+	"github.com/hughescr/utraque/internal/codex/schema"
 )
 
 // fresh builds an exact estimator over its own memo, so a test or benchmark

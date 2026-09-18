@@ -41,11 +41,11 @@ func quietLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError + 1}))
 }
 
-func testRequest() *schema.ResponsesRequest {
-	return &schema.ResponsesRequest{
+func testRequest() *cschema.ResponsesRequest {
+	return &cschema.ResponsesRequest{
 		Model: "gpt-5.6-sol",
-		Input: []schema.InputItem{
-			schema.MessageItem("user", schema.InputText("hello")),
+		Input: []cschema.InputItem{
+			cschema.MessageItem("user", cschema.InputText("hello")),
 		},
 		Store:  false,
 		Stream: false, // Stream must force this true on a copy, not in place

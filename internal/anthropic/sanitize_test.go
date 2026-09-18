@@ -54,9 +54,9 @@ func TestSanitizeStripsMarkedThinkingBlocks(t *testing.T) {
 	}
 
 	var out struct {
-		Model     string           `json:"model"`
-		MaxTokens int              `json:"max_tokens"`
-		Messages  []schema.Message `json:"messages"`
+		Model     string            `json:"model"`
+		MaxTokens int               `json:"max_tokens"`
+		Messages  []aschema.Message `json:"messages"`
 	}
 	if err := json.Unmarshal(got, &out); err != nil {
 		t.Fatalf("sanitized body is not valid JSON: %v (%s)", err, got)
@@ -68,7 +68,7 @@ func TestSanitizeStripsMarkedThinkingBlocks(t *testing.T) {
 		t.Fatalf("got %d messages, want 2", len(out.Messages))
 	}
 	blocks := out.Messages[1].Content.Blocks
-	if len(blocks) != 1 || blocks[0].Type != schema.BlockText || blocks[0].Text != "hello" {
+	if len(blocks) != 1 || blocks[0].Type != aschema.BlockText || blocks[0].Text != "hello" {
 		t.Errorf("assistant blocks = %+v, want only the text block", blocks)
 	}
 }
@@ -88,7 +88,7 @@ func TestSanitizeStripsRedactedThinkingAndDropsEmptiedMessage(t *testing.T) {
 		t.Fatal("changed = false, want true")
 	}
 	var out struct {
-		Messages []schema.Message `json:"messages"`
+		Messages []aschema.Message `json:"messages"`
 	}
 	if err := json.Unmarshal(got, &out); err != nil {
 		t.Fatalf("sanitized body is not valid JSON: %v", err)
@@ -175,11 +175,11 @@ func TestSanitizeNoMessagesKey(t *testing.T) {
 }
 
 func TestSanitizeMessagesDoesNotMutateInput(t *testing.T) {
-	in := []schema.Message{{
-		Role: schema.RoleAssistant,
-		Content: schema.BlockContent(
-			schema.ThinkingBlock("x", SyntheticThinkingMarker+"s"),
-			schema.TextBlock("kept"),
+	in := []aschema.Message{{
+		Role: aschema.RoleAssistant,
+		Content: aschema.BlockContent(
+			aschema.ThinkingBlock("x", SyntheticThinkingMarker+"s"),
+			aschema.TextBlock("kept"),
 		),
 	}}
 	before := len(in[0].Content.Blocks)

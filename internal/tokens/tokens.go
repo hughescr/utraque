@@ -63,7 +63,7 @@ import (
 	"encoding/json"
 	"strconv"
 
-	cschema "github.com/hughescr/utraque/internal/codex/schema"
+	"github.com/hughescr/utraque/internal/codex/schema"
 )
 
 // RequestEstimator counts the input tokens of a translated Responses request.

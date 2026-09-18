@@ -135,7 +135,7 @@ func (l *Leg) CountTokens(w http.ResponseWriter, r *http.Request, rq *router.Req
 	if _, _, err := rewriteRequest(rq.Raw, rq.Dec.UpstreamModel); err != nil {
 		return err
 	}
-	var request schema.CountTokensRequest
+	var request aschema.CountTokensRequest
 	if err := json.Unmarshal(rq.Raw, &request); err != nil {
 		return apierr.Wrap(err, apierr.TypeInvalidRequest, "request body is not a valid count_tokens request")
 	}
@@ -308,13 +308,13 @@ func (l *Leg) streamResponse(w http.ResponseWriter, r *http.Request, idle *idleG
 		if err != nil {
 			return fmt.Errorf("%w: invalid deepseek stream: %w", router.ErrResponseStarted, err)
 		}
-		if eventType == schema.EventMessageStart {
+		if eventType == aschema.EventMessageStart {
 			sawStart = true
 		}
 		switch eventType {
-		case schema.EventMessageStop:
+		case aschema.EventMessageStop:
 			sawTerminal = true
-		case schema.EventError:
+		case aschema.EventError:
 			sawTerminal = true
 			sawError = true
 		}
@@ -426,7 +426,7 @@ func mediaType(h http.Header) string {
 }
 
 func observeMessage(ctx context.Context, b []byte) {
-	var msg schema.MessagesResponse
+	var msg aschema.MessagesResponse
 	if json.Unmarshal(b, &msg) != nil {
 		return
 	}
@@ -439,13 +439,13 @@ func observeMessage(ctx context.Context, b []byte) {
 func observeStreamFrame(ctx context.Context, event string, data []byte) {
 	sum := obs.SummaryFrom(ctx)
 	switch event {
-	case schema.EventMessageStart:
-		var e schema.MessageStartEvent
+	case aschema.EventMessageStart:
+		var e aschema.MessageStartEvent
 		if json.Unmarshal(data, &e) == nil {
 			sum.SetInputTokens(e.Message.Usage.InputTokens, e.Message.Usage.CacheReadInputTokens)
 		}
-	case schema.EventMessageDelta:
-		var e schema.MessageDeltaEvent
+	case aschema.EventMessageDelta:
+		var e aschema.MessageDeltaEvent
 		if json.Unmarshal(data, &e) == nil {
 			if e.Usage != nil {
 				sum.SetOutputTokens(e.Usage.OutputTokens)

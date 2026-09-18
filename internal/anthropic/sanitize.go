@@ -34,9 +34,9 @@ func HasSyntheticThinking(raw []byte) bool {
 }
 
 // IsSyntheticBlock reports whether b is a thinking block minted by utraque.
-func IsSyntheticBlock(b schema.ContentBlock) bool {
+func IsSyntheticBlock(b aschema.ContentBlock) bool {
 	switch b.Type {
-	case schema.BlockThinking, schema.BlockRedactedThinking:
+	case aschema.BlockThinking, aschema.BlockRedactedThinking:
 	default:
 		return false
 	}
@@ -62,15 +62,15 @@ func IsSyntheticBlock(b schema.ContentBlock) bool {
 // tool_result that follows. Stripping is the strictly lesser failure. Minting
 // the block differently is a Codex-translation concern, not a sanitizer one;
 // forward returns a warning log when this shape is produced.
-func SanitizeMessages(in []schema.Message) ([]schema.Message, bool) {
+func SanitizeMessages(in []aschema.Message) ([]aschema.Message, bool) {
 	changed := false
-	out := make([]schema.Message, 0, len(in))
+	out := make([]aschema.Message, 0, len(in))
 	for _, m := range in {
 		if m.Content == nil || m.Content.IsString || len(m.Content.Blocks) == 0 {
 			out = append(out, m)
 			continue
 		}
-		kept := make([]schema.ContentBlock, 0, len(m.Content.Blocks))
+		kept := make([]aschema.ContentBlock, 0, len(m.Content.Blocks))
 		dropped := 0
 		for _, b := range m.Content.Blocks {
 			if IsSyntheticBlock(b) {
@@ -87,7 +87,7 @@ func SanitizeMessages(in []schema.Message) ([]schema.Message, bool) {
 		if len(kept) == 0 {
 			continue
 		}
-		m.Content = &schema.Content{Blocks: kept}
+		m.Content = &aschema.Content{Blocks: kept}
 		out = append(out, m)
 	}
 	return out, changed
@@ -95,7 +95,7 @@ func SanitizeMessages(in []schema.Message) ([]schema.Message, bool) {
 
 // SanitizeMessagesRequest strips synthetic thinking blocks from a decoded
 // request in place and reports whether anything changed.
-func SanitizeMessagesRequest(req *schema.MessagesRequest) bool {
+func SanitizeMessagesRequest(req *aschema.MessagesRequest) bool {
 	if req == nil {
 		return false
 	}
@@ -230,7 +230,7 @@ func sanitizeRawMessage(rawMsg []byte, rep *Report) (out []byte, changed bool, d
 			dropped++
 			continue
 		}
-		if kind == schema.BlockToolUse {
+		if kind == aschema.BlockToolUse {
 			toolUse = true
 		}
 		kept = append(kept, b)
@@ -267,7 +267,7 @@ func classifyRawBlock(raw []byte) (kind string, synthetic bool, err error) {
 		return "", false, fmt.Errorf("utraque/anthropic: decode content block: %w", err)
 	}
 	switch m.Type {
-	case schema.BlockThinking, schema.BlockRedactedThinking:
+	case aschema.BlockThinking, aschema.BlockRedactedThinking:
 		synthetic = strings.Contains(m.Signature, SyntheticThinkingMarker) ||
 			strings.Contains(m.Data, SyntheticThinkingMarker)
 	}

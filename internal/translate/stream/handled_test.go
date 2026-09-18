@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	cschema "github.com/hughescr/utraque/internal/codex/schema"
+	"github.com/hughescr/utraque/internal/codex/schema"
 	"github.com/hughescr/utraque/internal/translate/stream"
 )
 

@@ -69,15 +69,15 @@ func (e *Error) HTTPStatus() int {
 }
 
 // Envelope renders the Anthropic error envelope.
-func (e *Error) Envelope() schema.ErrorEvent {
+func (e *Error) Envelope() aschema.ErrorEvent {
 	if e == nil {
-		return schema.NewErrorEvent(string(TypeAPI), "internal error")
+		return aschema.NewErrorEvent(string(TypeAPI), "internal error")
 	}
 	kind := e.Kind
 	if kind == "" {
 		kind = TypeAPI
 	}
-	return schema.NewErrorEvent(string(kind), e.Message)
+	return aschema.NewErrorEvent(string(kind), e.Message)
 }
 
 // Render writes the envelope. A status <= 0 derives one from Kind.
