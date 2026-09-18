@@ -51,7 +51,7 @@ import (
 // override is supplied. Bump it as part of cutting a release (see
 // CONTRIBUTING.md's "Releasing" section) and let buildVersion decorate it
 // with the checkout's revision.
-const releaseVersion = "1.0.0"
+const releaseVersion = "1.0.1"
 
 // version is empty by default. -ldflags "-X main.version=..." overrides
 // buildVersion's self-stamped result outright, which is how a packaged build
