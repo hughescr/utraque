@@ -170,6 +170,25 @@ use it to verify the tree, not to install it. `-o` chooses where the binary
 lands; `go install ./cmd/utraque` puts it in `$GOBIN` (`$GOPATH/bin`, usually
 `~/go/bin`) instead.
 
+### Version stamping
+
+A build from a git checkout self-stamps: Go's `-buildvcs` default embeds the
+checkout's revision and whether the tree was modified, and `utraque` turns
+that into a version like `1.0.0+0ef929d` (or `1.0.0+0ef929d.dirty` for an
+uncommitted tree) with no build flags required. That string is what
+`/healthz`'s `version` field reports, what the startup "listening" log line
+carries, and what `utraque --version` (or `-version`) prints to stdout before
+exiting — the flag is handled before config loads or Codex is contacted, so it
+works even with no Codex CLI installed.
+
+`-ldflags "-X main.version=<string>"` overrides the self-stamped value
+outright, for a packaged build (a Homebrew formula, a container image) that
+wants to pin an exact string instead of trusting the embedded revision:
+
+```sh
+go build -ldflags "-X main.version=1.0.0" -o bin/utraque ./cmd/utraque
+```
+
 ### Pointing Claude Code at it
 
 | Variable | Why |

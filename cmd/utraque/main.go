@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -46,8 +47,75 @@ import (
 	"github.com/hughescr/utraque/internal/usagehistory"
 )
 
-// version is stamped at build time with -ldflags "-X main.version=...".
-var version = "0.0.0-dev"
+// releaseVersion is the version this source tree ships when no build-time
+// override is supplied. Bump it as part of cutting a release (see
+// CONTRIBUTING.md's "Releasing" section) and let buildVersion decorate it
+// with the checkout's revision.
+const releaseVersion = "1.0.0"
+
+// version is empty by default. -ldflags "-X main.version=..." overrides
+// buildVersion's self-stamped result outright, which is how a packaged build
+// (a formula, a container image) pins an exact string instead of trusting
+// whatever revision Go's -buildvcs embedded.
+var version string
+
+// buildVersion computes the string reported on /healthz, the startup
+// "listening" log line, and `utraque --version`.
+//
+// stamped is the ldflags override (main.version) and always wins when set.
+// Otherwise the version is releaseVersion decorated with the revision
+// Go's default -buildvcs embedded in info.Settings: "+<7-char sha>", plus
+// ".dirty" if the working tree had uncommitted changes at build time. That
+// makes `go install ./cmd/utraque` from a git checkout self-identify with no
+// build flags at all. Absent build info or a recorded revision (a build
+// without VCS metadata, e.g. from a bare source archive), it falls back to
+// releaseVersion alone.
+func buildVersion(stamped string, info *debug.BuildInfo, ok bool) string {
+	if stamped != "" {
+		return stamped
+	}
+	if !ok || info == nil {
+		return releaseVersion
+	}
+
+	var revision string
+	var dirty bool
+	for _, s := range info.Settings {
+		switch s.Key {
+		case "vcs.revision":
+			revision = s.Value
+		case "vcs.modified":
+			dirty = s.Value == "true"
+		}
+	}
+	if revision == "" {
+		return releaseVersion
+	}
+	if len(revision) > 7 {
+		revision = revision[:7]
+	}
+
+	out := releaseVersion + "+" + revision
+	if dirty {
+		out += ".dirty"
+	}
+	return out
+}
+
+// versionRequested reports whether args (main's os.Args[1:]) asks to print
+// the version and exit, recognising both -version and --version. It is a
+// plain scan rather than a flag.FlagSet because main.go parses no other
+// flags today; the point of keeping it this small is that main can check it
+// before config load or the Codex client-version subprocess discovery, both
+// of which run() performs and neither of which --version should trigger.
+func versionRequested(args []string) bool {
+	for _, a := range args {
+		if a == "-version" || a == "--version" {
+			return true
+		}
+	}
+	return false
+}
 
 // betaHeader carries the OAuth capability flags. It may legitimately appear
 // several times; the passthrough relays each value as its own header line and
@@ -55,6 +123,15 @@ var version = "0.0.0-dev"
 const betaHeader = "anthropic-beta"
 
 func main() {
+	// Checked before any other startup work — config load and the Codex
+	// client-version discovery (which shells out to the codex executable) both
+	// happen inside run(), and neither should run just to answer --version.
+	if versionRequested(os.Args[1:]) {
+		info, ok := debug.ReadBuildInfo()
+		fmt.Println(buildVersion(version, info, ok))
+		return
+	}
+
 	if err := run(context.Background(), os.Getenv, os.Stderr); err != nil {
 		fmt.Fprintf(os.Stderr, "utraque: %v\n", err)
 		os.Exit(1)
@@ -355,10 +432,11 @@ func newApp(cfg config.Config, log *slog.Logger, activity server.ActivityTracker
 		hr.auth = credSource
 	}
 
+	buildInfo, buildInfoOK := debug.ReadBuildInfo()
 	srv, err := server.New(server.Options{
 		Config:        cfg,
 		Logger:        log,
-		Version:       version,
+		Version:       buildVersion(version, buildInfo, buildInfoOK),
 		Activity:      activity,
 		HealthExtra:   hr.extra,
 		TransportKind: tr.Kind,

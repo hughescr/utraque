@@ -72,6 +72,18 @@ any form, and `account_id` only as a hash prefix. There is a test that drives
 the production logger at `debug` and asserts no token-shaped material reaches a
 log line. Do not add a log statement that prints a whole request or header map.
 
+## Releasing
+
+`cmd/utraque/main.go` defines `const releaseVersion`. A build from a git
+checkout self-stamps that with the revision (see the README's *Version
+stamping*), so cutting a release is just:
+
+1. Bump `releaseVersion` in `cmd/utraque/main.go`.
+2. Commit it.
+3. Tag `vX.Y.Z` — Go module tags carry the `v` prefix even though
+   `releaseVersion` itself does not.
+4. Push the tag.
+
 ## Reporting bugs
 
 Include the `/healthz` output with any token values removed, the redacted
