@@ -12,21 +12,21 @@ import (
 	"io"
 	"log/slog"
 	"mime"
-	"net"
 	"net/http"
 	"net/url"
 	"slices"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/hughescr/utraque/internal/anthropic/schema"
 	"github.com/hughescr/utraque/internal/apierr"
 	"github.com/hughescr/utraque/internal/obs"
 	"github.com/hughescr/utraque/internal/proxyhdr"
+	"github.com/hughescr/utraque/internal/relay"
 	"github.com/hughescr/utraque/internal/router"
 	"github.com/hughescr/utraque/internal/sse"
 	"github.com/hughescr/utraque/internal/tokens"
+	"github.com/hughescr/utraque/internal/toolschema"
 	"github.com/hughescr/utraque/internal/transport"
 )
 
@@ -152,8 +152,8 @@ func (l *Leg) forward(w http.ResponseWriter, r *http.Request, rq *router.Request
 	}
 	l.logRewrite(r.Context(), rq, report)
 
-	ctx, idle := l.withIdleDeadline(r.Context())
-	defer idle.stop()
+	ctx, idle := relay.WithUpstreamIdleDeadline(r.Context(), l.upstreamIdle)
+	defer idle.Stop()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, l.base.String()+path, bytes.NewReader(body))
 	if err != nil {
 		return apierr.Wrap(err, apierr.TypeInvalidRequest, "build deepseek request")
@@ -177,7 +177,7 @@ func (l *Leg) forward(w http.ResponseWriter, r *http.Request, rq *router.Request
 		if ctxErr := r.Context().Err(); ctxErr != nil {
 			return fmt.Errorf("%w: %w", router.ErrClientGone, ctxErr)
 		}
-		return l.upstreamError(err, idle.fired())
+		return relay.UpstreamError("deepseek upstream", err, idle)
 	}
 	defer resp.Body.Close()
 	obs.SummaryFrom(r.Context()).SetUpstreamStatus(resp.StatusCode)
@@ -210,30 +210,24 @@ func (l *Leg) forward(w http.ResponseWriter, r *http.Request, rq *router.Request
 // logs for its translation, so a tool that stopped enforcing a constraint can
 // be traced to the rewrite without re-deriving it. Requests whose schemas went
 // through untouched log nothing.
-func (l *Leg) logRewrite(ctx context.Context, rq *router.Request, report rewriteReport) {
-	if len(report.RewrittenPatterns) == 0 && len(report.DroppedPatterns) == 0 {
+func (l *Leg) logRewrite(ctx context.Context, rq *router.Request, report toolschema.Report) {
+	if report.Empty() {
 		return
 	}
 	if !l.log.Enabled(ctx, slog.LevelDebug) {
 		return
 	}
-	attrs := []slog.Attr{slog.String("upstream_model", rq.Dec.UpstreamModel)}
-	if len(report.RewrittenPatterns) > 0 {
-		attrs = append(attrs, slog.Any("rewritten_patterns", report.RewrittenPatterns))
-	}
-	if len(report.DroppedPatterns) > 0 {
-		attrs = append(attrs, slog.Any("dropped_patterns", report.DroppedPatterns))
-	}
+	attrs := append([]slog.Attr{slog.String("upstream_model", rq.Dec.UpstreamModel)}, report.LogAttrs()...)
 	l.log.LogAttrs(ctx, slog.LevelDebug, "rewrote tool schema patterns for the deepseek backend", attrs...)
 }
 
-func (l *Leg) jsonResponse(w http.ResponseWriter, r *http.Request, idle *idleGuard, resp *http.Response, canonical string, rewriteModel bool) error {
-	b, err := io.ReadAll(io.LimitReader(idle.wrap(resp.Body), defaultMaxResponseBytes+1))
+func (l *Leg) jsonResponse(w http.ResponseWriter, r *http.Request, idle *relay.UpstreamIdleGuard, resp *http.Response, canonical string, rewriteModel bool) error {
+	b, err := io.ReadAll(io.LimitReader(idle.Wrap(resp.Body), defaultMaxResponseBytes+1))
 	if err != nil {
 		if ctxErr := r.Context().Err(); ctxErr != nil {
 			return fmt.Errorf("%w: %w", router.ErrClientGone, ctxErr)
 		}
-		return l.upstreamError(err, idle.fired())
+		return relay.UpstreamError("deepseek upstream", err, idle)
 	}
 	if len(b) > defaultMaxResponseBytes {
 		return apierr.WithStatus(http.StatusBadGateway, apierr.TypeAPI, "deepseek response exceeded the safety limit")
@@ -257,12 +251,12 @@ func (l *Leg) jsonResponse(w http.ResponseWriter, r *http.Request, idle *idleGua
 	return nil
 }
 
-func (l *Leg) streamResponse(w http.ResponseWriter, r *http.Request, idle *idleGuard, resp *http.Response, canonical string) error {
+func (l *Leg) streamResponse(w http.ResponseWriter, r *http.Request, idle *relay.UpstreamIdleGuard, resp *http.Response, canonical string) error {
 	copyResponseHeaders(w.Header(), resp.Header)
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.WriteHeader(resp.StatusCode)
 
-	scanner := sse.NewScanner(idle.wrap(resp.Body))
+	scanner := sse.NewScanner(idle.Wrap(resp.Body))
 	writer := sse.NewFrameWriter(w)
 	sawStart, sawTerminal, sawError := false, false, false
 	for scanner.Scan() {
@@ -293,7 +287,7 @@ func (l *Leg) streamResponse(w http.ResponseWriter, r *http.Request, idle *idleG
 		if ctxErr := r.Context().Err(); ctxErr != nil {
 			return fmt.Errorf("%w: %w: %w", router.ErrResponseStarted, router.ErrClientGone, ctxErr)
 		}
-		if idle.fired() {
+		if idle.Fired() {
 			return fmt.Errorf("%w: deepseek stream went silent for %s: %w", router.ErrResponseStarted, l.upstreamIdle, err)
 		}
 		return fmt.Errorf("%w: reading deepseek stream: %w", router.ErrResponseStarted, err)
@@ -309,8 +303,8 @@ func (l *Leg) streamResponse(w http.ResponseWriter, r *http.Request, idle *idleG
 	return nil
 }
 
-func (l *Leg) copyBody(w http.ResponseWriter, r *http.Request, idle *idleGuard, src io.Reader) error {
-	_, err := io.CopyBuffer(w, idle.wrap(src), make([]byte, copyBufferSize))
+func (l *Leg) copyBody(w http.ResponseWriter, r *http.Request, idle *relay.UpstreamIdleGuard, src io.Reader) error {
+	_, err := io.CopyBuffer(w, idle.Wrap(src), make([]byte, copyBufferSize))
 	if err == nil {
 		return nil
 	}
@@ -318,35 +312,6 @@ func (l *Leg) copyBody(w http.ResponseWriter, r *http.Request, idle *idleGuard, 
 		return fmt.Errorf("%w: %w: %w", router.ErrResponseStarted, router.ErrClientGone, ctxErr)
 	}
 	return fmt.Errorf("%w: relaying deepseek response: %w", router.ErrResponseStarted, err)
-}
-
-func (l *Leg) upstreamError(err error, idleFired bool) error {
-	if idleFired {
-		return apierr.Wrap(scrubURLError(err), apierr.TypeTimeout,
-			"deepseek upstream sent nothing for %s", l.upstreamIdle)
-	}
-	var ne net.Error
-	if (errors.As(err, &ne) && ne.Timeout()) || errors.Is(err, context.DeadlineExceeded) {
-		return apierr.Wrap(scrubURLError(err), apierr.TypeTimeout, "deepseek upstream request timed out")
-	}
-	e := apierr.Wrap(scrubURLError(err), apierr.TypeAPI, "deepseek upstream request failed")
-	e.Status = http.StatusBadGateway
-	return e
-}
-
-func scrubURLError(err error) error {
-	var ue *url.Error
-	if !errors.As(err, &ue) {
-		return err
-	}
-	safe := "invalid-url"
-	if u, parseErr := url.Parse(ue.URL); parseErr == nil {
-		u.User = nil
-		u.RawQuery, u.Fragment, u.RawFragment = "", "", ""
-		u.ForceQuery = false
-		safe = u.String()
-	}
-	return &url.Error{Op: ue.Op, URL: safe, Err: ue.Err}
 }
 
 var requestHeaderAllow = map[string]struct{}{
@@ -416,56 +381,4 @@ func observeStreamFrame(ctx context.Context, event string, data []byte) {
 			sum.SetStopReason(e.Delta.StopReason)
 		}
 	}
-}
-
-type idleGuard struct {
-	timeout time.Duration
-	timer   *time.Timer
-	cancel  context.CancelFunc
-	tripped atomic.Bool
-}
-
-func (l *Leg) withIdleDeadline(parent context.Context) (context.Context, *idleGuard) {
-	g := &idleGuard{timeout: l.upstreamIdle}
-	if l.upstreamIdle <= 0 {
-		return parent, g
-	}
-	ctx, cancel := context.WithCancel(parent)
-	g.cancel = cancel
-	g.timer = time.AfterFunc(l.upstreamIdle, func() {
-		g.tripped.Store(true)
-		cancel()
-	})
-	return ctx, g
-}
-
-func (g *idleGuard) stop() {
-	if g.timer != nil {
-		g.timer.Stop()
-	}
-	if g.cancel != nil {
-		g.cancel()
-	}
-}
-
-func (g *idleGuard) fired() bool { return g.tripped.Load() }
-
-func (g *idleGuard) wrap(r io.Reader) io.Reader {
-	if g.timer == nil {
-		return r
-	}
-	return &idleResetReader{r: r, g: g}
-}
-
-type idleResetReader struct {
-	r io.Reader
-	g *idleGuard
-}
-
-func (r *idleResetReader) Read(p []byte) (int, error) {
-	n, err := r.r.Read(p)
-	if n > 0 && !r.g.tripped.Load() {
-		r.g.timer.Reset(r.g.timeout)
-	}
-	return n, err
 }

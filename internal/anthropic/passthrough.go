@@ -5,22 +5,20 @@ package anthropic
 
 import (
 	"bytes"
-	"context"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
-	"net"
 	"net/http"
 	"net/url"
 	"slices"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/hughescr/utraque/internal/apierr"
 	"github.com/hughescr/utraque/internal/obs"
 	"github.com/hughescr/utraque/internal/proxyhdr"
+	"github.com/hughescr/utraque/internal/relay"
 	"github.com/hughescr/utraque/internal/router"
 	"github.com/hughescr/utraque/internal/transport"
 )
@@ -255,8 +253,8 @@ func (l *Leg) forward(w http.ResponseWriter, r *http.Request, rq *router.Request
 	// idle bounds a silent upstream. It cancels only this leg's derived
 	// context, so the caller's own cancellation stays distinguishable from a
 	// timeout when the error is classified below.
-	ctx, idle := l.withIdleDeadline(r.Context())
-	defer idle.stop()
+	ctx, idle := relay.WithUpstreamIdleDeadline(r.Context(), l.upstreamIdle)
+	defer idle.Stop()
 
 	req, err := http.NewRequestWithContext(ctx, r.Method, l.upstreamURL(r.URL), bytes.NewReader(body))
 	if err != nil {
@@ -281,7 +279,7 @@ func (l *Leg) forward(w http.ResponseWriter, r *http.Request, rq *router.Request
 		if ctxErr := r.Context().Err(); ctxErr != nil {
 			return fmt.Errorf("%w: %w", ErrClientGone, ctxErr)
 		}
-		return l.upstreamError(err, idle.fired())
+		return relay.UpstreamError("upstream", err, idle)
 	}
 	defer resp.Body.Close()
 
@@ -300,115 +298,17 @@ func (l *Leg) forward(w http.ResponseWriter, r *http.Request, rq *router.Request
 	flush(rc)
 
 	buf := make([]byte, copyBufferSize)
-	if _, err := io.CopyBuffer(&flushWriter{w: w, rc: rc}, idle.wrap(resp.Body), buf); err != nil {
+	if _, err := io.CopyBuffer(&flushWriter{w: w, rc: rc}, idle.Wrap(resp.Body), buf); err != nil {
 		if ctxErr := r.Context().Err(); ctxErr != nil {
 			return fmt.Errorf("%w: %w: %w", ErrResponseStarted, ErrClientGone, ctxErr)
 		}
-		if idle.fired() {
+		if idle.Fired() {
 			return fmt.Errorf("%w: upstream stream went silent for %s: %w",
 				ErrResponseStarted, l.upstreamIdle, err)
 		}
 		return fmt.Errorf("%w: streaming upstream response: %w", ErrResponseStarted, err)
 	}
 	return nil
-}
-
-// upstreamError classifies a failed round trip. A timeout is a 504
-// timeout_error rather than the blanket 502: the client's retry policy for
-// "upstream is slow" differs from "upstream is broken".
-func (l *Leg) upstreamError(err error, idleFired bool) error {
-	if idleFired {
-		e := apierr.Wrap(scrubURLError(err), apierr.TypeTimeout,
-			"upstream sent nothing for %s", l.upstreamIdle)
-		return e
-	}
-	var ne net.Error
-	if (errors.As(err, &ne) && ne.Timeout()) || errors.Is(err, context.DeadlineExceeded) {
-		return apierr.Wrap(scrubURLError(err), apierr.TypeTimeout, "upstream request timed out")
-	}
-	e := apierr.Wrap(scrubURLError(err), apierr.TypeAPI, "upstream request failed")
-	e.Status = http.StatusBadGateway
-	return e
-}
-
-// scrubURLError strips the query string (and any userinfo) from the URL
-// net/http stamps into a *url.Error. That URL is the caller's own, verbatim,
-// and reaches the log through the error's cause; a query-string credential
-// must not end up there. Go redacts only the userinfo password.
-func scrubURLError(err error) error {
-	var ue *url.Error
-	if !errors.As(err, &ue) {
-		return err
-	}
-	safe := ue.URL
-	if u, perr := url.Parse(ue.URL); perr == nil {
-		u.User = nil
-		u.RawQuery = ""
-		u.ForceQuery = false
-		u.Fragment = ""
-		u.RawFragment = ""
-		safe = u.String()
-	} else {
-		safe = "invalid-url"
-	}
-	return &url.Error{Op: ue.Op, URL: safe, Err: ue.Err}
-}
-
-// idleGuard arms the rolling upstream-idle deadline for one round trip. The
-// zero value (no timeout configured) is inert: stop, fired and wrap all become
-// no-ops, so forward needs no branches.
-type idleGuard struct {
-	timeout time.Duration
-	timer   *time.Timer
-	cancel  context.CancelFunc
-	tripped atomic.Bool
-}
-
-func (l *Leg) withIdleDeadline(parent context.Context) (context.Context, *idleGuard) {
-	g := &idleGuard{timeout: l.upstreamIdle}
-	if l.upstreamIdle <= 0 {
-		return parent, g
-	}
-	ctx, cancel := context.WithCancel(parent)
-	g.cancel = cancel
-	g.timer = time.AfterFunc(l.upstreamIdle, func() {
-		g.tripped.Store(true)
-		cancel()
-	})
-	return ctx, g
-}
-
-func (g *idleGuard) stop() {
-	if g.timer != nil {
-		g.timer.Stop()
-	}
-	if g.cancel != nil {
-		g.cancel()
-	}
-}
-
-func (g *idleGuard) fired() bool { return g.tripped.Load() }
-
-// wrap restarts the countdown on every byte read from the upstream body, which
-// is what makes the bound an idle one rather than a total one.
-func (g *idleGuard) wrap(r io.Reader) io.Reader {
-	if g.timer == nil {
-		return r
-	}
-	return &idleResetReader{r: r, g: g}
-}
-
-type idleResetReader struct {
-	r io.Reader
-	g *idleGuard
-}
-
-func (ir *idleResetReader) Read(p []byte) (int, error) {
-	n, err := ir.r.Read(p)
-	if n > 0 && !ir.g.tripped.Load() {
-		ir.g.timer.Reset(ir.g.timeout)
-	}
-	return n, err
 }
 
 // requestBody is the routed request's already-read body (rq.Raw, which the

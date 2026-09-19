@@ -131,6 +131,11 @@ const (
 	EnvLaunchdSocketName    = EnvPrefix + "LAUNCHD_SOCKET"
 	EnvLogLevel             = EnvPrefix + "LOG_LEVEL"
 	EnvLogFormat            = EnvPrefix + "LOG_FORMAT"
+	// EnvTraceDir turns on per-request trace dumps and names the directory
+	// they are written to. It is deliberately its OWN variable rather than a
+	// log level: raising the log level should never start writing prompt text
+	// to disk, and turning tracing on should be an act with a name.
+	EnvTraceDir = EnvPrefix + "TRACE_DIR"
 
 	EnvCodexBaseURL       = EnvPrefix + "CODEX_BASE_URL"
 	EnvCodexAuthFile      = EnvPrefix + "CODEX_AUTH_FILE"
@@ -232,9 +237,16 @@ type Codex struct {
 	// GET {base}/models request (see catalog.Options.ClientVersion) and is
 	// also recorded in utraque's own on-disk catalog cache. Not a secret — it
 	// is a Codex CLI version string. An empty value means production startup
-	// must discover it from UTRAQUE_CODEX_EXECUTABLE; an explicit
+	// must discover it by running Executable --version; an explicit
 	// UTRAQUE_CODEX_CLIENT_VERSION bypasses discovery.
 	ClientVersion string
+	// Executable is the Codex CLI binary. UTRAQUE_CODEX_EXECUTABLE. Startup
+	// runs it once (Executable --version) to discover ClientVersion when that
+	// is not set explicitly, so a missing or misconfigured value blocks
+	// startup in that case; the provider report later runs the same binary
+	// for its isolated, short-lived app-server query. Under launchd this
+	// should be an absolute path, because that PATH is intentionally narrow.
+	Executable string
 }
 
 // AliasOverride pins how one Codex slug decomposes into router aliases, for a
@@ -279,46 +291,48 @@ type Routing struct {
 	AliasOverrides []AliasOverride
 }
 
-// Log configures the slog handler.
+// Log configures the slog handler and the per-request trace dumps.
 type Log struct {
 	Level  string // UTRAQUE_LOG_LEVEL:  debug|info|warn|error
 	Format string // UTRAQUE_LOG_FORMAT: json|text
+	// TraceDir names the directory per-request trace dumps are written to;
+	// empty (the default) means tracing is off. UTRAQUE_TRACE_DIR. A trace
+	// holds the conversation in the clear, which is why this is its own
+	// switch and not a log level (see internal/obs.NewTracer).
+	TraceDir string
 }
 
-// Reporting configures the loopback-only provider report. Most external
-// helper availability is checked only when the endpoint is requested, so a
-// missing ccusage/Claude-plan helper cannot prevent inference from starting.
-// CodexExecutable is the exception: when Codex.ClientVersion is not set
-// explicitly, startup runs CodexExecutable --version to discover it (see
-// Codex.ClientVersion and cmd/utraque's resolveCodexClientVersion), so a
-// missing or misconfigured Codex executable does block startup in that case.
-type Reporting struct {
+// ProviderReport configures the loopback-only provider report. Every helper
+// named here (the ccusage runner or binary, the Claude-plan label) is checked
+// only when the endpoint is requested, so a missing or misconfigured one can
+// never prevent inference from starting. The Codex executable the report also
+// runs is not here: it belongs to Codex.Executable, because startup runs it to
+// discover the catalog client version, and cmd/utraque hands it to the report
+// as a dependency.
+type ProviderReport struct {
 	CCUsageRunner        string
 	CCUsageExecutable    string
 	CCUsageVersion       string
-	CodexExecutable      string
 	CacheTTL             time.Duration
 	Timeout              time.Duration
 	ClaudePlan           string
 	ClaudePlanMultiplier *float64
 }
 
-// Config is the whole configuration surface except request tracing:
-// UTRAQUE_TRACE_DIR is read directly by internal/obs (TracerFromEnv), not
-// through Config. LocalToken is a secret and is never rendered in full by
-// String or LogValue.
+// Config is the whole configuration surface. LocalToken is a secret and is
+// never rendered in full by String or LogValue.
 type Config struct {
-	Listen     string // UTRAQUE_LISTEN
-	LocalToken string // UTRAQUE_LOCAL_TOKEN (secret)
-	Limits     Limits
-	Anthropic  Anthropic
-	DeepSeek   DeepSeek
-	Codex      Codex
-	Routing    Routing
-	Idle       Idle
-	Launchd    Launchd
-	Log        Log
-	Reporting  Reporting
+	Listen         string // UTRAQUE_LISTEN
+	LocalToken     string // UTRAQUE_LOCAL_TOKEN (secret)
+	Limits         Limits
+	Anthropic      Anthropic
+	DeepSeek       DeepSeek
+	Codex          Codex
+	Routing        Routing
+	Idle           Idle
+	Launchd        Launchd
+	Log            Log
+	ProviderReport ProviderReport
 }
 
 var (
@@ -345,14 +359,14 @@ func Default() Config {
 			RefreshSkew: DefaultCodexRefreshSkew,
 			LockTimeout: DefaultCodexLockTimeout,
 			Transport:   DefaultCodexTransport,
+			Executable:  DefaultCodexExecutable,
 		},
 		Idle:    Idle{Timeout: DefaultIdleTimeout},
 		Launchd: Launchd{SocketName: DefaultLaunchdSocketName},
 		Log:     Log{Level: DefaultLogLevel, Format: DefaultLogFormat},
-		Reporting: Reporting{
+		ProviderReport: ProviderReport{
 			CCUsageRunner: DefaultCCUsageRunner, CCUsageVersion: DefaultCCUsageVersion,
-			CodexExecutable: DefaultCodexExecutable, CacheTTL: DefaultProviderCacheTTL,
-			Timeout: DefaultProviderTimeout,
+			CacheTTL: DefaultProviderCacheTTL, Timeout: DefaultProviderTimeout,
 		},
 	}
 }
@@ -382,14 +396,15 @@ func LoadFrom(getenv func(string) string) (Config, error) {
 	setString(EnvCodexTokenURL, &c.Codex.TokenURL)
 	setString(EnvCodexTransport, &c.Codex.Transport)
 	setString(EnvCodexClientVersion, &c.Codex.ClientVersion)
+	setString(EnvCodexExecutable, &c.Codex.Executable)
 	setString(EnvLaunchdSocketName, &c.Launchd.SocketName)
 	setString(EnvLogLevel, &c.Log.Level)
 	setString(EnvLogFormat, &c.Log.Format)
-	setString(EnvCCUsageRunner, &c.Reporting.CCUsageRunner)
-	setString(EnvCCUsageExecutable, &c.Reporting.CCUsageExecutable)
-	setString(EnvCCUsageVersion, &c.Reporting.CCUsageVersion)
-	setString(EnvCodexExecutable, &c.Reporting.CodexExecutable)
-	setString(EnvClaudePlan, &c.Reporting.ClaudePlan)
+	setString(EnvTraceDir, &c.Log.TraceDir)
+	setString(EnvCCUsageRunner, &c.ProviderReport.CCUsageRunner)
+	setString(EnvCCUsageExecutable, &c.ProviderReport.CCUsageExecutable)
+	setString(EnvCCUsageVersion, &c.ProviderReport.CCUsageVersion)
+	setString(EnvClaudePlan, &c.ProviderReport.ClaudePlan)
 
 	c.Codex.AuthFile = resolveCodexAuthFile(getenv)
 	c.Codex.CacheFile = resolveCodexCacheFile(getenv)
@@ -453,10 +468,10 @@ func LoadFrom(getenv func(string) string) (Config, error) {
 	if err := setDuration(EnvCodexLockTimeout, &c.Codex.LockTimeout); err != nil {
 		return Config{}, err
 	}
-	if err := setDuration(EnvProviderCacheTTL, &c.Reporting.CacheTTL); err != nil {
+	if err := setDuration(EnvProviderCacheTTL, &c.ProviderReport.CacheTTL); err != nil {
 		return Config{}, err
 	}
-	if err := setDuration(EnvProviderTimeout, &c.Reporting.Timeout); err != nil {
+	if err := setDuration(EnvProviderTimeout, &c.ProviderReport.Timeout); err != nil {
 		return Config{}, err
 	}
 	if v, ok := lookup(getenv, EnvClaudePlanMultiplier); ok {
@@ -464,24 +479,25 @@ func LoadFrom(getenv func(string) string) (Config, error) {
 		if err != nil || math.IsNaN(f) || math.IsInf(f, 0) {
 			return Config{}, fmt.Errorf("config: %s must be a finite number", EnvClaudePlanMultiplier)
 		}
-		c.Reporting.ClaudePlanMultiplier = &f
+		c.ProviderReport.ClaudePlanMultiplier = &f
 	}
 
 	c.Codex.BaseURL = strings.TrimRight(strings.TrimSpace(c.Codex.BaseURL), "/")
 	c.Codex.TokenURL = strings.TrimRight(strings.TrimSpace(c.Codex.TokenURL), "/")
 	c.Codex.Transport = strings.ToLower(strings.TrimSpace(c.Codex.Transport))
 	c.Codex.ClientVersion = strings.TrimSpace(c.Codex.ClientVersion)
+	c.Codex.Executable = strings.TrimSpace(c.Codex.Executable)
 	c.Listen = strings.TrimSpace(c.Listen)
 	c.Launchd.SocketName = strings.TrimSpace(c.Launchd.SocketName)
 	c.Log.Level = strings.ToLower(strings.TrimSpace(c.Log.Level))
 	c.Log.Format = strings.ToLower(strings.TrimSpace(c.Log.Format))
+	c.Log.TraceDir = strings.TrimSpace(c.Log.TraceDir)
 	c.Anthropic.BaseURL = strings.TrimRight(strings.TrimSpace(c.Anthropic.BaseURL), "/")
 	c.DeepSeek.BaseURL = strings.TrimRight(strings.TrimSpace(c.DeepSeek.BaseURL), "/")
-	c.Reporting.CCUsageRunner = strings.TrimSpace(c.Reporting.CCUsageRunner)
-	c.Reporting.CCUsageExecutable = strings.TrimSpace(c.Reporting.CCUsageExecutable)
-	c.Reporting.CCUsageVersion = strings.TrimSpace(c.Reporting.CCUsageVersion)
-	c.Reporting.CodexExecutable = strings.TrimSpace(c.Reporting.CodexExecutable)
-	c.Reporting.ClaudePlan = strings.TrimSpace(c.Reporting.ClaudePlan)
+	c.ProviderReport.CCUsageRunner = strings.TrimSpace(c.ProviderReport.CCUsageRunner)
+	c.ProviderReport.CCUsageExecutable = strings.TrimSpace(c.ProviderReport.CCUsageExecutable)
+	c.ProviderReport.CCUsageVersion = strings.TrimSpace(c.ProviderReport.CCUsageVersion)
+	c.ProviderReport.ClaudePlan = strings.TrimSpace(c.ProviderReport.ClaudePlan)
 
 	if err := c.Validate(); err != nil {
 		return Config{}, err
@@ -616,30 +632,30 @@ func (c Config) Validate() error {
 	if c.Idle.Timeout < 0 {
 		return fmt.Errorf("config: %s must not be negative, got %s", EnvIdleTimeout, c.Idle.Timeout)
 	}
-	if strings.TrimSpace(c.Reporting.CCUsageExecutable) != c.Reporting.CCUsageExecutable || strings.ContainsRune(c.Reporting.CCUsageExecutable, 0) {
+	if strings.TrimSpace(c.ProviderReport.CCUsageExecutable) != c.ProviderReport.CCUsageExecutable || strings.ContainsRune(c.ProviderReport.CCUsageExecutable, 0) {
 		return fmt.Errorf("config: %s must not have surrounding whitespace or NUL", EnvCCUsageExecutable)
 	}
-	if c.Reporting.CCUsageExecutable == "" {
-		if c.Reporting.CCUsageRunner == "" || strings.TrimSpace(c.Reporting.CCUsageRunner) != c.Reporting.CCUsageRunner || strings.ContainsRune(c.Reporting.CCUsageRunner, 0) {
+	if c.ProviderReport.CCUsageExecutable == "" {
+		if c.ProviderReport.CCUsageRunner == "" || strings.TrimSpace(c.ProviderReport.CCUsageRunner) != c.ProviderReport.CCUsageRunner || strings.ContainsRune(c.ProviderReport.CCUsageRunner, 0) {
 			return fmt.Errorf("config: %s must name an executable", EnvCCUsageRunner)
 		}
-		if c.Reporting.CCUsageVersion == "" || strings.ContainsAny(c.Reporting.CCUsageVersion, " \t\r\n\x00") {
+		if c.ProviderReport.CCUsageVersion == "" || strings.ContainsAny(c.ProviderReport.CCUsageVersion, " \t\r\n\x00") {
 			return fmt.Errorf("config: %s must be a single version token", EnvCCUsageVersion)
 		}
 	}
-	if c.Reporting.CodexExecutable == "" || strings.TrimSpace(c.Reporting.CodexExecutable) != c.Reporting.CodexExecutable || strings.ContainsRune(c.Reporting.CodexExecutable, 0) {
+	if c.Codex.Executable == "" || strings.TrimSpace(c.Codex.Executable) != c.Codex.Executable || strings.ContainsRune(c.Codex.Executable, 0) {
 		return fmt.Errorf("config: %s must name an executable", EnvCodexExecutable)
 	}
-	if c.Reporting.CacheTTL <= 0 {
+	if c.ProviderReport.CacheTTL <= 0 {
 		return fmt.Errorf("config: %s must be positive", EnvProviderCacheTTL)
 	}
-	if c.Reporting.Timeout <= 0 {
+	if c.ProviderReport.Timeout <= 0 {
 		return fmt.Errorf("config: %s must be positive", EnvProviderTimeout)
 	}
-	if c.Reporting.ClaudePlanMultiplier != nil && *c.Reporting.ClaudePlanMultiplier <= 0 {
+	if c.ProviderReport.ClaudePlanMultiplier != nil && *c.ProviderReport.ClaudePlanMultiplier <= 0 {
 		return fmt.Errorf("config: %s must be positive", EnvClaudePlanMultiplier)
 	}
-	if len(c.Reporting.ClaudePlan) > 256 || strings.IndexFunc(c.Reporting.ClaudePlan, func(r rune) bool { return r < 0x20 || r == 0x7f }) >= 0 {
+	if len(c.ProviderReport.ClaudePlan) > 256 || strings.IndexFunc(c.ProviderReport.ClaudePlan, func(r rune) bool { return r < 0x20 || r == 0x7f }) >= 0 {
 		return fmt.Errorf("config: %s must be a short printable label", EnvClaudePlan)
 	}
 	if c.Launchd.SocketName == "" {
@@ -777,11 +793,11 @@ func (c Config) String() string {
 	fmt.Fprintf(&b, " launchd.socket=%s", c.Launchd.SocketName)
 	fmt.Fprintf(&b, " log.level=%s", c.Log.Level)
 	fmt.Fprintf(&b, " log.format=%s", c.Log.Format)
-	fmt.Fprintf(&b, " reporting.ccusage_version=%s", c.Reporting.CCUsageVersion)
-	fmt.Fprintf(&b, " reporting.cache_ttl=%s", c.Reporting.CacheTTL)
-	fmt.Fprintf(&b, " reporting.timeout=%s", c.Reporting.Timeout)
-	fmt.Fprintf(&b, " reporting.claude_plan=%s", c.Reporting.ClaudePlan)
-	fmt.Fprintf(&b, " reporting.claude_plan_multiplier=%s", optionalFloat(c.Reporting.ClaudePlanMultiplier))
+	fmt.Fprintf(&b, " reporting.ccusage_version=%s", c.ProviderReport.CCUsageVersion)
+	fmt.Fprintf(&b, " reporting.cache_ttl=%s", c.ProviderReport.CacheTTL)
+	fmt.Fprintf(&b, " reporting.timeout=%s", c.ProviderReport.Timeout)
+	fmt.Fprintf(&b, " reporting.claude_plan=%s", c.ProviderReport.ClaudePlan)
+	fmt.Fprintf(&b, " reporting.claude_plan_multiplier=%s", optionalFloat(c.ProviderReport.ClaudePlanMultiplier))
 	b.WriteString("}")
 	return b.String()
 }
@@ -811,11 +827,11 @@ func (c Config) LogValue() slog.Value {
 		slog.String("launchd.socket", c.Launchd.SocketName),
 		slog.String("log.level", c.Log.Level),
 		slog.String("log.format", c.Log.Format),
-		slog.String("reporting.ccusage_version", c.Reporting.CCUsageVersion),
-		slog.Duration("reporting.cache_ttl", c.Reporting.CacheTTL),
-		slog.Duration("reporting.timeout", c.Reporting.Timeout),
-		slog.String("reporting.claude_plan", c.Reporting.ClaudePlan),
-		slog.String("reporting.claude_plan_multiplier", optionalFloat(c.Reporting.ClaudePlanMultiplier)),
+		slog.String("reporting.ccusage_version", c.ProviderReport.CCUsageVersion),
+		slog.Duration("reporting.cache_ttl", c.ProviderReport.CacheTTL),
+		slog.Duration("reporting.timeout", c.ProviderReport.Timeout),
+		slog.String("reporting.claude_plan", c.ProviderReport.ClaudePlan),
+		slog.String("reporting.claude_plan_multiplier", optionalFloat(c.ProviderReport.ClaudePlanMultiplier)),
 	)
 }
 

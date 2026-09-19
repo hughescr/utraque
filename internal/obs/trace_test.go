@@ -17,10 +17,10 @@ import (
 	"github.com/hughescr/utraque/internal/obs"
 )
 
-// Tracing must be off unless the operator turned it on by name. A missing or
-// empty UTRAQUE_TRACE_DIR is not a configuration error, it is the default.
+// Tracing must be off unless the operator turned it on by name. An empty
+// directory is not a configuration error, it is the default.
 func TestTracerDisabledByDefault(t *testing.T) {
-	tr, err := obs.TracerFromEnv(func(string) string { return "" }, slog.New(slog.DiscardHandler))
+	tr, err := obs.NewTracer("", slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,12 +53,7 @@ func TestTracerDisabledByDefault(t *testing.T) {
 func TestTracerWarnsAtStartup(t *testing.T) {
 	l, buf := newBufLogger(t)
 	dir := t.TempDir()
-	tr, err := obs.TracerFromEnv(func(k string) string {
-		if k == obs.EnvTraceDir {
-			return dir
-		}
-		return ""
-	}, l)
+	tr, err := obs.NewTracer(dir, l)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +64,7 @@ func TestTracerWarnsAtStartup(t *testing.T) {
 	if !strings.Contains(out, `"level":"WARN"`) {
 		t.Errorf("the trace notice must be a WARN: %s", out)
 	}
-	for _, want := range []string{"PROMPT TEXT", obs.EnvTraceDir} {
+	for _, want := range []string{"PROMPT TEXT", "UTRAQUE_TRACE_DIR"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("the trace warning omits %q: %s", want, out)
 		}

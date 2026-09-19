@@ -30,7 +30,7 @@ func TestResolveCodexClientVersionDiscoversConfiguredExecutable(t *testing.T) {
 	executable := writeCodexVersionFixture(t,
 		"printf '%s\\n' 'harmless warning' >&2\nprintf '%s\\n' 'codex-cli 0.153.4'\n")
 	cfg := config.Default()
-	cfg.Reporting.CodexExecutable = executable
+	cfg.Codex.Executable = executable
 
 	if err := resolveCodexClientVersion(context.Background(), &cfg); err != nil {
 		t.Fatalf("resolveCodexClientVersion: %v", err)
@@ -43,7 +43,7 @@ func TestResolveCodexClientVersionDiscoversConfiguredExecutable(t *testing.T) {
 func TestResolveCodexClientVersionPreservesOverrideWithoutExecuting(t *testing.T) {
 	cfg := config.Default()
 	cfg.Codex.ClientVersion = "0.200.1"
-	cfg.Reporting.CodexExecutable = filepath.Join(t.TempDir(), "missing-codex")
+	cfg.Codex.Executable = filepath.Join(t.TempDir(), "missing-codex")
 
 	if err := resolveCodexClientVersion(context.Background(), &cfg); err != nil {
 		t.Fatalf("explicit override unexpectedly ran executable: %v", err)
@@ -60,7 +60,7 @@ func TestResolveCodexClientVersionRejectsMissingAndMalformedExecutable(t *testin
 	} {
 		t.Run(name, func(t *testing.T) {
 			cfg := config.Default()
-			cfg.Reporting.CodexExecutable = executable
+			cfg.Codex.Executable = executable
 			err := resolveCodexClientVersion(context.Background(), &cfg)
 			if err == nil {
 				t.Fatal("resolveCodexClientVersion succeeded")
@@ -102,7 +102,7 @@ func TestDiscoverCodexClientVersionBoundsStdout(t *testing.T) {
 func TestDetectedCodexClientVersionReachesCatalogRequest(t *testing.T) {
 	executable := writeCodexVersionFixture(t, "printf '%s\\n' 'codex-cli 0.153.4'\n")
 	cfg := config.Default()
-	cfg.Reporting.CodexExecutable = executable
+	cfg.Codex.Executable = executable
 	if err := resolveCodexClientVersion(context.Background(), &cfg); err != nil {
 		t.Fatalf("resolveCodexClientVersion: %v", err)
 	}

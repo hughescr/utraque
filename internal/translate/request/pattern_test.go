@@ -25,14 +25,14 @@ func TestTranslateToolsDropsNestedEmailLookaround(t *testing.T) {
 		}
 	}`)
 	before := string(raw)
-	tools, rewritten, dropped := translateTools([]aschema.Tool{{
+	tools, report := translateTools([]aschema.Tool{{
 		Name:        "send_email",
 		InputSchema: raw,
 	}})
-	if got, want := rewritten, []string(nil); !reflect.DeepEqual(got, want) {
+	if got, want := report.Rewritten, []string(nil); !reflect.DeepEqual(got, want) {
 		t.Errorf("rewritten = %v, want %v", got, want)
 	}
-	if got, want := dropped, []string{"send_email.properties.to.anyOf.0.anyOf.0"}; !reflect.DeepEqual(got, want) {
+	if got, want := report.Dropped, []string{"send_email.properties.to.anyOf.0.anyOf.0"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("dropped = %v, want %v", got, want)
 	}
 	if len(tools) != 1 {

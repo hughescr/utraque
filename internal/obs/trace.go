@@ -13,17 +13,14 @@ import (
 	"sync"
 )
 
-// EnvTraceDir turns on per-request trace dumps and names the directory they are
-// written to. It is deliberately its OWN environment variable rather than a
-// log level: raising the log level should never start writing prompt text to
-// disk, and turning tracing on should be an act with a name.
-const EnvTraceDir = "UTRAQUE_TRACE_DIR"
-
 // TraceWarning is the startup notice tracing prints. It is a WARN, not an
 // INFO, because a directory of conversations in the clear is a standing risk
-// for as long as it exists.
+// for as long as it exists. It names the switch that turns tracing off; that
+// variable is owned by internal/config (EnvTraceDir), which this package does
+// not import, so the name is restated here and cmd/utraque pins the two
+// together in a test.
 const TraceWarning = "REQUEST TRACING IS ENABLED: trace dumps contain PROMPT TEXT and model output in the clear. " +
-	"Credentials are redacted, the conversation is NOT. Unset " + EnvTraceDir + " to turn this off."
+	"Credentials are redacted, the conversation is NOT. Unset UTRAQUE_TRACE_DIR to turn this off."
 
 // Trace file suffixes. Every traced request writes a manifest, named by
 // request id; a successful Codex request also writes up to two companion
@@ -61,7 +58,8 @@ type Tracer struct {
 
 // NewTracer builds a Tracer writing into dir, creating it if needed, and logs
 // the loud warning. An empty dir returns a nil Tracer and no error: tracing off
-// is not a failure.
+// is not a failure. The directory comes from config.Log.TraceDir; this
+// package never reads the environment itself.
 func NewTracer(dir string, log *slog.Logger) (*Tracer, error) {
 	dir = strings.TrimSpace(dir)
 	if dir == "" {
@@ -75,14 +73,6 @@ func NewTracer(dir string, log *slog.Logger) (*Tracer, error) {
 	}
 	log.Warn(TraceWarning, slog.String("trace_dir", dir))
 	return &Tracer{dir: dir, log: log, red: DefaultRedactor()}, nil
-}
-
-// TracerFromEnv builds a Tracer from EnvTraceDir.
-func TracerFromEnv(getenv func(string) string, log *slog.Logger) (*Tracer, error) {
-	if getenv == nil {
-		return nil, nil
-	}
-	return NewTracer(getenv(EnvTraceDir), log)
 }
 
 // Enabled reports whether traces are being written.

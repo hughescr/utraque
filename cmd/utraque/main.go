@@ -186,10 +186,10 @@ func run(ctx context.Context, getenv func(string) string, stderr io.Writer) erro
 		cancel()
 	})
 
-	// Trace dumps are off unless UTRAQUE_TRACE_DIR names a directory, and
+	// Trace dumps are off unless cfg.Log.TraceDir names a directory, and
 	// turning them on prints a loud warning: a trace holds the conversation, not
 	// just its shape.
-	tracer, err := obs.TracerFromEnv(getenv, log)
+	tracer, err := obs.NewTracer(cfg.Log.TraceDir, log)
 	if err != nil {
 		_ = launchd.CloseAll(lns)
 		return err
@@ -480,9 +480,9 @@ func newProviderReport(cfg config.Config, source auth.CredentialSource, deps *re
 	}
 	if deps.history == nil {
 		collector, err := usagehistory.New(usagehistory.Options{
-			Executable: cfg.Reporting.CCUsageRunner, NativeExecutable: cfg.Reporting.CCUsageExecutable,
-			Package: usagehistory.DefaultPackage, Version: cfg.Reporting.CCUsageVersion,
-			Timeout: min(cfg.Reporting.Timeout, usagehistory.DefaultTimeout),
+			Executable: cfg.ProviderReport.CCUsageRunner, NativeExecutable: cfg.ProviderReport.CCUsageExecutable,
+			Package: usagehistory.DefaultPackage, Version: cfg.ProviderReport.CCUsageVersion,
+			Timeout: min(cfg.ProviderReport.Timeout, usagehistory.DefaultTimeout),
 		})
 		if err != nil {
 			return nil, err
@@ -490,7 +490,7 @@ func newProviderReport(cfg config.Config, source auth.CredentialSource, deps *re
 		deps.history = collector
 	}
 	if deps.anthropic == nil {
-		client, err := providerquota.NewAnthropicClient(providerquota.AnthropicOptions{Timeout: min(cfg.Reporting.Timeout, 15*time.Second)})
+		client, err := providerquota.NewAnthropicClient(providerquota.AnthropicOptions{Timeout: min(cfg.ProviderReport.Timeout, 15*time.Second)})
 		if err != nil {
 			return nil, err
 		}
@@ -499,7 +499,7 @@ func newProviderReport(cfg config.Config, source auth.CredentialSource, deps *re
 	if deps.deepseek == nil && cfg.DeepSeek.Configured() {
 		client, err := providerquota.NewDeepSeekClient(providerquota.DeepSeekOptions{
 			BaseURL: deepSeekAccountBase(cfg.DeepSeek.BaseURL), APIKey: cfg.DeepSeek.APIKey,
-			Timeout: min(cfg.Reporting.Timeout, 15*time.Second),
+			Timeout: min(cfg.ProviderReport.Timeout, 15*time.Second),
 		})
 		if err != nil {
 			return nil, err
@@ -508,8 +508,8 @@ func newProviderReport(cfg config.Config, source auth.CredentialSource, deps *re
 	}
 	if deps.codex == nil {
 		client, err := providerquota.NewCodexClient(providerquota.CodexOptions{
-			Command: []string{cfg.Reporting.CodexExecutable, "app-server", "--listen", "stdio://"},
-			Timeout: min(cfg.Reporting.Timeout, 15*time.Second),
+			Command: []string{cfg.Codex.Executable, "app-server", "--listen", "stdio://"},
+			Timeout: min(cfg.ProviderReport.Timeout, 15*time.Second),
 		})
 		if err != nil {
 			return nil, err
@@ -531,9 +531,9 @@ func newProviderReport(cfg config.Config, source auth.CredentialSource, deps *re
 			return eligibleReferencePriceModels(cfg, id)
 		},
 		NormalizePriceModel: normalizeReferencePriceModel,
-		CacheTTL:            cfg.Reporting.CacheTTL,
-		Timeout:             cfg.Reporting.Timeout, ClaudePlan: cfg.Reporting.ClaudePlan,
-		ClaudePlanMultiplier: cfg.Reporting.ClaudePlanMultiplier,
+		CacheTTL:            cfg.ProviderReport.CacheTTL,
+		Timeout:             cfg.ProviderReport.Timeout, ClaudePlan: cfg.ProviderReport.ClaudePlan,
+		ClaudePlanMultiplier: cfg.ProviderReport.ClaudePlanMultiplier,
 	}), nil
 }
 

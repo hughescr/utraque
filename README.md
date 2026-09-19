@@ -398,7 +398,7 @@ except the Codex CLI's own `CODEX_HOME` and DeepSeek's conventional
 default cannot be overridden to the empty string. Anything invalid fails at
 startup with a named error rather than being quietly ignored.
 
-This is the whole configuration surface; `UTRAQUE_TRACE_DIR` is the separate tracing switch read directly by `internal/obs`.
+This is the whole surface.
 
 ### Server
 

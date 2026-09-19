@@ -31,7 +31,7 @@ func resolveCodexClientVersion(ctx context.Context, cfg *config.Config) error {
 		return nil
 	}
 
-	version, err := discoverCodexClientVersion(ctx, cfg.Reporting.CodexExecutable)
+	version, err := discoverCodexClientVersion(ctx, cfg.Codex.Executable)
 	if err != nil {
 		return fmt.Errorf("discover Codex client version with %s --version: %w; install/configure Codex or set %s explicitly",
 			config.EnvCodexExecutable, err, config.EnvCodexClientVersion)

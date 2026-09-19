@@ -318,6 +318,15 @@ func TestTraceDumpsWriteRedactedFixtures(t *testing.T) {
 	}
 }
 
+// The trace warning tells the operator which variable to unset. That
+// variable is owned by config, which obs cannot import, so the two are pinned
+// together here, where both packages are in scope.
+func TestTraceWarningNamesTheConfigSwitch(t *testing.T) {
+	if !strings.Contains(obs.TraceWarning, config.EnvTraceDir) {
+		t.Errorf("obs.TraceWarning does not name %s:\n%s", config.EnvTraceDir, obs.TraceWarning)
+	}
+}
+
 // /healthz must answer every operational question without a secret in it.
 func TestHealthzReportsTheFullOperationalPicture(t *testing.T) {
 	restoreRegistry(t)

@@ -43,8 +43,11 @@ func TestDefaults(t *testing.T) {
 	if c.Idle.Timeout != config.DefaultIdleTimeout {
 		t.Errorf("Idle.Timeout = %s", c.Idle.Timeout)
 	}
-	if c.Log.Level != config.DefaultLogLevel || c.Log.Format != config.DefaultLogFormat {
-		t.Errorf("Log = %+v", c.Log)
+	if c.Log.Level != config.DefaultLogLevel || c.Log.Format != config.DefaultLogFormat || c.Log.TraceDir != "" {
+		t.Errorf("Log = %+v, want defaults with tracing off", c.Log)
+	}
+	if c.Codex.Executable != config.DefaultCodexExecutable {
+		t.Errorf("Codex.Executable = %q, want %q", c.Codex.Executable, config.DefaultCodexExecutable)
 	}
 	if c.HasLocalToken() {
 		t.Error("HasLocalToken = true with no token configured")
@@ -114,9 +117,9 @@ func TestDeepSeekKeyNeverAppearsInConfigRendering(t *testing.T) {
 
 func TestReportingExecutablePathsAreNotRendered(t *testing.T) {
 	c := config.Default()
-	c.Reporting.CCUsageExecutable = "/private/sensitive/bin/ccusage"
-	c.Reporting.CCUsageRunner = "/private/sensitive/bin/bunx"
-	c.Reporting.CodexExecutable = "/private/sensitive/bin/codex"
+	c.ProviderReport.CCUsageExecutable = "/private/sensitive/bin/ccusage"
+	c.ProviderReport.CCUsageRunner = "/private/sensitive/bin/bunx"
+	c.Codex.Executable = "/private/sensitive/bin/codex"
 	var buf bytes.Buffer
 	slog.New(slog.NewTextHandler(&buf, nil)).Info("config", "cfg", c)
 	for _, rendered := range []string{c.String(), buf.String()} {
@@ -137,6 +140,7 @@ func TestEnvOverrides(t *testing.T) {
 		config.EnvIdleTimeout:          "15m",
 		config.EnvLogLevel:             "DEBUG",
 		config.EnvLogFormat:            " Text ",
+		config.EnvTraceDir:             " /var/tmp/utraque-traces ",
 		config.EnvCCUsageRunner:        "custom-bunx",
 		config.EnvCCUsageExecutable:    "/opt/homebrew/bin/ccusage",
 		config.EnvCCUsageVersion:       "20.0.20",
@@ -170,14 +174,17 @@ func TestEnvOverrides(t *testing.T) {
 	if c.Log.Level != "debug" || c.Log.Format != "text" {
 		t.Errorf("Log = %+v, want lowercased and trimmed", c.Log)
 	}
+	if c.Log.TraceDir != "/var/tmp/utraque-traces" {
+		t.Errorf("Log.TraceDir = %q, want trimmed", c.Log.TraceDir)
+	}
 	if c.SlogLevel() != slog.LevelDebug {
 		t.Errorf("SlogLevel = %v", c.SlogLevel())
 	}
-	if c.Reporting.CCUsageRunner != "custom-bunx" || c.Reporting.CCUsageExecutable != "/opt/homebrew/bin/ccusage" || c.Reporting.CCUsageVersion != "20.0.20" || c.Reporting.CodexExecutable != "custom-codex" {
-		t.Fatalf("reporting executables = %+v", c.Reporting)
+	if c.ProviderReport.CCUsageRunner != "custom-bunx" || c.ProviderReport.CCUsageExecutable != "/opt/homebrew/bin/ccusage" || c.ProviderReport.CCUsageVersion != "20.0.20" || c.Codex.Executable != "custom-codex" {
+		t.Fatalf("reporting executables = %+v", c.ProviderReport)
 	}
-	if c.Reporting.CacheTTL != 45*time.Second || c.Reporting.Timeout != 80*time.Second || c.Reporting.ClaudePlan != "Max" || c.Reporting.ClaudePlanMultiplier == nil || *c.Reporting.ClaudePlanMultiplier != multiplier {
-		t.Fatalf("reporting config = %+v", c.Reporting)
+	if c.ProviderReport.CacheTTL != 45*time.Second || c.ProviderReport.Timeout != 80*time.Second || c.ProviderReport.ClaudePlan != "Max" || c.ProviderReport.ClaudePlanMultiplier == nil || *c.ProviderReport.ClaudePlanMultiplier != multiplier {
+		t.Fatalf("reporting config = %+v", c.ProviderReport)
 	}
 }
 
@@ -238,8 +245,10 @@ func TestValidateRejects(t *testing.T) {
 		"fragment":                 func(c *config.Config) { c.Anthropic.BaseURL = "https://api.anthropic.com#tok" },
 		"bad level":                func(c *config.Config) { c.Log.Level = "verbose" },
 		"bad format":               func(c *config.Config) { c.Log.Format = "logfmt" },
-		"zero report ttl":          func(c *config.Config) { c.Reporting.CacheTTL = 0 },
-		"negative plan multiplier": func(c *config.Config) { n := -1.0; c.Reporting.ClaudePlanMultiplier = &n },
+		"empty codex executable":   func(c *config.Config) { c.Codex.Executable = "" },
+		"padded codex executable":  func(c *config.Config) { c.Codex.Executable = " codex" },
+		"zero report ttl":          func(c *config.Config) { c.ProviderReport.CacheTTL = 0 },
+		"negative plan multiplier": func(c *config.Config) { n := -1.0; c.ProviderReport.ClaudePlanMultiplier = &n },
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -260,9 +269,9 @@ func TestValidateAcceptsDefault(t *testing.T) {
 
 func TestNativeCCUsageExecutableTakesPrecedenceOverRunnerSettings(t *testing.T) {
 	c := config.Default()
-	c.Reporting.CCUsageExecutable = "/opt/homebrew/bin/ccusage"
-	c.Reporting.CCUsageRunner = ""
-	c.Reporting.CCUsageVersion = ""
+	c.ProviderReport.CCUsageExecutable = "/opt/homebrew/bin/ccusage"
+	c.ProviderReport.CCUsageRunner = ""
+	c.ProviderReport.CCUsageVersion = ""
 	if err := c.Validate(); err != nil {
 		t.Fatalf("Validate with native ccusage: %v", err)
 	}

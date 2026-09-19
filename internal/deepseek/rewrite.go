@@ -15,18 +15,12 @@ import (
 
 const toolErrorMarker = "[tool error]"
 
-// rewriteReport records what rewriteContent (via rewriteTools) changed in the
+// rewriteRequest rewrites one request body for DeepSeek and reports, as a
+// toolschema.Report, what rewriteContent (via rewriteTools) changed in the
 // tool schemas, so the leg can log it the way the codex leg logs its
 // translation metadata.
-// RewrittenPatterns and DroppedPatterns name tool schema nodes as
-// "<tool>.<json path>" (see internal/toolschema).
-type rewriteReport struct {
-	RewrittenPatterns []string
-	DroppedPatterns   []string
-}
-
-func rewriteRequest(raw []byte, canonical string) ([]byte, rewriteReport, error) {
-	var report rewriteReport
+func rewriteRequest(raw []byte, canonical string) ([]byte, toolschema.Report, error) {
+	var report toolschema.Report
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &obj); err != nil || obj == nil {
 		return nil, report, apierr.InvalidRequest("deepseek request body must be a JSON object")
@@ -87,7 +81,7 @@ func rejectUnsupportedFields(obj map[string]json.RawMessage) error {
 // rewriteContent mutates obj in place: it rewrites the system prompt and each
 // message's content (rewriteContentValue) and the tool schemas (rewriteTools),
 // recording the schema changes in report.
-func rewriteContent(obj map[string]json.RawMessage, canonical string, report *rewriteReport) error {
+func rewriteContent(obj map[string]json.RawMessage, canonical string, report *toolschema.Report) error {
 	toolSchemas := declaredToolSchemas(obj["tools"])
 	referencedTools := make(map[string]struct{})
 	if raw := obj["system"]; len(raw) > 0 {
@@ -159,7 +153,7 @@ func declaredToolSchemas(raw json.RawMessage) map[string]struct{} {
 // DeepSeek regex dialect (see internal/toolschema). DeepSeek validates every
 // pattern before the model runs, so one rejected pattern would fail the whole
 // request. When nothing needs to change the input bytes are returned as-is.
-func rewriteTools(raw json.RawMessage, referenced map[string]struct{}, report *rewriteReport) (json.RawMessage, bool, error) {
+func rewriteTools(raw json.RawMessage, referenced map[string]struct{}, report *toolschema.Report) (json.RawMessage, bool, error) {
 	var tools []map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &tools); err != nil {
 		return nil, false, apierr.InvalidRequest("deepseek tools must be an array")
@@ -182,12 +176,7 @@ func rewriteTools(raw json.RawMessage, referenced map[string]struct{}, report *r
 		}
 		tool["input_schema"] = schema
 		changed = true
-		for _, p := range res.Rewritten {
-			report.RewrittenPatterns = append(report.RewrittenPatterns, toolschema.NodePath(name, p))
-		}
-		for _, p := range res.Dropped {
-			report.DroppedPatterns = append(report.DroppedPatterns, toolschema.NodePath(name, p))
-		}
+		report.Add(name, res)
 	}
 	if !changed {
 		return raw, false, nil

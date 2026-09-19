@@ -33,6 +33,7 @@ package toolschema
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"regexp/syntax"
 	"sort"
 	"strconv"
@@ -69,6 +70,50 @@ type Result struct {
 // Empty reports whether the schema was left untouched.
 func (r Result) Empty() bool {
 	return len(r.Rewritten) == 0 && len(r.Dropped) == 0
+}
+
+// Report aggregates, across every tool in one request, what Rewrite did:
+// each entry names a schema node as "<tool>.<json path>" (see NodePath).
+// Rewritten holds the nodes whose pattern was translated for backend
+// compatibility; Dropped holds the nodes whose pattern could not be sent
+// compatibly and was removed, with its text folded into the node's
+// description so the constraint remains in the tool declaration. Entries are
+// in tool order, then in each tool's Result order. The zero value is an empty
+// report.
+type Report struct {
+	Rewritten []string
+	Dropped   []string
+}
+
+// Add folds one tool's Result into the report, prefixing each path with the
+// tool's name.
+func (r *Report) Add(tool string, res Result) {
+	for _, p := range res.Rewritten {
+		r.Rewritten = append(r.Rewritten, NodePath(tool, p))
+	}
+	for _, p := range res.Dropped {
+		r.Dropped = append(r.Dropped, NodePath(tool, p))
+	}
+}
+
+// Empty reports whether no tool schema was touched.
+func (r Report) Empty() bool {
+	return len(r.Rewritten) == 0 && len(r.Dropped) == 0
+}
+
+// LogAttrs renders the report for a log line: a rewritten_patterns attribute
+// when anything was rewritten, then a dropped_patterns attribute when
+// anything was dropped, and nothing for an empty report. Both legs append
+// these to their per-request translation line, so the keys are spelled once.
+func (r Report) LogAttrs() []slog.Attr {
+	var attrs []slog.Attr
+	if len(r.Rewritten) > 0 {
+		attrs = append(attrs, slog.Any("rewritten_patterns", r.Rewritten))
+	}
+	if len(r.Dropped) > 0 {
+		attrs = append(attrs, slog.Any("dropped_patterns", r.Dropped))
+	}
+	return attrs
 }
 
 // Dialect describes one backend's regular-expression syntax: which forms it
