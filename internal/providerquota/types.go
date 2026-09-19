@@ -41,12 +41,10 @@ type Observation struct {
 	// Anthropic never populates Balances.
 	Balances []Balance `json:"balances,omitempty"`
 	// SpendControls is populated only by Codex (codex.go:334), one entry per
-	// bucket that reports the upstream spendControlReached flag. Its only
-	// reader is providerreport's DeepSeek remaining-value estimator
-	// (providerreport/report.go:408-411); DeepSeek itself never populates
-	// this field, so the sole producer (Codex) and sole consumer (the
-	// DeepSeek estimator) are different providers and never meet in
-	// practice.
+	// bucket that reports the upstream spendControlReached flag. Nothing in
+	// the tree reads it today: its former reader, providerreport's DeepSeek
+	// remaining-value estimator, was removed because DeepSeek never populates
+	// this field. It is emitted in the report JSON as-is.
 	SpendControls []SpendControl `json:"spend_controls,omitempty"`
 	// Plan is populated only by Codex, from the account's plan type
 	// (codex.go:245).
@@ -170,10 +168,12 @@ type Balance struct {
 	// codex.go:371), or "spend_control" (Codex, codex.go:391) — see the
 	// type doc above.
 	Kind string `json:"kind"`
-	// ScopeID is populated only by Codex, both for "workspace_credits" and
-	// "spend_control" rows, from the same bucket id as the paired Quota.ID
-	// (codex.go:371,391). DeepSeek never sets it.
-	ScopeID string `json:"scope_id,omitempty"`
+	// LimitID is populated only by Codex, both for "workspace_credits" and
+	// "spend_control" rows, from the upstream limitId — the same bucket id as
+	// the paired Quota.ID (codex.go:371,391). DeepSeek never sets it. The
+	// JSON key is still "scope_id" for schema v1 compatibility, although the
+	// value is a limit bucket id and never refers to a Scope.
+	LimitID string `json:"scope_id,omitempty"`
 	// Currency is populated only by DeepSeek, from the upstream balance
 	// entry's currency, "USD" or "CNY" (deepseek.go:89,94). Codex never sets
 	// it (it reports in provider-defined units instead — see AmountUnit).
@@ -212,14 +212,13 @@ type BalanceComponent struct {
 
 // SpendControl preserves the backend's independent per-bucket restriction
 // state. A missing backend flag produces no entry; Reached=false is retained.
-// Populated only by Codex (codex.go:334, from spendControlReached); read only
-// by providerreport's DeepSeek remaining-value estimator
-// (providerreport/report.go:408-411), which DeepSeek itself never feeds this
-// field to — see Observation.SpendControls.
+// Populated only by Codex (codex.go:334, from spendControlReached); no Go code
+// reads it back — see Observation.SpendControls.
 type SpendControl struct {
-	// ScopeID is the same bucket id used for the paired Quota/Balance rows
-	// for that bucket (codex.go:334).
-	ScopeID string `json:"scope_id"`
+	// LimitID is the same bucket id used for the paired Quota/Balance rows
+	// for that bucket (codex.go:334). The JSON key is still "scope_id" for
+	// schema v1 compatibility.
+	LimitID string `json:"scope_id"`
 	// Reached is the upstream spendControlReached flag verbatim (codex.go:334).
 	Reached bool `json:"reached"`
 }

@@ -14,8 +14,9 @@ import (
 
 const toolErrorMarker = "[tool error]"
 
-// rewriteReport records what rewriteRequest changed beyond the model name, so
-// the leg can log it the way the codex leg logs its translation metadata.
+// rewriteReport records what rewriteContent (via rewriteTools) changed in the
+// tool schemas, so the leg can log it the way the codex leg logs its
+// translation metadata.
 // RewrittenPatterns and DroppedPatterns name tool schema nodes as
 // "<tool>.<json path>" (see internal/toolschema).
 type rewriteReport struct {
@@ -29,7 +30,10 @@ func rewriteRequest(raw []byte, canonical string) ([]byte, rewriteReport, error)
 	if err := json.Unmarshal(raw, &obj); err != nil || obj == nil {
 		return nil, report, apierr.InvalidRequest("deepseek request body must be a JSON object")
 	}
-	if err := validateContent(obj, canonical, &report); err != nil {
+	if err := rejectUnsupportedFields(obj); err != nil {
+		return nil, report, err
+	}
+	if err := rewriteContent(obj, canonical, &report); err != nil {
 		return nil, report, err
 	}
 	model, _ := json.Marshal(canonical)
@@ -41,9 +45,11 @@ func rewriteRequest(raw []byte, canonical string) ([]byte, rewriteReport, error)
 	return out, report, nil
 }
 
-func validateContent(obj map[string]json.RawMessage, canonical string, report *rewriteReport) error {
-	toolSchemas := declaredToolSchemas(obj["tools"])
-	referencedTools := make(map[string]struct{})
+// rejectUnsupportedFields returns an invalid-request error for any Anthropic
+// Messages field the DeepSeek endpoint would silently ignore, so a request
+// whose meaning utraque cannot honor is refused rather than degraded. It never
+// mutates obj.
+func rejectUnsupportedFields(obj map[string]json.RawMessage) error {
 	for _, field := range []string{"container", "mcp_servers", "top_k"} {
 		if present(obj[field]) {
 			return apierr.InvalidRequest("deepseek ignores %q, so utraque cannot honor that request", field)
@@ -74,6 +80,15 @@ func validateContent(obj map[string]json.RawMessage, canonical string, report *r
 			return apierr.InvalidRequest("deepseek ignores tool_choice.disable_parallel_tool_use=true")
 		}
 	}
+	return nil
+}
+
+// rewriteContent mutates obj in place: it rewrites the system prompt and each
+// message's content (rewriteContentValue) and the tool schemas (rewriteTools),
+// recording the schema changes in report.
+func rewriteContent(obj map[string]json.RawMessage, canonical string, report *rewriteReport) error {
+	toolSchemas := declaredToolSchemas(obj["tools"])
+	referencedTools := make(map[string]struct{})
 	if raw := obj["system"]; len(raw) > 0 {
 		rewritten, changed, err := rewriteContentValue(raw, canonical, "system", toolSchemas, referencedTools, false)
 		if err != nil {
@@ -160,7 +175,7 @@ func rewriteTools(raw json.RawMessage, referenced map[string]struct{}, report *r
 				changed = true
 			}
 		}
-		schema, res := toolschema.Sanitize(toolschema.DeepSeek, tool["input_schema"])
+		schema, res := toolschema.Rewrite(toolschema.DeepSeek, tool["input_schema"])
 		if res.Empty() {
 			continue
 		}

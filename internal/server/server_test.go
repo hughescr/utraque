@@ -101,6 +101,11 @@ func TestHealthz(t *testing.T) {
 	if cc := w.Header().Get("Cache-Control"); cc != "no-store" {
 		t.Errorf("Cache-Control = %q", cc)
 	}
+	// The exact bytes are part of the contract: sorted keys, uptime_s as a
+	// bare number, one trailing newline.
+	if want := "{\"status\":\"ok\",\"uptime_s\":90,\"version\":\"1.2.3-test\"}\n"; w.Body.String() != want {
+		t.Errorf("body = %q, want %q", w.Body.String(), want)
+	}
 	var got server.HealthResponse
 	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
 		t.Fatalf("decode: %v (%s)", err, w.Body.String())

@@ -118,10 +118,10 @@ func (h *Handler) buildProvider(name string, kind usagehistory.Provider, ended t
 	}
 	if quota.err == nil {
 		o := quota.obs
-		pr.QuotaAfter = &o
+		pr.Quota = &o
 	}
 	if quota.err != nil {
-		pr.Errors = append(pr.Errors, safeError("quota_after", quota.err))
+		pr.Errors = append(pr.Errors, safeError(SectionQuota, quota.err))
 	}
 
 	rows30 := aggregateModels(history.Daily, kind, since, until)
@@ -145,7 +145,7 @@ func (h *Handler) buildProvider(name string, kind usagehistory.Provider, ended t
 		pr.Errors = append(pr.Errors, safeReferencePriceError(prices.err))
 	}
 
-	hasQuota := pr.QuotaBefore != nil || pr.QuotaAfter != nil
+	hasQuota := pr.Quota != nil
 	hasHistory := pr.History != nil
 	switch {
 	case hasQuota && hasHistory && len(pr.Errors) == 0:
@@ -283,9 +283,9 @@ func aggregateModels(rows []usagehistory.DailyModelUsage, provider usagehistory.
 			cost := a.cost
 			rate := cost / float64(a.row.TotalTokens)
 			a.row.CostUSD, a.row.HistoricalEffectiveUSDToken = &cost, &rate
-			a.row.CostStatus = "available"
+			a.row.CostStatus = usagehistory.CostAvailable
 		} else {
-			a.row.CostStatus = "unavailable_or_unpriced"
+			a.row.CostStatus = usagehistory.CostUnavailableOrUnpriced
 			a.row.UnitPriceUnavailableReason = usagehistory.UnitPriceUnavailableCCUsage
 		}
 		out = append(out, a.row)
@@ -315,100 +315,9 @@ func filterBlocks(blocks []usagehistory.BlockSummary, provider usagehistory.Prov
 	return out
 }
 
-func calibrateAnthropic(pair *PairedMeasurement, history *HistorySummary) *Calibration {
-	c := &Calibration{UnavailableReason: "no_contemporaneous_exact_five_hour_block"}
-	if pair == nil || history == nil {
-		return c
-	}
-	var qb, qa *providerquota.Quota
-	for i := range pair.Before.Quotas {
-		q := &pair.Before.Quotas[i]
-		if q.DurationSeconds != nil && *q.DurationSeconds == 5*60*60 && q.Scope == nil && (q.Active == nil || *q.Active) {
-			qb = q
-			break
-		}
-	}
-	for i := range pair.After.Quotas {
-		q := &pair.After.Quotas[i]
-		if q.DurationSeconds != nil && *q.DurationSeconds == 5*60*60 && q.Scope == nil && (q.Active == nil || *q.Active) && qb != nil && q.ID == qb.ID && q.Slot == qb.Slot && q.Kind == qb.Kind && q.Group == qb.Group {
-			qa = q
-			break
-		}
-	}
-	if qb == nil || qa == nil {
-		c.UnavailableReason = "five_hour_quota_unavailable"
-		return c
-	}
-	if qa.UsedPercent <= 0 || qa.UsedPercent > 100 {
-		c.UnavailableReason = "quota_percent_not_calibratable"
-		return c
-	}
-	delta := qa.UsedPercent - qb.UsedPercent
-	if delta < 0 {
-		c.UnavailableReason = "quota_percent_decreased_during_collection"
-		return c
-	}
-	if delta > 2 {
-		c.UnavailableReason = "quota_changed_materially_during_collection"
-		return c
-	}
-	if qb.ResetsAt == nil || qa.ResetsAt == nil || !qb.ResetsAt.Equal(*qa.ResetsAt) {
-		c.UnavailableReason = "quota_reset_during_collection"
-		return c
-	}
-	if !qa.ResetsAt.After(pair.EndedAt) {
-		c.UnavailableReason = "quota_window_already_reset"
-		return c
-	}
-	for i := range history.Blocks {
-		b := &history.Blocks[i]
-		if b.IsGap || b.TotalTokens == 0 || !b.EndTime.Equal(*qa.ResetsAt) || !b.StartTime.Equal(qa.ResetsAt.Add(-5*time.Hour)) {
-			continue
-		}
-		allAnthropic := len(b.Models) > 0
-		for _, m := range b.Models {
-			if m.Provider != usagehistory.ProviderAnthropic {
-				allAnthropic = false
-				break
-			}
-		}
-		if !allAnthropic {
-			c.UnavailableReason = "block_contains_non_anthropic_models"
-			continue
-		}
-		if history.StartedAt.Before(pair.StartedAt) || history.FinishedAt.After(pair.EndedAt) {
-			c.UnavailableReason = "block_not_collected_within_quota_bracket"
-			continue
-		}
-		last := b.EndTime
-		if b.ActualEndTime != nil {
-			last = *b.ActualEndTime
-		}
-		if last.After(pair.After.CollectedAt) {
-			c.UnavailableReason = "block_activity_after_quota_reading"
-			continue
-		}
-		q := qa.UsedPercent
-		tokens := b.TotalTokens
-		estimate := float64(tokens) * (100 - q) / q
-		c = &Calibration{QuotaID: qa.ID, Block: b, UsedPercent: &q, ObservedTokens: &tokens, ConditionalRemaining: &estimate,
-			Assumptions: []string{"local_logs_represent_quota_usage", "stable_quota_consumption_per_token_for_observed_workload"}}
-		if len(b.Models) == 1 {
-			c.Model = b.Models[0].Model
-		}
-		return c
-	}
-	return c
-}
-
 func estimateDeepSeek(obs providerquota.Observation, models []ModelStats) []RemainingEstimate {
 	if obs.Available == nil || !*obs.Available {
 		return nil
-	}
-	for _, restriction := range obs.SpendControls {
-		if restriction.Reached {
-			return []RemainingEstimate{{UnavailableReason: "spend_control_reached"}}
-		}
 	}
 	type rateAccum struct {
 		cost   float64

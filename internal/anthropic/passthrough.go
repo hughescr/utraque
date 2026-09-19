@@ -245,7 +245,7 @@ func (l *Leg) forward(w http.ResponseWriter, r *http.Request, rq *router.Request
 				"path", r.URL.Path, "err", serr)
 		case rep.Changed:
 			l.log.DebugContext(r.Context(), "stripped synthetic thinking blocks",
-				"path", r.URL.Path, "dropped", rep.Dropped,
+				"path", r.URL.Path, "dropped", rep.RemovedThinkingBlocks,
 				"bytes_before", len(body), "bytes_after", len(clean))
 			if rep.HeadlessToolUse {
 				// See SanitizeMessages: unrepairable here, and the likely cause

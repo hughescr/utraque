@@ -331,7 +331,7 @@ func normalizeCodexLimits(o *Observation, response codexRateLimitsResponse, now 
 			return quotaError(ProviderCodex, CodeInvalidData, false)
 		}
 		if item.s.SpendControlReached != nil {
-			o.SpendControls = append(o.SpendControls, SpendControl{ScopeID: id, Reached: *item.s.SpendControlReached})
+			o.SpendControls = append(o.SpendControls, SpendControl{LimitID: id, Reached: *item.s.SpendControlReached})
 		}
 		for _, windowItem := range []struct {
 			slot   string
@@ -368,7 +368,7 @@ func normalizeCodexLimits(o *Observation, response codexRateLimitsResponse, now 
 			if item.s.Credits.HasCredits == nil || item.s.Credits.Unlimited == nil {
 				return quotaError(ProviderCodex, CodeInvalidData, false)
 			}
-			b := Balance{Kind: "workspace_credits", ScopeID: id, AmountUnit: "credits", Available: item.s.Credits.HasCredits, Unlimited: item.s.Credits.Unlimited}
+			b := Balance{Kind: "workspace_credits", LimitID: id, AmountUnit: "credits", Available: item.s.Credits.HasCredits, Unlimited: item.s.Credits.Unlimited}
 			if item.s.Credits.Balance != nil {
 				if !validDecimal(*item.s.Credits.Balance) {
 					return quotaError(ProviderCodex, CodeInvalidData, false)
@@ -388,7 +388,7 @@ func normalizeCodexLimits(o *Observation, response codexRateLimitsResponse, now 
 			}
 			used := 100 - *s.RemainingPercent
 			o.Quotas = append(o.Quotas, Quota{ID: id + ":spend_control", Kind: "spend_control", UsedPercent: used, Unit: PercentUnit, ResetsAt: reset})
-			o.Balances = append(o.Balances, Balance{Kind: "spend_control", ScopeID: id, AmountUnit: "provider_units", Total: s.Limit, Components: []BalanceComponent{{Name: "used", Amount: s.Used}}})
+			o.Balances = append(o.Balances, Balance{Kind: "spend_control", LimitID: id, AmountUnit: "provider_units", Total: s.Limit, Components: []BalanceComponent{{Name: "used", Amount: s.Used}}})
 		}
 	}
 	if response.RateLimitReset != nil {

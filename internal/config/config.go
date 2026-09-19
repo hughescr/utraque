@@ -644,37 +644,8 @@ func (c Config) Validate() error {
 		return fmt.Errorf("config: %s must not be empty", EnvLaunchdSocketName)
 	}
 
-	if c.Anthropic.BaseURL == "" {
-		return fmt.Errorf("config: %s must not be empty", EnvAnthropicBaseURL)
-	}
-	// Every message below renders the URL through RedactURL, and the parse
-	// failure renders only url.Error's inner cause. A misconfigured value can
-	// carry userinfo credentials, and these errors are printed to stderr:
-	// the userinfo check further down runs too late to protect them.
-	u, err := url.Parse(c.Anthropic.BaseURL)
-	if err != nil {
-		var ue *url.Error
-		if errors.As(err, &ue) {
-			return fmt.Errorf("config: %s is not a valid URL: %w", EnvAnthropicBaseURL, ue.Err)
-		}
-		return fmt.Errorf("config: %s is not a valid URL", EnvAnthropicBaseURL)
-	}
-	switch u.Scheme {
-	case "http", "https":
-	default:
-		return fmt.Errorf("config: %s %q: scheme must be http or https", EnvAnthropicBaseURL, RedactURL(c.Anthropic.BaseURL))
-	}
-	if u.Host == "" {
-		return fmt.Errorf("config: %s %q: missing host", EnvAnthropicBaseURL, RedactURL(c.Anthropic.BaseURL))
-	}
-	if u.User != nil {
-		return fmt.Errorf("config: %s must not contain userinfo credentials", EnvAnthropicBaseURL)
-	}
-	if u.RawQuery != "" || u.ForceQuery {
-		return fmt.Errorf("config: %s must not contain a query string", EnvAnthropicBaseURL)
-	}
-	if u.Fragment != "" {
-		return fmt.Errorf("config: %s must not contain a fragment", EnvAnthropicBaseURL)
+	if err := validateEndpoint(EnvAnthropicBaseURL, c.Anthropic.BaseURL); err != nil {
+		return err
 	}
 	if err := validateEndpoint(EnvDeepSeekBaseURL, c.DeepSeek.BaseURL); err != nil {
 		return err

@@ -122,7 +122,7 @@ type Options struct {
 	AuthExempt func(*http.Request) bool
 
 	// HealthExtra contributes additional /healthz fields. It may not
-	// override status, version or uptime_s.
+	// override the HealthResponse fields (status, version, uptime_s).
 	HealthExtra func(context.Context) map[string]any
 
 	ShutdownGrace time.Duration // default DefaultShutdownGrace

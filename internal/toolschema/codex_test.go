@@ -170,9 +170,9 @@ sys.exit(1 if bad else 0)`
 	}
 }
 
-func TestCodexSanitizeUntouchedIsIdentical(t *testing.T) {
+func TestCodexRewriteUntouchedIsIdentical(t *testing.T) {
 	raw := json.RawMessage(`{"type":"object",   "properties": {"id": {"type":"string","pattern":"^[0-9a-f]{32}$"}}}`)
-	out, res := Sanitize(Codex, raw)
+	out, res := Rewrite(Codex, raw)
 	if !res.Empty() {
 		t.Fatalf("result = %+v, want empty", res)
 	}
@@ -180,7 +180,7 @@ func TestCodexSanitizeUntouchedIsIdentical(t *testing.T) {
 		t.Fatalf("bytes changed on an untouched schema:\n%s\n%s", raw, out)
 	}
 	for _, bad := range []json.RawMessage{nil, json.RawMessage(`[]`), json.RawMessage(`not json`)} {
-		out, res := Sanitize(Codex, bad)
+		out, res := Rewrite(Codex, bad)
 		if string(out) != string(bad) || !res.Empty() {
 			t.Errorf("%q: want passthrough, got %q %+v", bad, out, res)
 		}
@@ -189,7 +189,7 @@ func TestCodexSanitizeUntouchedIsIdentical(t *testing.T) {
 
 func TestNodePathOmitsSeparatorAtRoot(t *testing.T) {
 	raw := json.RawMessage(`{"type":"string","pattern":"\\p{L}+","properties":{"x":{"type":"string","pattern":"(?<d>x)"}}}`)
-	_, res := Sanitize(Codex, raw)
+	_, res := Rewrite(Codex, raw)
 	want := Result{Rewritten: []string{"properties.x"}, Dropped: []string{""}}
 	if !reflect.DeepEqual(res, want) {
 		t.Fatalf("result = %+v\nwant     %+v", res, want)
@@ -202,7 +202,7 @@ func TestNodePathOmitsSeparatorAtRoot(t *testing.T) {
 	}
 }
 
-func TestCodexSanitizeRewrites(t *testing.T) {
+func TestCodexRewriteRewrites(t *testing.T) {
 	raw := json.RawMessage(`{
 		"type": "object",
 		"properties": {
@@ -217,7 +217,7 @@ func TestCodexSanitizeRewrites(t *testing.T) {
 		"patternProperties": {"^x": {"type": "string", "pattern": "a++"}},
 		"examples": [{"pattern": "\\p{L}"}]
 	}`)
-	out, res := Sanitize(Codex, raw)
+	out, res := Rewrite(Codex, raw)
 	want := Result{
 		Rewritten: []string{"properties.either.anyOf.1", "properties.list.items.properties.doc"},
 		Dropped:   []string{"$defs.D", "patternProperties.^x", "properties.bare", "properties.field", "properties.tuple.items.0"},

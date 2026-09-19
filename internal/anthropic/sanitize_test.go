@@ -359,7 +359,7 @@ func TestSanitizeReportsHeadlessToolUse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SanitizeWithReport: %v", err)
 	}
-	if !rep.Changed || rep.Dropped != 1 {
+	if !rep.Changed || rep.RemovedThinkingBlocks != 1 {
 		t.Fatalf("report = %+v, want one dropped block", rep)
 	}
 	if !rep.HeadlessToolUse {

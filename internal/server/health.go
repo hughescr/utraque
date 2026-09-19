@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"encoding/json"
 	"math"
 	"net/http"
@@ -12,18 +13,31 @@ import (
 // StatusOK is the healthy value of the /healthz "status" field.
 const StatusOK = "ok"
 
-// HealthResponse is the phase-0 /healthz body. Later phases add fields via
-// Options.HealthExtra; the three fields here are always present and can never
-// be overridden. Nothing here is a secret.
+// HealthResponse is the fixed part of the /healthz body and the single
+// definition of its field set: handleHealth marshals it, and any key it
+// produces is reserved — Options.HealthExtra may add fields but can never
+// override one of these. Nothing here is a secret.
 type HealthResponse struct {
 	Status  string  `json:"status"`
 	Version string  `json:"version"`
 	UptimeS float64 `json:"uptime_s"`
 }
 
-// reservedHealthKeys may not be shadowed by HealthExtra.
-var reservedHealthKeys = map[string]struct{}{
-	"status": {}, "version": {}, "uptime_s": {},
+// healthFields renders h as the key/value map handleHealth merges extras
+// into. Numbers are kept as json.Number so the re-encoded body carries
+// exactly the text encoding/json produced for the struct.
+func healthFields(h HealthResponse) (map[string]any, error) {
+	encoded, err := json.Marshal(h)
+	if err != nil {
+		return nil, err
+	}
+	dec := json.NewDecoder(bytes.NewReader(encoded))
+	dec.UseNumber()
+	var fields map[string]any
+	if err := dec.Decode(&fields); err != nil {
+		return nil, err
+	}
+	return fields, nil
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -34,14 +48,18 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body := map[string]any{
-		"status":   StatusOK,
-		"version":  s.version,
-		"uptime_s": roundSeconds(s.Uptime().Seconds()),
+	body, err := healthFields(HealthResponse{
+		Status:  StatusOK,
+		Version: s.version,
+		UptimeS: roundSeconds(s.Uptime().Seconds()),
+	})
+	if err != nil {
+		_ = apierr.Write(w, apierr.API("encoding the health response: %v", err))
+		return
 	}
 	if s.healthExtra != nil {
 		for k, v := range s.healthExtra(r.Context()) {
-			if _, reserved := reservedHealthKeys[k]; reserved {
+			if _, reserved := body[k]; reserved {
 				continue
 			}
 			body[k] = v

@@ -45,6 +45,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -620,8 +621,11 @@ func logTranslation(ctx context.Context, log *slog.Logger, rq *router.Request, m
 			slog.Int("reasoning_replayed", meta.ReasoningReplayed),
 			slog.Int("reasoning_unreplayable", meta.ReasoningUnreplayable))
 	}
-	if len(meta.Dropped) > 0 {
-		attrs = append(attrs, slog.Any("dropped", meta.Dropped))
+	// The "dropped" key carries the parameter names and the system-block
+	// markers as one list, params first, exactly as it did when Metadata held
+	// them in a single field; a key per kind is a log-schema change for later.
+	if dropped := slices.Concat(meta.DroppedParams, meta.DroppedSystemBlocks); len(dropped) > 0 {
+		attrs = append(attrs, slog.Any("dropped", dropped))
 	}
 	if len(meta.OrphanedToolResults) > 0 {
 		attrs = append(attrs, slog.Int("orphaned_tool_results", len(meta.OrphanedToolResults)))

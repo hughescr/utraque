@@ -231,7 +231,7 @@ func TestSlowHistoryDoesNotDelayHealthyQuotaRead(t *testing.T) {
 	}
 	close(releaseHistory)
 	p := providerNamed(<-reportDone, "anthropic")
-	if p == nil || p.QuotaAfter == nil || p.QuotaBefore != nil || p.Paired != nil {
+	if p == nil || p.Quota == nil || p.QuotaBefore != nil || p.Paired != nil {
 		t.Fatalf("provider=%+v", p)
 	}
 }
@@ -386,8 +386,8 @@ func TestConcurrentRequestsCoalesceAndFailedRefreshRetainsSeparateSnapshot(t *te
 	first := request()
 	var originalCollected time.Time
 	for _, p := range first.Providers {
-		if p.Provider == "deepseek" && p.QuotaAfter != nil {
-			originalCollected = p.QuotaAfter.CollectedAt
+		if p.Provider == "deepseek" && p.Quota != nil {
+			originalCollected = p.Quota.CollectedAt
 		}
 	}
 	now = now.Add(2 * time.Second)
@@ -402,7 +402,7 @@ func TestConcurrentRequestsCoalesceAndFailedRefreshRetainsSeparateSnapshot(t *te
 			if !p.LastComplete.Freshness.Stale {
 				t.Fatal("deepseek previous snapshot not stale")
 			}
-			if p.LastComplete.QuotaAfter == nil || !p.LastComplete.QuotaAfter.CollectedAt.Equal(originalCollected) {
+			if p.LastComplete.Quota == nil || !p.LastComplete.Quota.CollectedAt.Equal(originalCollected) {
 				t.Fatal("original observation timestamp changed")
 			}
 			age1 = p.LastComplete.Freshness.AgeSeconds
@@ -418,7 +418,7 @@ func TestConcurrentRequestsCoalesceAndFailedRefreshRetainsSeparateSnapshot(t *te
 			if p.LastComplete == nil || p.LastComplete.Freshness.AgeSeconds <= age1 {
 				t.Fatalf("age did not increase: before=%v after=%+v", age1, p.LastComplete)
 			}
-			if p.LastComplete.QuotaAfter == nil || !p.LastComplete.QuotaAfter.CollectedAt.Equal(originalCollected) {
+			if p.LastComplete.Quota == nil || !p.LastComplete.Quota.CollectedAt.Equal(originalCollected) {
 				t.Fatal("repeated failure changed original observation")
 			}
 			return
@@ -473,15 +473,15 @@ func TestCodexAccountSwitchDuringCollectionCannotReplaceNewAccount(t *testing.T)
 		return nil
 	}
 	bp := findCodex(b)
-	if bp == nil || bp.QuotaAfter == nil || bp.QuotaAfter.Quotas[0].UsedPercent != 20 {
+	if bp == nil || bp.Quota == nil || bp.Quota.Quotas[0].UsedPercent != 20 {
 		t.Fatalf("new account report=%+v", bp)
 	}
 	ap := findCodex(a)
-	if ap == nil || ap.QuotaAfter != nil || ap.Paired != nil || ap.LastComplete != nil {
+	if ap == nil || ap.Quota != nil || ap.Paired != nil || ap.LastComplete != nil {
 		t.Fatalf("switched old account leaked=%+v", ap)
 	}
 	bCached := findCodex(request())
-	if bCached == nil || bCached.QuotaAfter == nil || bCached.QuotaAfter.Quotas[0].UsedPercent != 20 {
+	if bCached == nil || bCached.Quota == nil || bCached.Quota.Quotas[0].UsedPercent != 20 {
 		t.Fatalf("late A replaced B cache: %+v", bCached)
 	}
 	if historyCalls.Load() != 2 {
@@ -549,12 +549,12 @@ func TestMalformedFinalCodexScopeCannotRestorePreviousSnapshot(t *testing.T) {
 				return out
 			}
 			first := request()
-			if p := providerNamed(first, "codex"); p == nil || p.QuotaAfter == nil || p.Paired != nil || p.Status != "ok" {
+			if p := providerNamed(first, "codex"); p == nil || p.Quota == nil || p.Paired != nil || p.Status != "ok" {
 				t.Fatalf("initial snapshot=%+v", p)
 			}
 			now = now.Add(2 * time.Second)
 			p := providerNamed(request(), "codex")
-			if p == nil || p.QuotaBefore != nil || p.QuotaAfter != nil || p.Paired != nil || p.LastComplete != nil {
+			if p == nil || p.QuotaBefore != nil || p.Quota != nil || p.Paired != nil || p.LastComplete != nil {
 				t.Fatalf("malformed final scope leaked snapshot: %+v", p)
 			}
 			found := false
@@ -579,57 +579,6 @@ func providerNamed(r Report, name string) *ProviderReport {
 	return nil
 }
 
-func TestCalibrationRejectsMixedProviderAndComputesExactClaudeBlock(t *testing.T) {
-	start := time.Date(2026, 9, 11, 10, 0, 0, 0, time.UTC)
-	reset := start.Add(5 * time.Hour)
-	q := providerquota.Quota{ID: "five_hour", UsedPercent: 25, DurationSeconds: ptr(int64(18000)), ResetsAt: &reset}
-	pair := &PairedMeasurement{StartedAt: start, EndedAt: start.Add(time.Hour), Before: providerquota.Observation{CollectedAt: start, Quotas: []providerquota.Quota{q}}, After: providerquota.Observation{CollectedAt: start.Add(time.Hour), Quotas: []providerquota.Quota{q}}}
-	block := usagehistory.BlockSummary{StartTime: reset.Add(-5 * time.Hour), EndTime: reset, ActualEndTime: ptr(start.Add(30 * time.Minute)), TotalTokens: 100, Models: []usagehistory.BlockModel{{Model: "claude-sonnet", Provider: usagehistory.ProviderAnthropic}}}
-	history := &HistorySummary{StartedAt: start.Add(15 * time.Minute), FinishedAt: start.Add(45 * time.Minute), Blocks: []usagehistory.BlockSummary{block}}
-	c := calibrateAnthropic(pair, history)
-	if c.ConditionalRemaining == nil || *c.ConditionalRemaining != 300 {
-		t.Fatalf("calibration=%+v", c)
-	}
-	history.Blocks[0].Models = append(history.Blocks[0].Models, usagehistory.BlockModel{Model: "gpt-5", Provider: usagehistory.ProviderCodex})
-	c = calibrateAnthropic(pair, history)
-	if c.UnavailableReason != "block_contains_non_anthropic_models" {
-		t.Fatalf("reason=%q", c.UnavailableReason)
-	}
-}
-
-func TestCalibrationRejectsScopedZeroAndDriftingQuota(t *testing.T) {
-	start := time.Date(2026, 9, 11, 10, 0, 0, 0, time.UTC)
-	reset := start.Add(6 * time.Hour)
-	duration := int64(18000)
-	base := providerquota.Quota{ID: "five_hour", Kind: "session", UsedPercent: 20, DurationSeconds: &duration, ResetsAt: &reset}
-	pair := &PairedMeasurement{StartedAt: start, EndedAt: start.Add(time.Hour), Before: providerquota.Observation{Quotas: []providerquota.Quota{base}}, After: providerquota.Observation{CollectedAt: start.Add(time.Hour), Quotas: []providerquota.Quota{base}}}
-	history := &HistorySummary{StartedAt: start.Add(time.Minute), FinishedAt: start.Add(30 * time.Minute)}
-	pair.After.Quotas[0].UsedPercent = 0
-	if got := calibrateAnthropic(pair, history).UnavailableReason; got != "quota_percent_not_calibratable" {
-		t.Fatalf("zero reason=%q", got)
-	}
-	pair.After.Quotas[0].UsedPercent = 19
-	if got := calibrateAnthropic(pair, history).UnavailableReason; got != "quota_percent_decreased_during_collection" {
-		t.Fatalf("decrease reason=%q", got)
-	}
-	pair.After.Quotas[0].UsedPercent = 23
-	if got := calibrateAnthropic(pair, history).UnavailableReason; got != "quota_changed_materially_during_collection" {
-		t.Fatalf("drift reason=%q", got)
-	}
-	scope := &providerquota.Scope{Model: &providerquota.ScopeLabel{ID: "claude-sonnet"}}
-	pair.Before.Quotas[0].Scope = scope
-	pair.After.Quotas[0].Scope = scope
-	if got := calibrateAnthropic(pair, history).UnavailableReason; got != "five_hour_quota_unavailable" {
-		t.Fatalf("scoped reason=%q", got)
-	}
-	pair.Before.Quotas[0].Scope, pair.After.Quotas[0].Scope = nil, nil
-	inactive := false
-	pair.Before.Quotas[0].Active, pair.After.Quotas[0].Active = &inactive, &inactive
-	if got := calibrateAnthropic(pair, history).UnavailableReason; got != "five_hour_quota_unavailable" {
-		t.Fatalf("inactive reason=%q", got)
-	}
-}
-
 func TestDeepSeekEstimateWeightsSourcesAndHandlesCurrencyAndPricing(t *testing.T) {
 	trueValue := true
 	models := []ModelStats{
@@ -652,16 +601,12 @@ func TestDeepSeekEstimateWeightsSourcesAndHandlesCurrencyAndPricing(t *testing.T
 	if unpriced := estimateDeepSeek(obs, models); unpriced[0].Tokens != nil || unpriced[0].UnavailableReason != "historical_effective_rate_unavailable" {
 		t.Fatalf("unpriced estimate=%+v", unpriced)
 	}
-	obs.SpendControls = []providerquota.SpendControl{{ScopeID: "credits", Reached: true}}
-	if restricted := estimateDeepSeek(obs, models); len(restricted) != 1 || restricted[0].UnavailableReason != "spend_control_reached" {
-		t.Fatalf("restricted=%+v", restricted)
-	}
 }
 
 func TestCachedWindowPastResetIsStaleAndHasNoEstimate(t *testing.T) {
 	now := time.Date(2026, 9, 11, 12, 0, 0, 0, time.UTC)
 	reset := now.Add(time.Second)
-	report := Report{GeneratedAt: now, Providers: []ProviderReport{{Provider: "anthropic", QuotaAfter: &providerquota.Observation{Quotas: []providerquota.Quota{{ResetsAt: &reset}}}, Calibration: &Calibration{ConditionalRemaining: ptr(10.0)}}}}
+	report := Report{GeneratedAt: now, Providers: []ProviderReport{{Provider: "anthropic", Quota: &providerquota.Observation{Quotas: []providerquota.Quota{{ResetsAt: &reset}}}, Calibration: &Calibration{ConditionalRemaining: ptr(10.0)}}}}
 	now = now.Add(2 * time.Second)
 	report.GeneratedAt = now
 	markFreshness(&report, true, false, 2*time.Second)
@@ -675,7 +620,7 @@ func TestInactivePastResetDoesNotInvalidateActiveFutureWindow(t *testing.T) {
 	future := now.Add(time.Hour)
 	past := now.Add(-time.Hour)
 	active, inactive := true, false
-	report := Report{GeneratedAt: now, Providers: []ProviderReport{{Provider: "anthropic", QuotaAfter: &providerquota.Observation{Quotas: []providerquota.Quota{
+	report := Report{GeneratedAt: now, Providers: []ProviderReport{{Provider: "anthropic", Quota: &providerquota.Observation{Quotas: []providerquota.Quota{
 		{ID: "session", Active: &active, ResetsAt: &future},
 		{ID: "weekly_scoped", Active: &inactive, ResetsAt: &past, Scope: &providerquota.Scope{Model: &providerquota.ScopeLabel{ID: "claude-opus"}}},
 	}}, Calibration: &Calibration{ConditionalRemaining: ptr(10.0)}}}}

@@ -61,7 +61,8 @@ var effortRank = map[string]int{
 const summaryNone = "none"
 
 // The Anthropic parameters utraque drops because the Codex backend ignores
-// them. Recorded in Metadata.Dropped when present so the caller can log them.
+// them. Recorded in Metadata.DroppedParams when present so the caller can log
+// them.
 const (
 	DroppedTemperature   = "temperature"
 	DroppedTopP          = "top_p"
@@ -144,9 +145,14 @@ type EffortResult struct {
 // effort/summary/parallelism were decided. It exists so a later layer can
 // DEBUG-log the translation without re-deriving any of it.
 type Metadata struct {
-	// Dropped names the Anthropic parameters that were present in the input and
-	// discarded because the backend ignores them.
-	Dropped []string
+	// DroppedParams names the Anthropic parameters that were present in the
+	// input and discarded because the backend ignores them (the Dropped*
+	// parameter constants above), in the order droppedParams records them.
+	DroppedParams []string
+	// DroppedSystemBlocks records, as "system:<block_type>" markers (and
+	// DroppedBillingHeader), each system block that was dropped from the joined
+	// instructions by joinSystem.
+	DroppedSystemBlocks []string
 	// SystemMessagesRemapped counts messages[] entries that arrived with role
 	// "system" (the mid-conversation-system beta) and were emitted as developer
 	// items instead, because the backend rejects role "system" on input.
@@ -251,8 +257,8 @@ func Translate(req *aschema.MessagesRequest, dec router.Decision, model cschema.
 	out.PromptCacheKey = promptCacheKey(out)
 	meta.PromptCacheKey = out.PromptCacheKey
 
-	meta.Dropped = droppedParams(req)
-	meta.Dropped = append(meta.Dropped, systemDropped...)
+	meta.DroppedParams = droppedParams(req)
+	meta.DroppedSystemBlocks = systemDropped
 
 	return out, meta, nil
 }
@@ -261,8 +267,8 @@ func Translate(req *aschema.MessagesRequest, dec router.Decision, model cschema.
 // a scalar string passes through verbatim; an array joins its text blocks with
 // a blank line between them. Non-text system blocks (rare) are dropped from
 // the joined string, but each drop is returned as a "system:<block_type>"
-// reason so the caller can fold it into Metadata.Dropped rather than lose it
-// silently.
+// reason so the caller can record it in Metadata.DroppedSystemBlocks rather
+// than lose it silently.
 func joinSystem(system *aschema.Content) (instructions string, dropped []string) {
 	if system.IsEmpty() {
 		return "", nil
@@ -561,7 +567,7 @@ func translateTools(tools []aschema.Tool) (out []cschema.Tool, rewritten, droppe
 	}
 	out = make([]cschema.Tool, 0, len(tools))
 	for _, t := range tools {
-		params, res := toolschema.Sanitize(toolschema.Codex, t.InputSchema)
+		params, res := toolschema.Rewrite(toolschema.Codex, t.InputSchema)
 		for _, p := range res.Rewritten {
 			rewritten = append(rewritten, toolschema.NodePath(t.Name, p))
 		}

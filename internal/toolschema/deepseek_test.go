@@ -167,13 +167,13 @@ func TestDeepSeekPatternKeepsLiteralLookaroundText(t *testing.T) {
 	}
 }
 
-// TestDeepSeekSanitizeArtifactFilePaths is the contract for the schema shape
+// TestDeepSeekRewriteArtifactFilePaths is the contract for the schema shape
 // that failed: the Artifact tool's file_paths array, whose item pattern
 // carries \0. The wire form gets \x00 and nothing else changes.
-func TestDeepSeekSanitizeArtifactFilePaths(t *testing.T) {
+func TestDeepSeekRewriteArtifactFilePaths(t *testing.T) {
 	raw := json.RawMessage(`{"type":"object","properties":{"file_paths":{"type":"array","items":{"type":"string","minLength":1,"maxLength":1024,"pattern":"^[^\\0]*$"},"maxItems":25,"minItems":1},"url":{"type":"string","maxLength":512}}}`)
 	before := string(raw)
-	out, res := Sanitize(DeepSeek, raw)
+	out, res := Rewrite(DeepSeek, raw)
 	want := Result{Rewritten: []string{"properties.file_paths.items"}}
 	if !reflect.DeepEqual(res, want) {
 		t.Fatalf("result = %+v\nwant     %+v", res, want)
@@ -187,11 +187,11 @@ func TestDeepSeekSanitizeArtifactFilePaths(t *testing.T) {
 	}
 }
 
-func TestDeepSeekSanitizeUntouchedIsIdentical(t *testing.T) {
+func TestDeepSeekRewriteUntouchedIsIdentical(t *testing.T) {
 	// The Codex dialect drops this email pattern (lookahead); the DeepSeek
 	// dialect passes it through, so the input bytes come back as they went in.
 	raw := json.RawMessage(`{"type":"object",   "properties": {"to": {"type":"string","pattern":"^(?!\\.)(?!.*\\.\\.)[A-Za-z0-9.!#$%&'*+/=?^_{|}~-]+@[A-Za-z0-9.-]+$"}}}`)
-	out, res := Sanitize(DeepSeek, raw)
+	out, res := Rewrite(DeepSeek, raw)
 	if !res.Empty() {
 		t.Fatalf("result = %+v, want empty", res)
 	}
@@ -200,9 +200,9 @@ func TestDeepSeekSanitizeUntouchedIsIdentical(t *testing.T) {
 	}
 }
 
-func TestDeepSeekSanitizeDropsIntoDescription(t *testing.T) {
+func TestDeepSeekRewriteDropsIntoDescription(t *testing.T) {
 	raw := json.RawMessage(`{"type":"object","properties":{"a":{"type":"string","description":"An a.","pattern":"\\Qa.b\\E"},"b":{"type":"string","pattern":"\\R"}}}`)
-	out, res := Sanitize(DeepSeek, raw)
+	out, res := Rewrite(DeepSeek, raw)
 	want := Result{Dropped: []string{"properties.a", "properties.b"}}
 	if !reflect.DeepEqual(res, want) {
 		t.Fatalf("result = %+v\nwant     %+v", res, want)

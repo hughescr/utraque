@@ -264,8 +264,8 @@ func TestBillingHeaderDoesNotMoveTheCacheKey(t *testing.T) {
 	if first.Instructions != "You are a helpful assistant." {
 		t.Errorf("instructions = %q, want the real system prompt with the header removed", first.Instructions)
 	}
-	if !slicesContains(meta.Dropped, request.DroppedBillingHeader) {
-		t.Errorf("the drop was not recorded: Dropped = %v", meta.Dropped)
+	if !slicesContains(meta.DroppedSystemBlocks, request.DroppedBillingHeader) {
+		t.Errorf("the drop was not recorded: DroppedSystemBlocks = %v", meta.DroppedSystemBlocks)
 	}
 }
 

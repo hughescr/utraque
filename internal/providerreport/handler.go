@@ -183,10 +183,10 @@ func markCodexUnavailable(r *Report, code, message string) {
 		if p.Provider != "codex" {
 			continue
 		}
-		p.QuotaBefore, p.QuotaAfter, p.Paired = nil, nil, nil
+		p.QuotaBefore, p.Quota, p.Paired = nil, nil, nil
 		p.LastComplete = nil
 		p.discardPrevious = true
-		p.Errors = append(p.Errors, ReportError{Section: "quota_after", Code: code, Retryable: true, Message: message})
+		p.Errors = append(p.Errors, ReportError{Section: SectionQuota, Code: code, Retryable: true, Message: message})
 		if p.History != nil {
 			p.Status = "partial"
 		} else {
@@ -265,7 +265,7 @@ func (h *Handler) storeAttempt(key string, attempt Report) Report {
 				attempt.Providers[i].LastComplete = &ProviderSnapshot{
 					LastSuccess: previous.LastSuccess,
 					Freshness:   Freshness{Cached: true, Stale: true, AgeSeconds: age.Seconds()},
-					QuotaBefore: previous.QuotaBefore, QuotaAfter: previous.QuotaAfter,
+					QuotaBefore: previous.QuotaBefore, Quota: previous.Quota,
 					Paired: previous.Paired, History: previous.History,
 					Calibration: &Calibration{UnavailableReason: "cached_measurement_expired"},
 				}
@@ -306,7 +306,7 @@ func markFreshness(r *Report, cached, stale bool, age time.Duration) {
 			previous.Calibration = &Calibration{UnavailableReason: "cached_measurement_expired"}
 			previous.Remaining = nil
 		}
-		if observationResetPassed(r.Providers[i].QuotaAfter, r.GeneratedAt) {
+		if observationResetPassed(r.Providers[i].Quota, r.GeneratedAt) {
 			r.Providers[i].SourceFreshness.Stale = true
 			r.Providers[i].Calibration = &Calibration{UnavailableReason: "quota_window_reset_after_collection"}
 			r.Providers[i].Remaining = nil

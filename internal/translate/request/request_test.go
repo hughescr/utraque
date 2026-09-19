@@ -252,8 +252,8 @@ func TestDroppedParams(t *testing.T) {
 		request.DroppedTemperature, request.DroppedTopP, request.DroppedTopK,
 		request.DroppedMaxTokens, request.DroppedStopSequences,
 	}
-	if !reflect.DeepEqual(meta.Dropped, want) {
-		t.Errorf("dropped = %v, want %v", meta.Dropped, want)
+	if !reflect.DeepEqual(meta.DroppedParams, want) {
+		t.Errorf("dropped params = %v, want %v", meta.DroppedParams, want)
 	}
 }
 
@@ -270,8 +270,8 @@ func TestDroppedMaxTokensAlways(t *testing.T) {
 	if err != nil {
 		t.Fatalf("translate: %v", err)
 	}
-	if !reflect.DeepEqual(meta.Dropped, []string{request.DroppedMaxTokens}) {
-		t.Errorf("dropped = %v, want [max_tokens]", meta.Dropped)
+	if !reflect.DeepEqual(meta.DroppedParams, []string{request.DroppedMaxTokens}) {
+		t.Errorf("dropped params = %v, want [max_tokens]", meta.DroppedParams)
 	}
 }
 
@@ -593,13 +593,13 @@ func TestThinkingRecordedDropped(t *testing.T) {
 		t.Fatalf("translate: %v", err)
 	}
 	found := false
-	for _, d := range meta.Dropped {
+	for _, d := range meta.DroppedParams {
 		if d == request.DroppedThinking {
 			found = true
 		}
 	}
 	if !found {
-		t.Errorf("dropped = %v, want it to include %q", meta.Dropped, request.DroppedThinking)
+		t.Errorf("dropped params = %v, want it to include %q", meta.DroppedParams, request.DroppedThinking)
 	}
 }
 
@@ -633,8 +633,8 @@ func TestDroppedImageEmptyMediaType(t *testing.T) {
 }
 
 // TestSystemNonTextBlockDropped confirms a non-text system block is dropped
-// from the joined instructions but recorded in Metadata.Dropped so the loss
-// is observable to a later logging layer.
+// from the joined instructions but recorded in Metadata.DroppedSystemBlocks so
+// the loss is observable to a later logging layer.
 func TestSystemNonTextBlockDropped(t *testing.T) {
 	raw := readFixture(t, "system_non_text_block")
 	var req aschema.MessagesRequest
@@ -649,13 +649,13 @@ func TestSystemNonTextBlockDropped(t *testing.T) {
 		t.Errorf("instructions = %q, want %q", out.Instructions, "Be helpful.")
 	}
 	found := false
-	for _, d := range meta.Dropped {
+	for _, d := range meta.DroppedSystemBlocks {
 		if d == "system:image" {
 			found = true
 		}
 	}
 	if !found {
-		t.Errorf("Dropped = %v, want it to include %q", meta.Dropped, "system:image")
+		t.Errorf("DroppedSystemBlocks = %v, want it to include %q", meta.DroppedSystemBlocks, "system:image")
 	}
 }
 

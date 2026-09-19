@@ -198,10 +198,10 @@ func TestCodexSpendControlReachedPreservesTrueFalseAndMissing(t *testing.T) {
 	if len(observation.SpendControls) != 2 {
 		t.Fatalf("spend controls = %+v", observation.SpendControls)
 	}
-	if got := observation.SpendControls[0]; got.ScopeID != "a_reached" || !got.Reached {
+	if got := observation.SpendControls[0]; got.LimitID != "a_reached" || !got.Reached {
 		t.Errorf("true flag = %+v", got)
 	}
-	if got := observation.SpendControls[1]; got.ScopeID != "b_clear" || got.Reached {
+	if got := observation.SpendControls[1]; got.LimitID != "b_clear" || got.Reached {
 		t.Errorf("false flag = %+v", got)
 	}
 }

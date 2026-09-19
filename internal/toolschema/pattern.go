@@ -57,7 +57,7 @@ func NodePath(tool, path string) string {
 // pattern is dropped, so the model still sees the constraint.
 const PatternNote = "Must match the regular expression: "
 
-// Result reports what Sanitize did to one schema: the JSON paths (relative to
+// Result reports what Rewrite did to one schema: the JSON paths (relative to
 // the schema root) of every node whose pattern was rewritten for backend
 // compatibility, and of every node whose pattern was dropped. Both lists are
 // sorted.
@@ -94,7 +94,7 @@ type Dialect interface {
 	classLiteral(w *writer, s string)
 }
 
-// Sanitize returns a copy of raw with every "pattern" keyword translated for
+// Rewrite returns a copy of raw with every "pattern" keyword translated for
 // d, or removed where no compatible form exists. When nothing needs to change
 // the input bytes are returned as-is: the caller re-encodes the request with
 // encoding/json, which keeps the schema's key order and number spelling but
@@ -102,7 +102,7 @@ type Dialect interface {
 // content, not identical bytes. A schema that is not a JSON object is passed
 // through untouched: the backend will reject it with a clearer error than
 // anything this function could add.
-func Sanitize(d Dialect, raw json.RawMessage) (json.RawMessage, Result) {
+func Rewrite(d Dialect, raw json.RawMessage) (json.RawMessage, Result) {
 	var res Result
 	if len(raw) == 0 {
 		return raw, res
@@ -115,7 +115,7 @@ func Sanitize(d Dialect, raw json.RawMessage) (json.RawMessage, Result) {
 	if !ok {
 		return raw, res
 	}
-	sanitizeNode(d, obj, "", &res)
+	rewriteNode(d, obj, "", &res)
 	if res.Empty() {
 		return raw, res
 	}
@@ -140,9 +140,9 @@ var (
 	schemaMapChild    = []string{"properties", "patternProperties", "definitions", "$defs", "dependentSchemas"}
 )
 
-// sanitizeNode rewrites node in place and records what it did in res.
+// rewriteNode rewrites node in place and records what it did in res.
 // path is the dotted JSON path to node ("" at root).
-func sanitizeNode(d Dialect, node map[string]any, path string, res *Result) {
+func rewriteNode(d Dialect, node map[string]any, path string, res *Result) {
 	if p, ok := node["pattern"].(string); ok {
 		switch out, ok := translate(d, p); {
 		case !ok:
@@ -168,7 +168,7 @@ func sanitizeNode(d Dialect, node map[string]any, path string, res *Result) {
 	}
 	for _, k := range schemaSingleChild {
 		if child, ok := node[k].(map[string]any); ok {
-			sanitizeNode(d, child, join(k), res)
+			rewriteNode(d, child, join(k), res)
 		}
 	}
 	// "items" appears in both lists: it is a single schema in modern drafts
@@ -180,7 +180,7 @@ func sanitizeNode(d Dialect, node map[string]any, path string, res *Result) {
 		}
 		for i, v := range list {
 			if child, ok := v.(map[string]any); ok {
-				sanitizeNode(d, child, join(k)+PathSep+strconv.Itoa(i), res)
+				rewriteNode(d, child, join(k)+PathSep+strconv.Itoa(i), res)
 			}
 		}
 	}
@@ -191,7 +191,7 @@ func sanitizeNode(d Dialect, node map[string]any, path string, res *Result) {
 		}
 		for name, v := range m {
 			if child, ok := v.(map[string]any); ok {
-				sanitizeNode(d, child, join(k)+PathSep+name, res)
+				rewriteNode(d, child, join(k)+PathSep+name, res)
 			}
 		}
 	}

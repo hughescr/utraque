@@ -111,8 +111,8 @@ type Report struct {
 	// Changed is true when the returned bytes differ from the input.
 	Changed bool
 
-	// Dropped counts the synthetic thinking blocks removed.
-	Dropped int
+	// RemovedThinkingBlocks counts the synthetic thinking blocks removed.
+	RemovedThinkingBlocks int
 
 	// HeadlessToolUse is true when at least one assistant turn lost its
 	// leading thinking block but kept a tool_use block. See SanitizeMessages
@@ -238,7 +238,7 @@ func sanitizeRawMessage(rawMsg []byte, rep *Report) (out []byte, changed bool, d
 	if dropped == 0 {
 		return nil, false, false, nil
 	}
-	rep.Dropped += dropped
+	rep.RemovedThinkingBlocks += dropped
 	if len(kept) == 0 {
 		return nil, true, true, nil
 	}

@@ -14,6 +14,12 @@ import (
 
 const SchemaVersion = 1
 
+// SectionQuota is the ReportError.Section value for the live quota reading.
+// Its value is the schema-v1 "quota_after" spelling, a holdover from the
+// discontinued before/after bracket measurement; the Go field it reports on
+// is ProviderReport.Quota. Keep the value until schema v2.
+const SectionQuota = "quota_after"
+
 type HistoryCollector interface {
 	Collect(context.Context, time.Time, time.Time) (usagehistory.Report, error)
 }
@@ -72,15 +78,16 @@ type ProviderReport struct {
 	SourceFreshness Freshness     `json:"source_freshness"`
 	Errors          []ReportError `json:"errors"`
 	// QuotaBefore and Paired are never assigned by the current collector —
-	// buildProvider only ever sets QuotaAfter (report.go:121), and
+	// buildProvider only ever sets Quota (report.go:121), and
 	// markCodexUnavailable (handler.go:186) explicitly nils all three. Their
-	// JSON names are kept as-is for schema v1 compatibility; see QuotaAfter.
+	// JSON names are kept as-is for schema v1 compatibility; see Quota.
 	QuotaBefore *providerquota.Observation `json:"quota_before,omitempty"`
-	// QuotaAfter is the only one of the three quota fields the current
-	// collector assigns (report.go:121); the "_after" name is a holdover
-	// from a discontinued before/after bracket measurement and is kept for
-	// schema v1 compatibility rather than renamed to "quota".
-	QuotaAfter      *providerquota.Observation `json:"quota_after,omitempty"`
+	// Quota is the only one of the three quota fields the current collector
+	// assigns (report.go:121). Its JSON key "quota_after" is a holdover from
+	// a discontinued before/after bracket measurement and is kept for schema
+	// v1 compatibility; the matching ReportError.Section value is
+	// SectionQuota.
+	Quota           *providerquota.Observation `json:"quota_after,omitempty"`
 	Paired          *PairedMeasurement         `json:"paired_measurement,omitempty"`
 	History         *HistorySummary            `json:"history,omitempty"`
 	ReferencePrices *referenceprice.Snapshot   `json:"reference_prices,omitempty"`
@@ -107,7 +114,7 @@ type ProviderSnapshot struct {
 	// ProviderReport and are likewise never non-nil in practice; see
 	// ProviderReport.QuotaBefore.
 	QuotaBefore *providerquota.Observation `json:"quota_before,omitempty"`
-	QuotaAfter  *providerquota.Observation `json:"quota_after,omitempty"`
+	Quota       *providerquota.Observation `json:"quota_after,omitempty"`
 	Paired      *PairedMeasurement         `json:"paired_measurement,omitempty"`
 	History     *HistorySummary            `json:"history,omitempty"`
 	Calibration *Calibration               `json:"calibration,omitempty"`
@@ -158,18 +165,18 @@ type PeriodSummary struct {
 }
 
 type ModelStats struct {
-	Source                      string                `json:"source"`
-	Model                       string                `json:"model"`
-	Provider                    usagehistory.Provider `json:"provider"`
-	InputTokens                 uint64                `json:"input_tokens"`
-	OutputTokens                uint64                `json:"output_tokens"`
-	CacheCreationTokens         uint64                `json:"cache_creation_tokens"`
-	CacheReadTokens             uint64                `json:"cache_read_tokens"`
-	TotalTokens                 uint64                `json:"total_tokens"`
-	CostUSD                     *float64              `json:"cost_usd"`
-	CostStatus                  string                `json:"cost_status"`
-	HistoricalEffectiveUSDToken *float64              `json:"historical_effective_usd_per_token"`
-	UnitPriceUnavailableReason  string                `json:"unit_price_unavailable_reason,omitempty"`
+	Source                      string                  `json:"source"`
+	Model                       string                  `json:"model"`
+	Provider                    usagehistory.Provider   `json:"provider"`
+	InputTokens                 uint64                  `json:"input_tokens"`
+	OutputTokens                uint64                  `json:"output_tokens"`
+	CacheCreationTokens         uint64                  `json:"cache_creation_tokens"`
+	CacheReadTokens             uint64                  `json:"cache_read_tokens"`
+	TotalTokens                 uint64                  `json:"total_tokens"`
+	CostUSD                     *float64                `json:"cost_usd"`
+	CostStatus                  usagehistory.CostStatus `json:"cost_status"`
+	HistoricalEffectiveUSDToken *float64                `json:"historical_effective_usd_per_token"`
+	UnitPriceUnavailableReason  string                  `json:"unit_price_unavailable_reason,omitempty"`
 }
 
 type Calibration struct {
