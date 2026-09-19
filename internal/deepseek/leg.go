@@ -23,6 +23,7 @@ import (
 	"github.com/hughescr/utraque/internal/anthropic/schema"
 	"github.com/hughescr/utraque/internal/apierr"
 	"github.com/hughescr/utraque/internal/obs"
+	"github.com/hughescr/utraque/internal/proxyhdr"
 	"github.com/hughescr/utraque/internal/router"
 	"github.com/hughescr/utraque/internal/sse"
 	"github.com/hughescr/utraque/internal/tokens"
@@ -34,9 +35,6 @@ const (
 	defaultMaxResponseBytes = 128 << 20
 	copyBufferSize          = 32 << 10
 )
-
-// TokenCountMethodHeader identifies how CountTokens obtained its result.
-const TokenCountMethodHeader = "X-Utraque-Token-Count-Method"
 
 // Option configures a Leg.
 type Option func(*Leg)
@@ -136,7 +134,7 @@ func (l *Leg) CountTokens(w http.ResponseWriter, r *http.Request, rq *router.Req
 		"estimator", l.estimator.Name(), "bytes", len(rq.Raw))
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set(TokenCountMethodHeader, "estimated; estimator="+l.estimator.Name())
+	w.Header().Set(proxyhdr.TokenCountMethod, "estimated; estimator="+l.estimator.Name())
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(body)
 	return nil

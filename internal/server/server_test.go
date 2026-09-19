@@ -19,6 +19,7 @@ import (
 	"github.com/hughescr/utraque/internal/anthropic/schema"
 	"github.com/hughescr/utraque/internal/apierr"
 	"github.com/hughescr/utraque/internal/config"
+	"github.com/hughescr/utraque/internal/proxyhdr"
 	"github.com/hughescr/utraque/internal/server"
 )
 
@@ -175,7 +176,7 @@ func TestHealthzMethodNotAllowed(t *testing.T) {
 func TestRequestIDGeneratedAndEchoed(t *testing.T) {
 	s, buf := newServer(t, nil)
 	w := do(t, s, httptest.NewRequest(http.MethodGet, server.HealthPath, nil))
-	id := w.Header().Get(server.ResponseIDHeader)
+	id := w.Header().Get(proxyhdr.RequestID)
 	if id == "" {
 		t.Fatal("no response id header")
 	}
@@ -184,20 +185,20 @@ func TestRequestIDGeneratedAndEchoed(t *testing.T) {
 	}
 
 	second := do(t, s, httptest.NewRequest(http.MethodGet, server.HealthPath, nil))
-	if second.Header().Get(server.ResponseIDHeader) == id {
+	if second.Header().Get(proxyhdr.RequestID) == id {
 		t.Error("generated request ids must be unique")
 	}
 
 	r := httptest.NewRequest(http.MethodGet, server.HealthPath, nil)
 	r.Header.Set(server.RequestIDHeader, "caller-supplied-id")
-	if got := do(t, s, r).Header().Get(server.ResponseIDHeader); got != "caller-supplied-id" {
+	if got := do(t, s, r).Header().Get(proxyhdr.RequestID); got != "caller-supplied-id" {
 		t.Errorf("inbound id not honoured: %q", got)
 	}
 
 	for _, bad := range []string{"bad id with spaces", strings.Repeat("x", 200), "tab\there"} {
 		r := httptest.NewRequest(http.MethodGet, server.HealthPath, nil)
 		r.Header.Set(server.RequestIDHeader, bad)
-		if got := do(t, s, r).Header().Get(server.ResponseIDHeader); got == bad {
+		if got := do(t, s, r).Header().Get(proxyhdr.RequestID); got == bad {
 			t.Errorf("malformed inbound id %q must be replaced", bad)
 		}
 	}
@@ -215,7 +216,7 @@ func TestCredentialShapedRequestIDIsNotHonoured(t *testing.T) {
 		s, buf := newServer(t, nil)
 		r := httptest.NewRequest(http.MethodGet, server.HealthPath, nil)
 		r.Header.Set(server.RequestIDHeader, bad)
-		got := do(t, s, r).Header().Get(server.ResponseIDHeader)
+		got := do(t, s, r).Header().Get(proxyhdr.RequestID)
 		if got == bad {
 			t.Errorf("a credential-shaped inbound id %q was honoured", bad)
 		}
@@ -273,14 +274,14 @@ func TestLocalTokenGate(t *testing.T) {
 
 	for _, wrong := range []string{"wrong", localSecret + "x", localSecret[:5]} {
 		r := httptest.NewRequest(http.MethodGet, "/v1/anything", nil)
-		r.Header.Set(server.LocalTokenHeader, wrong)
+		r.Header.Set(proxyhdr.LocalToken, wrong)
 		if w := do(t, s, r); w.Code != http.StatusUnauthorized {
 			t.Fatalf("token %q: status = %d, want 401", wrong, w.Code)
 		}
 	}
 
 	r := httptest.NewRequest(http.MethodGet, "/v1/anything", nil)
-	r.Header.Set(server.LocalTokenHeader, localSecret)
+	r.Header.Set(proxyhdr.LocalToken, localSecret)
 	if w := do(t, s, r); w.Code != http.StatusOK {
 		t.Fatalf("correct token: status = %d, body = %s", w.Code, w.Body.String())
 	}
@@ -309,7 +310,7 @@ func TestAuthorizationHeaderIsNotTheLocalToken(t *testing.T) {
 
 	r = httptest.NewRequest(http.MethodGet, "/v1/x", nil)
 	r.Header.Set("Authorization", "Bearer upstream-oauth-token")
-	r.Header.Set(server.LocalTokenHeader, localSecret)
+	r.Header.Set(proxyhdr.LocalToken, localSecret)
 	if w := do(t, s, r); w.Code != http.StatusOK {
 		t.Fatalf("status = %d", w.Code)
 	}
@@ -348,7 +349,7 @@ func TestProviderReportPathNeverFallsThrough(t *testing.T) {
 		status int
 	}{{http.MethodGet, 200}, {http.MethodHead, 200}, {http.MethodPost, 405}, {http.MethodPatch, 405}} {
 		r := httptest.NewRequest(tc.method, server.ProviderReportPath, nil)
-		r.Header.Set(server.LocalTokenHeader, localSecret)
+		r.Header.Set(proxyhdr.LocalToken, localSecret)
 		if w := do(t, s, r); w.Code != tc.status {
 			t.Fatalf("%s status=%d want %d", tc.method, w.Code, tc.status)
 		}
@@ -555,7 +556,7 @@ func TestFlushReachesUnderlyingWriter(t *testing.T) {
 	if !strings.Contains(string(b), "data: 2") {
 		t.Errorf("stream body = %q", b)
 	}
-	if resp.Header.Get(server.ResponseIDHeader) == "" {
+	if resp.Header.Get(proxyhdr.RequestID) == "" {
 		t.Error("the response id is missing on a streamed response")
 	}
 }

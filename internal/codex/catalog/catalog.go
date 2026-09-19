@@ -43,14 +43,14 @@ import (
 	"github.com/hughescr/utraque/internal/apierr"
 	"github.com/hughescr/utraque/internal/codex/auth"
 	"github.com/hughescr/utraque/internal/codex/schema"
+	"github.com/hughescr/utraque/internal/codex/wire"
 	"github.com/hughescr/utraque/internal/obs"
 )
 
-// Defaults used when Options leaves a field zero.
+// Defaults used when Options leaves a field zero. The backend root and the
+// request identity come from internal/codex/wire; the catalog lives at the
+// root's "/models" subpath.
 const (
-	// DefaultBaseURL is the Codex backend root; the catalog lives at its
-	// "/models" subpath. Override in tests to point at an httptest server.
-	DefaultBaseURL = "https://chatgpt.com/backend-api/codex"
 	// DefaultTTL is how long a fetched catalog is served without revalidation.
 	DefaultTTL = 300 * time.Second
 	// backgroundRefreshTimeout bounds a stale-while-revalidate fetch, which
@@ -64,11 +64,6 @@ const (
 
 	modelsPath        = "/models"
 	queryClientVer    = "client_version"
-	headerAccountID   = "chatgpt-account-id"
-	headerOpenAIBeta  = "OpenAI-Beta"
-	openAIBetaValue   = "responses=experimental"
-	headerOriginator  = "originator"
-	originatorValue   = "codex_cli_rs"
 	fetchSingleflight = "models"
 )
 
@@ -86,7 +81,7 @@ type Catalog interface {
 // Options configures a Client. Only zero-valued fields are defaulted; a caller
 // that wants the real endpoint can leave BaseURL empty.
 type Options struct {
-	// BaseURL is the Codex backend root. Defaults to DefaultBaseURL.
+	// BaseURL is the Codex backend root. Defaults to wire.DefaultBaseURL.
 	BaseURL string
 	// CacheFile is utraque's own on-disk cache file. Empty disables disk
 	// caching (memory only). It MUST NOT be the Codex CLI's models_cache.json:
@@ -158,7 +153,7 @@ func New(opts Options) *Client {
 		log:           opts.Logger,
 	}
 	if c.baseURL == "" {
-		c.baseURL = DefaultBaseURL
+		c.baseURL = wire.DefaultBaseURL
 	}
 	if c.ttl <= 0 {
 		c.ttl = DefaultTTL
@@ -308,9 +303,9 @@ func (c *Client) fetch(ctx context.Context, cred auth.Credential) (state, error)
 		return state{}, apierr.Wrap(err, apierr.TypeAPI, "codex catalog: build request")
 	}
 	req.Header.Set("Authorization", "Bearer "+cred.AccessToken)
-	req.Header.Set(headerAccountID, cred.AccountID)
-	req.Header.Set(headerOpenAIBeta, openAIBetaValue)
-	req.Header.Set(headerOriginator, originatorValue)
+	req.Header.Set(wire.HeaderAccountID, cred.AccountID)
+	req.Header.Set(wire.HeaderOpenAIBeta, wire.OpenAIBetaValue)
+	req.Header.Set(wire.HeaderOriginator, wire.Originator)
 	req.Header.Set("Accept", "application/json")
 	if prevEtag != "" {
 		req.Header.Set("If-None-Match", prevEtag)

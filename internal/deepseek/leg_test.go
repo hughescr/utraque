@@ -16,6 +16,7 @@ import (
 	"testing"
 
 	"github.com/hughescr/utraque/internal/apierr"
+	"github.com/hughescr/utraque/internal/proxyhdr"
 	"github.com/hughescr/utraque/internal/router"
 	"github.com/hughescr/utraque/internal/sse"
 	"github.com/hughescr/utraque/internal/transport"
@@ -196,8 +197,8 @@ func TestCountTokensIsEstimatedLocallyBecauseUpstreamDoesNotDocumentIt(t *testin
 	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil || response.InputTokens <= 0 {
 		t.Errorf("body = %s, err = %v", rec.Body.String(), err)
 	}
-	if got := rec.Header().Get(TokenCountMethodHeader); got != "estimated; estimator=chars/4" {
-		t.Errorf("%s = %q, want explicit local-estimate method", TokenCountMethodHeader, got)
+	if got := rec.Header().Get(proxyhdr.TokenCountMethod); got != "estimated; estimator=chars/4" {
+		t.Errorf("%s = %q, want explicit local-estimate method", proxyhdr.TokenCountMethod, got)
 	}
 }
 
@@ -556,13 +557,17 @@ func TestUnsupportedContentIsRejectedBeforeSpending(t *testing.T) {
 
 	cases := []struct {
 		name, model, content string
+		wantMessage          string // exact client-facing text when it matters
 	}{
-		{"document", "deepseek-flash", `[{"type":"document","source":{"type":"base64","data":"x"}}]`},
-		{"redacted thinking", "deepseek-flash", `[{"type":"redacted_thinking","data":"x"}]`},
-		{"pro image", "deepseek-v4-pro", `[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"x"}}]`},
-		{"unresolved nested tool reference", "deepseek-flash", `[{"type":"tool_result","tool_use_id":"tool_1","content":[{"type":"tool_reference","tool_name":"WebSearch"}]}]`},
-		{"top-level tool reference", "deepseek-flash", `[{"type":"tool_reference","tool_name":"WebSearch"}]`},
-		{"unknown nested tool result block", "deepseek-flash", `[{"type":"tool_result","tool_use_id":"tool_1","content":[{"type":"future_tool_result"}]}]`},
+		{name: "document", model: "deepseek-flash", content: `[{"type":"document","source":{"type":"base64","data":"x"}}]`},
+		{name: "redacted thinking", model: "deepseek-flash", content: `[{"type":"redacted_thinking","data":"x"}]`},
+		// The image gate is driven by the catalog's SupportsImages flag; the
+		// message names the model and is part of the client-visible contract.
+		{name: "pro image", model: "deepseek-v4-pro", content: `[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"x"}}]`,
+			wantMessage: "deepseek-v4-pro does not support image content"},
+		{name: "unresolved nested tool reference", model: "deepseek-flash", content: `[{"type":"tool_result","tool_use_id":"tool_1","content":[{"type":"tool_reference","tool_name":"WebSearch"}]}]`},
+		{name: "top-level tool reference", model: "deepseek-flash", content: `[{"type":"tool_reference","tool_name":"WebSearch"}]`},
+		{name: "unknown nested tool result block", model: "deepseek-flash", content: `[{"type":"tool_result","tool_use_id":"tool_1","content":[{"type":"future_tool_result"}]}]`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -574,6 +579,9 @@ func TestUnsupportedContentIsRejectedBeforeSpending(t *testing.T) {
 			var ae *apierr.Error
 			if !errors.As(err, &ae) || ae.HTTPStatus() != http.StatusBadRequest {
 				t.Fatalf("error = %v, want invalid-request 400", err)
+			}
+			if tc.wantMessage != "" && ae.Message != tc.wantMessage {
+				t.Errorf("message = %q, want %q", ae.Message, tc.wantMessage)
 			}
 		})
 	}

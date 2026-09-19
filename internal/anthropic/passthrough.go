@@ -20,6 +20,7 @@ import (
 
 	"github.com/hughescr/utraque/internal/apierr"
 	"github.com/hughescr/utraque/internal/obs"
+	"github.com/hughescr/utraque/internal/proxyhdr"
 	"github.com/hughescr/utraque/internal/router"
 	"github.com/hughescr/utraque/internal/transport"
 )
@@ -59,22 +60,14 @@ var hopByHop = map[string]struct{}{
 	"Upgrade":             {},
 }
 
-// utraque's own loopback headers. They describe the caller-to-proxy hop and
-// must never cross the trust boundary:
+// utraque's own loopback headers (internal/proxyhdr) describe the
+// caller-to-proxy hop and must never cross the trust boundary:
 //
-//   - localTokenHeader is the shared secret that authorizes a local process to
-//     spend the user's subscriptions. Forwarding it would disclose utraque's
-//     own credential to a third party on every single request.
-//   - responseIDHeader is minted by the proxy; letting an upstream response
+//   - proxyhdr.LocalToken is the shared secret that authorizes a local process
+//     to spend the user's subscriptions. Forwarding it would disclose
+//     utraque's own credential to a third party on every single request.
+//   - proxyhdr.RequestID is minted by the proxy; letting an upstream response
 //     overwrite it would make the client-visible id disagree with the logs.
-//
-// The names are duplicated from internal/server rather than imported to keep
-// this leg free of a dependency on the server package; passthrough_test asserts
-// the two stay in step.
-const (
-	localTokenHeader = "X-Utraque-Token"
-	responseIDHeader = "X-Utraque-Request-Id"
-)
 
 // IsHopByHop reports whether name is a connection-scoped header. name is
 // canonicalized before the lookup.
@@ -479,7 +472,7 @@ func copyRequestHeaders(dst, src http.Header) {
 	drop := connectionTokens(src)
 	for k, vv := range src {
 		ck := http.CanonicalHeaderKey(k)
-		if IsHopByHop(ck) || ck == "Content-Length" || ck == localTokenHeader {
+		if IsHopByHop(ck) || ck == "Content-Length" || ck == proxyhdr.LocalToken {
 			continue
 		}
 		if _, ok := drop[ck]; ok {
@@ -496,7 +489,7 @@ func copyResponseHeaders(dst, src http.Header) {
 	drop := connectionTokens(src)
 	for k, vv := range src {
 		ck := http.CanonicalHeaderKey(k)
-		if IsHopByHop(ck) || ck == responseIDHeader {
+		if IsHopByHop(ck) || ck == proxyhdr.RequestID {
 			continue
 		}
 		if _, ok := drop[ck]; ok {

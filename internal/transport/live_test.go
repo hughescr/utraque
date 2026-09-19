@@ -19,9 +19,11 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/hughescr/utraque/internal/codex/wire"
 )
 
-const liveCodexURL = "https://chatgpt.com/backend-api/codex/responses"
+const liveCodexURL = wire.DefaultBaseURL + "/responses"
 
 // TestLiveUTLSReachesCodex checks that a Chrome-shaped ClientHello is accepted
 // by chatgpt.com's edge: the handshake completes, HTTP/2 is negotiated, and the
@@ -53,7 +55,7 @@ func assertNotGated(t *testing.T, tr Transport, wantKind string) {
 		t.Fatalf("build request: %v", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("originator", honestOriginator)
+	req.Header.Set(wire.HeaderOriginator, wire.Originator)
 
 	resp, err := tr.Client().Do(req)
 	if err != nil {

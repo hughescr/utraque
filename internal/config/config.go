@@ -62,7 +62,9 @@ const (
 	// DefaultCodexBaseURL is the undocumented Codex backend root the Codex CLI
 	// itself uses, for both the model catalog and /responses. It is overridable
 	// so tests (and only tests) can aim the leg at a fake upstream: the real
-	// host is never contacted by the test suite.
+	// host is never contacted by the test suite. It restates
+	// internal/codex/wire.DefaultBaseURL because config imports no internal
+	// package; TestDefaultCodexBaseURLMatchesWire keeps the two in step.
 	DefaultCodexBaseURL = "https://chatgpt.com/backend-api/codex"
 
 	DefaultCodexTokenURL    = "https://auth.openai.com/oauth/token"

@@ -136,7 +136,7 @@ func TestAutoStartsOnStdAndSwitchesOnce(t *testing.T) {
 	if strings.Count(got, "GATE DETECTED") != 1 {
 		t.Errorf("switch warning logged %d times, want exactly 1:\n%s", strings.Count(got, "GATE DETECTED"), got)
 	}
-	for _, want := range []string{"level=WARN", "uTLS", honestOriginator, "to=utls"} {
+	for _, want := range []string{"level=WARN", "uTLS", "originator codex_cli_rs, no forged browser headers", "to=utls"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("switch warning lacks %q:\n%s", want, got)
 		}

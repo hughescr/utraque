@@ -55,19 +55,11 @@ import (
 	"github.com/hughescr/utraque/internal/codex/responses"
 	"github.com/hughescr/utraque/internal/codex/schema"
 	"github.com/hughescr/utraque/internal/obs"
+	"github.com/hughescr/utraque/internal/proxyhdr"
 	"github.com/hughescr/utraque/internal/router"
 	"github.com/hughescr/utraque/internal/tokens"
 	"github.com/hughescr/utraque/internal/translate/request"
 	"github.com/hughescr/utraque/internal/translate/stream"
-)
-
-// Debug headers set on every response this leg produces. They name the backend
-// that served the request and the upstream slug it was translated to, which is
-// the first question anyone debugging a mixed-model session asks. Neither
-// carries any credential material.
-const (
-	HeaderRoute = "X-Utraque-Route"
-	HeaderModel = "X-Utraque-Model"
 )
 
 // DefaultCatalogTimeout bounds the per-request catalog lookup. The catalog is
@@ -727,9 +719,9 @@ func (s *seed) Peek() (int, bool) {
 // they survive whichever layer ends up committing the status line — including
 // the dispatcher rendering an error envelope on this leg's behalf.
 func markRoute(h http.Header, rq *router.Request) {
-	h.Set(HeaderRoute, string(router.BackendCodex))
+	h.Set(proxyhdr.Route, string(router.BackendCodex))
 	if rq != nil && rq.Dec.UpstreamModel != "" {
-		h.Set(HeaderModel, rq.Dec.UpstreamModel)
+		h.Set(proxyhdr.Model, rq.Dec.UpstreamModel)
 	}
 }
 

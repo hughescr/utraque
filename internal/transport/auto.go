@@ -84,8 +84,13 @@ func (t *autoTransport) ReportGate() bool {
 	if !switched {
 		return false
 	}
+	// The message text is an external surface and is kept byte-for-byte. It
+	// names the Codex originator only as an example of what does not change:
+	// the transport never sets that header, so it is written out here rather
+	// than read from internal/codex/wire, and the message stays true for the
+	// Anthropic and DeepSeek legs that share this transport.
 	t.log.Warn("UPSTREAM BOT/TLS GATE DETECTED: switching to the uTLS (Chrome TLS fingerprint) transport for the rest of this process. "+
-		"Only the TLS handshake changes — the request identity stays honest (originator "+honestOriginator+", no forged browser headers). "+
+		"Only the TLS handshake changes — the request identity stays honest (originator codex_cli_rs, no forged browser headers). "+
 		"If this did not fix the gate, the block is not fingerprint-based; restart to return to the standard transport",
 		slog.String("from", KindStd),
 		slog.String("to", KindUTLS),

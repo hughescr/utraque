@@ -19,6 +19,7 @@ import (
 	"github.com/hughescr/utraque/internal/codex/auth"
 	"github.com/hughescr/utraque/internal/codex/schema"
 	"github.com/hughescr/utraque/internal/obs"
+	"github.com/hughescr/utraque/internal/proxyhdr"
 	"github.com/hughescr/utraque/internal/router"
 	"github.com/hughescr/utraque/internal/tokens"
 	"github.com/hughescr/utraque/internal/translate/stream"
@@ -107,11 +108,11 @@ func TestMessagesWithoutCredentialsIs503(t *testing.T) {
 	}
 	// The debug headers are set before anything is rendered, so they survive the
 	// dispatcher writing the envelope on the leg's behalf.
-	if got := w.Header().Get(HeaderRoute); got != "codex" {
-		t.Errorf("%s = %q, want codex", HeaderRoute, got)
+	if got := w.Header().Get(proxyhdr.Route); got != "codex" {
+		t.Errorf("%s = %q, want codex", proxyhdr.Route, got)
 	}
-	if got := w.Header().Get(HeaderModel); got != "gpt-5.6-sol" {
-		t.Errorf("%s = %q, want gpt-5.6-sol", HeaderModel, got)
+	if got := w.Header().Get(proxyhdr.Model); got != "gpt-5.6-sol" {
+		t.Errorf("%s = %q, want gpt-5.6-sol", proxyhdr.Model, got)
 	}
 }
 

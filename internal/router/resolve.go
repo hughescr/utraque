@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/hughescr/utraque/internal/apierr"
+	"github.com/hughescr/utraque/internal/deepseek/models"
 	"github.com/hughescr/utraque/internal/effort"
 )
 
@@ -43,19 +44,14 @@ func isAnthropicName(lower string) bool {
 // check in Resolve.
 const anthropicCompatPrefix = "anthropic-compat."
 
-// deepSeekModels is intentionally exact. DeepSeek's Anthropic-compatible API
-// silently maps unknown model names to deepseek-flash, which would make a typo
-// spend money on a different model. Utraque accepts only the documented names
-// and canonicalizes the two retired Flash aliases before the request leaves.
-var deepSeekModels = map[string]string{
-	"deepseek-flash":               "deepseek-flash",
-	"deepseek-v4-flash":            "deepseek-flash",
-	"deepseek-v4-flash-vision-exp": "deepseek-flash",
-	"deepseek-v4-pro":              "deepseek-v4-pro",
-}
-
+// resolveDeepSeek resolves an already-lowercased name against the DeepSeek
+// catalog, which is intentionally exact: DeepSeek's Anthropic-compatible API
+// silently maps unknown model names to deepseek-flash, which would make a
+// typo spend money on a different model. models.Canonical accepts only the
+// documented names and canonicalizes the retired Flash aliases before the
+// request leaves.
 func resolveDeepSeek(lower, clientModel string) (Decision, bool) {
-	upstream, ok := deepSeekModels[lower]
+	upstream, ok := models.Canonical(lower)
 	if !ok {
 		return Decision{}, false
 	}
@@ -273,6 +269,11 @@ func resolveCodex(reg *Registry, lower string, clientModel string) (Decision, bo
 // a model Resolve couldn't place in any backend, listing the accepted model
 // patterns so the caller can see what would have worked.
 func unknownModelError(reg *Registry, model string) error {
-	acceptedModelPatterns := append([]string{"claude-*", "anthropic-*", "deepseek-flash", "deepseek-v4-pro", "gpt-*"}, reg.BareAliases()...)
+	acceptedModelPatterns := []string{"claude-*", "anthropic-*"}
+	for _, m := range models.Models() {
+		acceptedModelPatterns = append(acceptedModelPatterns, m.ID)
+	}
+	acceptedModelPatterns = append(acceptedModelPatterns, "gpt-*")
+	acceptedModelPatterns = append(acceptedModelPatterns, reg.BareAliases()...)
 	return apierr.NotFound("model %q not recognised; known route families: %s", model, strings.Join(acceptedModelPatterns, ", "))
 }

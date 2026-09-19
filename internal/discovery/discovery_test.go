@@ -684,6 +684,41 @@ func TestDeepSeekRowsAppearOnlyWhenConfiguredAndSurviveRestart(t *testing.T) {
 	}
 }
 
+// TestDeepSeekPickerRowsAreStable pins the exact DeepSeek picker rows: the
+// ids, display names and routes are derived from internal/deepseek/models, and
+// the strings the client sees must not move when the catalog's shape does.
+func TestDeepSeekPickerRowsAreStable(t *testing.T) {
+	reg := router.NewRegistry()
+	h := mustHandler(t, discovery.Options{
+		CatalogMode: discovery.CatalogModeStatic,
+		DeepSeek:    true,
+		Registry:    reg,
+	})
+	resp := h.Models(t.Context(), testCred, anthropic.RequestOptions{})
+	want := []discovery.PickerRow{
+		{ID: "anthropic-compat.deepseek-flash", DisplayName: "DeepSeek V4.1 Flash", Type: "model"},
+		{ID: "anthropic-compat.deepseek-v4-pro", DisplayName: "DeepSeek V4 Pro 0813", Type: "model"},
+	}
+	var got []discovery.PickerRow
+	for _, row := range resp.Data {
+		if strings.Contains(row.ID, "deepseek") {
+			got = append(got, row)
+		}
+	}
+	if len(got) != len(want) {
+		t.Fatalf("DeepSeek rows = %+v, want %+v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("DeepSeek row %d = %+v, want %+v", i, got[i], want[i])
+		}
+		dec, err := router.ResolveWith(reg, want[i].ID, "")
+		if err != nil || dec.Backend != router.BackendDeepSeek || dec.UpstreamModel != strings.TrimPrefix(want[i].ID, "anthropic-compat.") {
+			t.Errorf("ResolveWith(%q) = %+v, %v", want[i].ID, dec, err)
+		}
+	}
+}
+
 // TestNoOneMRowIsEverEmitted pins down the removal of the long-context
 // picker-row feature across every catalog mode: given an upstream catalog
 // that carries no long-context row of its own, utraque never synthesizes one

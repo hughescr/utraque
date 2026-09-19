@@ -18,20 +18,12 @@ import (
 	"github.com/hughescr/utraque/internal/obs"
 )
 
-// Header names and well-known paths.
+// Header names and well-known paths. The X-Utraque-* names live in
+// internal/proxyhdr: the loopback secret is proxyhdr.LocalToken and the id
+// stamped on every response is proxyhdr.RequestID.
 const (
-	// LocalTokenHeader carries the optional loopback shared secret. It is a
-	// dedicated header so the client's Authorization header, which holds the
-	// user's Anthropic OAuth credential, passes through untouched.
-	LocalTokenHeader = "X-Utraque-Token"
-
 	// RequestIDHeader is honoured on inbound requests when it looks sane.
 	RequestIDHeader = obs.RequestIDHeader
-
-	// ResponseIDHeader is always set on our responses. It is distinct from
-	// RequestIDHeader so a passthrough response can still carry Anthropic's
-	// own X-Request-Id unmodified.
-	ResponseIDHeader = "X-Utraque-Request-Id"
 
 	// HealthPath is the local health endpoint.
 	HealthPath = "/healthz"

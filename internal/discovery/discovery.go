@@ -209,7 +209,8 @@ func (h *Handler) Models(ctx context.Context, cred anthropic.Credential, options
 	}()
 	wg.Wait()
 
-	rows := make([]PickerRow, 0, len(anthModels)+len(codexList)*2+len(deepSeekPickerModels))
+	deepSeekRows := deepSeekPickerModels()
+	rows := make([]PickerRow, 0, len(anthModels)+len(codexList)*2+len(deepSeekRows))
 	routes := make(map[string]router.PickerRoute)
 	seen := make(map[string]struct{})
 
@@ -250,7 +251,7 @@ func (h *Handler) Models(ctx context.Context, cred anthropic.Credential, options
 	}
 
 	if h.deepseek {
-		for _, m := range deepSeekPickerModels {
+		for _, m := range deepSeekRows {
 			add(m.model, m.route, true)
 		}
 	}

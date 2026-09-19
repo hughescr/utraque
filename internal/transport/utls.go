@@ -19,8 +19,9 @@ import (
 // The uTLS transport exists for exactly one failure mode: Cloudflare deciding
 // that a stock Go TLS ClientHello is a bot and answering chatgpt.com's Codex
 // backend with a challenge page instead of the API. Nothing about the request
-// changes — the originator stays codex_cli_rs, no browser User-Agent is
-// invented, no cookie is forged. Only the shape of the TLS handshake changes.
+// changes — the leg's own identity headers are sent as-is, no browser
+// User-Agent is invented, no cookie is forged. Only the shape of the TLS
+// handshake changes.
 //
 // It is NOT the default. The std transport works today, it is the one whose
 // semantics the rest of the proxy was built and verified against, and a

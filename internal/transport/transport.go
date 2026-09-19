@@ -10,8 +10,9 @@
 //   - NewAuto — std until a gate is reported, uTLS from then on, once.
 //
 // Only the TLS handshake ever differs. No implementation invents a browser
-// User-Agent, a cookie, or any other header: the request identity stays the
-// honest codex_cli_rs originator the Codex CLI itself sends.
+// User-Agent, a cookie, or any other header: the request identity is whatever
+// the leg that owns the request sends (for Codex, internal/codex/wire), and
+// the transport never asserts or alters it.
 package transport
 
 import (
@@ -47,11 +48,6 @@ const (
 	// answers with a bot/TLS gate. This is the default.
 	ModeAuto = "auto"
 )
-
-// honestOriginator is the client identity the Codex leg sends. It is named in
-// the auto-switch warning to make the scope of the switch explicit: uTLS
-// changes the TLS handshake and nothing else.
-const honestOriginator = "codex_cli_rs"
 
 // New builds the transport named by mode. An empty mode is ModeAuto.
 //

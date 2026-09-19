@@ -14,6 +14,7 @@ import (
 	"github.com/hughescr/utraque/internal/leg"
 	"github.com/hughescr/utraque/internal/providerquota"
 	"github.com/hughescr/utraque/internal/providerreport"
+	"github.com/hughescr/utraque/internal/proxyhdr"
 	"github.com/hughescr/utraque/internal/referenceprice"
 	"github.com/hughescr/utraque/internal/server"
 	"github.com/hughescr/utraque/internal/usagehistory"
@@ -91,7 +92,7 @@ func TestProductionReportCompositionUsesAllInjectedSources(t *testing.T) {
 	}
 	r := httptest.NewRequest(http.MethodGet, server.ProviderReportPath, nil)
 	r.RemoteAddr = "127.0.0.1:4000"
-	r.Header.Set(server.LocalTokenHeader, cfg.LocalToken)
+	r.Header.Set(proxyhdr.LocalToken, cfg.LocalToken)
 	r.Header.Set("Authorization", "Bearer caller-token")
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, r)

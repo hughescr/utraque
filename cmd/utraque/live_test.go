@@ -56,6 +56,7 @@ import (
 	"github.com/hughescr/utraque/internal/codex/schema"
 	"github.com/hughescr/utraque/internal/config"
 	"github.com/hughescr/utraque/internal/obs"
+	"github.com/hughescr/utraque/internal/proxyhdr"
 	"github.com/hughescr/utraque/internal/server"
 	"github.com/hughescr/utraque/internal/sse"
 	"github.com/hughescr/utraque/internal/translate/stream"
@@ -253,7 +254,7 @@ func (e *liveEnv) post(t *testing.T, body string, set func(http.Header)) *http.R
 // test works on a machine set up the way the README recommends.
 func (e *liveEnv) setHeaders(h http.Header) {
 	if e.cfg.HasLocalToken() {
-		h.Set(server.LocalTokenHeader, e.cfg.LocalToken)
+		h.Set(proxyhdr.LocalToken, e.cfg.LocalToken)
 	}
 }
 

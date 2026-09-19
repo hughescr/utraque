@@ -4,8 +4,19 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hughescr/utraque/internal/codex/wire"
 	"github.com/hughescr/utraque/internal/config"
 )
+
+// TestDefaultCodexBaseURLMatchesWire pins config's copy of the Codex backend
+// root to the one home in internal/codex/wire. config deliberately imports no
+// internal package, so the value is restated there and this test is what
+// keeps the two in step.
+func TestDefaultCodexBaseURLMatchesWire(t *testing.T) {
+	if config.DefaultCodexBaseURL != wire.DefaultBaseURL {
+		t.Errorf("config.DefaultCodexBaseURL = %q, want wire.DefaultBaseURL %q", config.DefaultCodexBaseURL, wire.DefaultBaseURL)
+	}
+}
 
 // envOnly builds a getenv that answers only the given keys, so a test never
 // reads the developer's real environment.

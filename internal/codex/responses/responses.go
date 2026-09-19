@@ -42,23 +42,20 @@ import (
 	"github.com/hughescr/utraque/internal/apierr"
 	"github.com/hughescr/utraque/internal/codex/auth"
 	"github.com/hughescr/utraque/internal/codex/schema"
+	"github.com/hughescr/utraque/internal/codex/wire"
 	"github.com/hughescr/utraque/internal/obs"
 	"github.com/hughescr/utraque/internal/transport"
 )
 
-// Wire constants. The header set is exactly what the Codex CLI sends; the
-// originator stays honestly `codex_cli_rs` rather than impersonating a browser.
+// Wire constants. The backend root and the Codex CLI identity headers come
+// from internal/codex/wire, so the set sent here is exactly the one the
+// catalog client sends; the rest are the ordinary HTTP names this endpoint
+// needs.
 const (
-	// DefaultBaseURL is the Codex backend root. Override in tests to point at
-	// an httptest server; the real host is never contacted by the test suite.
-	DefaultBaseURL = "https://chatgpt.com/backend-api/codex"
 	// Path is the responses endpoint under the base URL.
 	Path = "/responses"
 
 	headerAuthorization = "Authorization"
-	headerAccountID     = "chatgpt-account-id"
-	headerOpenAIBeta    = "OpenAI-Beta"
-	headerOriginator    = "originator"
 	headerContentType   = "Content-Type"
 	headerAccept        = "Accept"
 	headerSessionID     = "session_id"
@@ -67,8 +64,6 @@ const (
 	// mints. Only a key carrying it can name a conversation here.
 	promptCacheKeyPrefix = "utq-"
 
-	openAIBetaValue = "responses=experimental"
-	originatorValue = "codex_cli_rs"
 	acceptSSE       = "text/event-stream"
 	contentTypeJSON = "application/json"
 
@@ -83,7 +78,7 @@ const (
 
 // Options configures a Client. Every field is optional.
 type Options struct {
-	// BaseURL is the Codex backend root. Defaults to DefaultBaseURL.
+	// BaseURL is the Codex backend root. Defaults to wire.DefaultBaseURL.
 	BaseURL string
 	// Transport supplies the HTTP client. Defaults to the standard no-redirect
 	// transport. A redirect is never followed: it would replay the caller's
@@ -137,7 +132,7 @@ func New(opts Options) *Client {
 		log:          opts.Logger,
 	}
 	if c.baseURL == "" {
-		c.baseURL = DefaultBaseURL
+		c.baseURL = wire.DefaultBaseURL
 	}
 	if c.maxErrorBody <= 0 {
 		c.maxErrorBody = defaultMaxErrorBody
@@ -215,9 +210,9 @@ func (c *Client) StreamResponse(ctx context.Context, cred auth.Credential, req *
 		return nil, apierr.Wrap(err, apierr.TypeAPI, "codex responses: build request")
 	}
 	httpReq.Header.Set(headerAuthorization, "Bearer "+cred.AccessToken)
-	httpReq.Header.Set(headerAccountID, cred.AccountID)
-	httpReq.Header.Set(headerOpenAIBeta, openAIBetaValue)
-	httpReq.Header.Set(headerOriginator, originatorValue)
+	httpReq.Header.Set(wire.HeaderAccountID, cred.AccountID)
+	httpReq.Header.Set(wire.HeaderOpenAIBeta, wire.OpenAIBetaValue)
+	httpReq.Header.Set(wire.HeaderOriginator, wire.Originator)
 	httpReq.Header.Set(headerContentType, contentTypeJSON)
 	httpReq.Header.Set(headerAccept, acceptSSE)
 	if sid := sessionID(req.PromptCacheKey); sid != "" {

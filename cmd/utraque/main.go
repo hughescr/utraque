@@ -33,6 +33,7 @@ import (
 	"github.com/hughescr/utraque/internal/codex/schema"
 	"github.com/hughescr/utraque/internal/config"
 	"github.com/hughescr/utraque/internal/deepseek"
+	dsmodels "github.com/hughescr/utraque/internal/deepseek/models"
 	"github.com/hughescr/utraque/internal/discovery"
 	"github.com/hughescr/utraque/internal/idle"
 	"github.com/hughescr/utraque/internal/launchd"
@@ -557,7 +558,9 @@ func eligibleReferencePriceModels(cfg config.Config, id leg.ID) []string {
 		}
 	case leg.DeepSeek:
 		if cfg.DeepSeek.Configured() {
-			models = append(models, "deepseek-flash", "deepseek-v4-pro")
+			for _, m := range dsmodels.Models() {
+				models = append(models, m.ID)
+			}
 		}
 	}
 	return models

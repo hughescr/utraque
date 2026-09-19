@@ -18,9 +18,9 @@ import (
 	"time"
 
 	"github.com/hughescr/utraque/internal/apierr"
-	"github.com/hughescr/utraque/internal/codex/leg"
 	"github.com/hughescr/utraque/internal/config"
 	"github.com/hughescr/utraque/internal/obs"
+	"github.com/hughescr/utraque/internal/proxyhdr"
 	"github.com/hughescr/utraque/internal/router"
 	"github.com/hughescr/utraque/internal/sse"
 )
@@ -420,8 +420,8 @@ func TestCodexStreamingProducesAnthropicSSE(t *testing.T) {
 		"Content-Type":      "text/event-stream",
 		"Cache-Control":     "no-cache",
 		"X-Accel-Buffering": "no",
-		leg.HeaderRoute:     "codex",
-		leg.HeaderModel:     "gpt-5.6-sol",
+		proxyhdr.Route:      "codex",
+		proxyhdr.Model:      "gpt-5.6-sol",
 	} {
 		if got := resp.Header.Get(header); got != want {
 			t.Errorf("%s = %q, want %q", header, got, want)
@@ -622,8 +622,8 @@ func TestCodexNonStreamingReturnsMessagesResponse(t *testing.T) {
 	if got := resp.Header.Get("Content-Type"); got != "application/json" {
 		t.Errorf("Content-Type = %q, want application/json", got)
 	}
-	if got := resp.Header.Get(leg.HeaderRoute); got != "codex" {
-		t.Errorf("%s = %q, want codex", leg.HeaderRoute, got)
+	if got := resp.Header.Get(proxyhdr.Route); got != "codex" {
+		t.Errorf("%s = %q, want codex", proxyhdr.Route, got)
 	}
 
 	raw, err := io.ReadAll(resp.Body)
@@ -749,8 +749,8 @@ func TestCodex429SurfacesRetryAfter(t *testing.T) {
 	if got := resp.Header.Get("x-codex-primary-used-percent"); got != "97.5" {
 		t.Errorf("x-codex-primary-used-percent = %q, want 97.5 forwarded", got)
 	}
-	if got := resp.Header.Get(leg.HeaderModel); got != "gpt-5.6-sol" {
-		t.Errorf("%s = %q, want gpt-5.6-sol", leg.HeaderModel, got)
+	if got := resp.Header.Get(proxyhdr.Model); got != "gpt-5.6-sol" {
+		t.Errorf("%s = %q, want gpt-5.6-sol", proxyhdr.Model, got)
 	}
 	ev := decodeEnvelope(t, resp)
 	if ev.Error.Type != string(apierr.TypeRateLimit) {
@@ -1024,8 +1024,8 @@ func TestCountTokensOnBothLegs(t *testing.T) {
 		if resp.StatusCode != http.StatusOK {
 			t.Fatalf("status = %d, want 200", resp.StatusCode)
 		}
-		if got := resp.Header.Get(leg.HeaderRoute); got != "codex" {
-			t.Errorf("%s = %q, want codex", leg.HeaderRoute, got)
+		if got := resp.Header.Get(proxyhdr.Route); got != "codex" {
+			t.Errorf("%s = %q, want codex", proxyhdr.Route, got)
 		}
 		var out struct {
 			InputTokens int `json:"input_tokens"`
@@ -1048,8 +1048,8 @@ func TestCountTokensOnBothLegs(t *testing.T) {
 		if resp.StatusCode != http.StatusOK {
 			t.Fatalf("status = %d, want 200", resp.StatusCode)
 		}
-		if got := resp.Header.Get(leg.HeaderRoute); got != "" {
-			t.Errorf("%s = %q, want it absent on the Anthropic leg", leg.HeaderRoute, got)
+		if got := resp.Header.Get(proxyhdr.Route); got != "" {
+			t.Errorf("%s = %q, want it absent on the Anthropic leg", proxyhdr.Route, got)
 		}
 		if env.anthropicHits.Load() != before+1 {
 			t.Error("the claude count_tokens request did not reach the Anthropic upstream")
@@ -1103,8 +1103,8 @@ func TestClaudeLegUnchangedWithCodexWired(t *testing.T) {
 		t.Errorf("upstream anthropic-beta = %q, want two separate values preserved", got)
 	}
 	// The Codex leg must leave no trace on an Anthropic-routed request.
-	if got := resp.Header.Get(leg.HeaderRoute); got != "" {
-		t.Errorf("%s = %q, want it absent on the Anthropic leg", leg.HeaderRoute, got)
+	if got := resp.Header.Get(proxyhdr.Route); got != "" {
+		t.Errorf("%s = %q, want it absent on the Anthropic leg", proxyhdr.Route, got)
 	}
 	if n := env.codex.calls.Load(); n != 0 {
 		t.Errorf("the codex backend was contacted %d times for a claude request, want 0", n)

@@ -13,6 +13,7 @@ import (
 
 	"github.com/hughescr/utraque/internal/apierr"
 	"github.com/hughescr/utraque/internal/obs"
+	"github.com/hughescr/utraque/internal/proxyhdr"
 )
 
 // maxRequestIDLen bounds a caller-supplied request id.
@@ -24,7 +25,7 @@ func (s *Server) withRequestID(next http.Handler) http.Handler {
 		if id == "" {
 			id = newRequestID()
 		}
-		w.Header().Set(ResponseIDHeader, id)
+		w.Header().Set(proxyhdr.RequestID, id)
 		ctx := obs.WithRequestID(r.Context(), id)
 		ctx = obs.WithLogger(ctx, s.log.With(slog.String("request_id", id)))
 		next.ServeHTTP(w, r.WithContext(ctx))
@@ -232,7 +233,7 @@ func (s *Server) withAuth(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		got := []byte(r.Header.Get(LocalTokenHeader))
+		got := []byte(r.Header.Get(proxyhdr.LocalToken))
 		if subtle.ConstantTimeCompare(got, want) != 1 {
 			ctx := r.Context()
 			obs.LoggerFrom(ctx).LogAttrs(context.WithoutCancel(ctx), slog.LevelWarn,
@@ -241,7 +242,7 @@ func (s *Server) withAuth(next http.Handler) http.Handler {
 				slog.Bool("presented", len(got) > 0),
 			)
 			_ = apierr.Write(w, apierr.Authentication(
-				"missing or invalid %s header", LocalTokenHeader))
+				"missing or invalid %s header", proxyhdr.LocalToken))
 			return
 		}
 		next.ServeHTTP(w, r)

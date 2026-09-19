@@ -8,6 +8,7 @@ import (
 
 	"github.com/hughescr/utraque/internal/anthropic/schema"
 	"github.com/hughescr/utraque/internal/apierr"
+	"github.com/hughescr/utraque/internal/deepseek/models"
 	"github.com/hughescr/utraque/internal/sse"
 	"github.com/hughescr/utraque/internal/toolschema"
 )
@@ -219,8 +220,8 @@ func rewriteContentValue(raw json.RawMessage, canonical, field string, toolSchem
 				return nil, false, apierr.InvalidRequest("deepseek ignores text-block citations")
 			}
 		case "image":
-			if canonical == "deepseek-v4-pro" {
-				return nil, false, apierr.InvalidRequest("deepseek-v4-pro does not support image content")
+			if m, ok := models.Lookup(canonical); ok && !m.SupportsImages {
+				return nil, false, apierr.InvalidRequest("%s does not support image content", m.ID)
 			}
 		case "tool_result":
 			if isErrorRaw, hasIsError := block["is_error"]; hasIsError {
@@ -426,7 +427,7 @@ func responseModel(raw json.RawMessage, requested string) (string, error) {
 			return "", fmt.Errorf("response model is not a string")
 		}
 	}
-	servedCanonical, known := canonicalResponseModel(served)
+	servedCanonical, known := models.Canonical(served)
 	if !known {
 		return requested, nil
 	}
@@ -434,17 +435,6 @@ func responseModel(raw json.RawMessage, requested string) (string, error) {
 		return "", fmt.Errorf("deepseek served model %q contradicts requested model %q", served, requested)
 	}
 	return servedCanonical, nil
-}
-
-func canonicalResponseModel(model string) (string, bool) {
-	switch model {
-	case "deepseek-flash", "deepseek-v4-flash", "deepseek-v4-flash-vision-exp":
-		return "deepseek-flash", true
-	case "deepseek-v4-pro":
-		return "deepseek-v4-pro", true
-	default:
-		return "", false
-	}
 }
 
 func errorsForResponse(err error) error {

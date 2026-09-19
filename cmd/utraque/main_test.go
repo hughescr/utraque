@@ -22,6 +22,7 @@ import (
 	"github.com/hughescr/utraque/internal/apierr"
 	"github.com/hughescr/utraque/internal/config"
 	"github.com/hughescr/utraque/internal/obs"
+	"github.com/hughescr/utraque/internal/proxyhdr"
 	"github.com/hughescr/utraque/internal/server"
 )
 
@@ -156,8 +157,8 @@ func TestClaudeMessagesForwardedVerbatim(t *testing.T) {
 	if got := resp.Header.Get("Anthropic-Ratelimit-Requests-Remaining"); got != "42" {
 		t.Errorf("relayed rate-limit header = %q, want 42", got)
 	}
-	if got := resp.Header.Get(server.ResponseIDHeader); got == "" {
-		t.Errorf("missing %s on the response", server.ResponseIDHeader)
+	if got := resp.Header.Get(proxyhdr.RequestID); got == "" {
+		t.Errorf("missing %s on the response", proxyhdr.RequestID)
 	}
 }
 
@@ -534,7 +535,7 @@ func TestLocalTokenIsNotForwardedThroughTheFrontDoor(t *testing.T) {
 	var gotToken atomic.Value
 	gotToken.Store("")
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotToken.Store(r.Header.Get(server.LocalTokenHeader))
+		gotToken.Store(r.Header.Get(proxyhdr.LocalToken))
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer upstream.Close()
@@ -552,14 +553,14 @@ func TestLocalTokenIsNotForwardedThroughTheFrontDoor(t *testing.T) {
 
 	resp := post(t, front.URL+"/v1/messages",
 		`{"model":"claude-opus-4-20250514","max_tokens":8,"messages":[]}`,
-		func(h http.Header) { h.Set(server.LocalTokenHeader, secret) })
+		func(h http.Header) { h.Set(proxyhdr.LocalToken, secret) })
 
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (the token should have authenticated us)", resp.StatusCode)
 	}
 	if got := gotToken.Load().(string); got != "" {
 		t.Errorf("upstream received %s = %q; the local credential must stop at the proxy",
-			server.LocalTokenHeader, got)
+			proxyhdr.LocalToken, got)
 	}
 }
 

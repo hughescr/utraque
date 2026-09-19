@@ -18,6 +18,7 @@ import (
 	"github.com/hughescr/utraque/internal/codex/auth"
 	"github.com/hughescr/utraque/internal/codex/catalog"
 	"github.com/hughescr/utraque/internal/codex/schema"
+	"github.com/hughescr/utraque/internal/codex/wire"
 	"github.com/hughescr/utraque/internal/router"
 )
 
@@ -647,8 +648,8 @@ func TestModelsReturnsDeepCopiedReasoningLevels(t *testing.T) {
 // TestDefaultBaseURLIsCodexAndNoNetworkOnConstruction documents that the real
 // endpoint is the default, and that constructing a client touches no network.
 func TestDefaultBaseURLIsCodexAndNoNetworkOnConstruction(t *testing.T) {
-	if catalog.DefaultBaseURL != "https://chatgpt.com/backend-api/codex" {
-		t.Errorf("DefaultBaseURL = %q", catalog.DefaultBaseURL)
+	if wire.DefaultBaseURL != "https://chatgpt.com/backend-api/codex" {
+		t.Errorf("wire.DefaultBaseURL = %q", wire.DefaultBaseURL)
 	}
 	// No BaseURL override, but we never call Models, so no request is made.
 	c := catalog.New(catalog.Options{Now: newClock().now})

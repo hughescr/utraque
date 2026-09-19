@@ -18,6 +18,7 @@ import (
 	"github.com/hughescr/utraque/internal/apierr"
 	"github.com/hughescr/utraque/internal/codex/auth"
 	"github.com/hughescr/utraque/internal/codex/schema"
+	"github.com/hughescr/utraque/internal/codex/wire"
 )
 
 // Every test in this file talks to an httptest fake upstream and uses a
@@ -1044,8 +1045,8 @@ func TestErrorBodyReadIsBounded(t *testing.T) {
 
 func TestNewDefaults(t *testing.T) {
 	c := New(Options{})
-	if c.baseURL != DefaultBaseURL {
-		t.Errorf("baseURL = %q, want %q", c.baseURL, DefaultBaseURL)
+	if c.baseURL != wire.DefaultBaseURL {
+		t.Errorf("baseURL = %q, want %q", c.baseURL, wire.DefaultBaseURL)
 	}
 	if c.http == nil {
 		t.Fatal("no HTTP client")

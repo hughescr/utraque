@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/hughescr/utraque/internal/apierr"
-	"github.com/hughescr/utraque/internal/server"
+	"github.com/hughescr/utraque/internal/proxyhdr"
 	"github.com/hughescr/utraque/internal/transport"
 )
 
@@ -470,7 +470,7 @@ func TestLocalTokenHeaderIsNotForwardedUpstream(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new request: %v", err)
 	}
-	req.Header.Set(localTokenHeader, "SUPER-SECRET-LOCAL-TOKEN")
+	req.Header.Set(proxyhdr.LocalToken, "SUPER-SECRET-LOCAL-TOKEN")
 	req.Header.Set("Authorization", "Bearer keep-me")
 
 	resp, err := noRedirectClient().Do(req)
@@ -480,21 +480,11 @@ func TestLocalTokenHeaderIsNotForwardedUpstream(t *testing.T) {
 	defer resp.Body.Close()
 
 	got := cap.snapshot()
-	if v := got.header.Values(localTokenHeader); len(v) != 0 {
-		t.Errorf("%s leaked upstream as %q", localTokenHeader, v)
+	if v := got.header.Values(proxyhdr.LocalToken); len(v) != 0 {
+		t.Errorf("%s leaked upstream as %q", proxyhdr.LocalToken, v)
 	}
 	if v := got.header.Get("Authorization"); v != "Bearer keep-me" {
 		t.Errorf("Authorization = %q, want it forwarded verbatim", v)
-	}
-}
-
-// TestLocalHeaderNamesMatchServer keeps the duplicated constants honest.
-func TestLocalHeaderNamesMatchServer(t *testing.T) {
-	if localTokenHeader != server.LocalTokenHeader {
-		t.Errorf("localTokenHeader = %q, want server.LocalTokenHeader %q", localTokenHeader, server.LocalTokenHeader)
-	}
-	if responseIDHeader != server.ResponseIDHeader {
-		t.Errorf("responseIDHeader = %q, want server.ResponseIDHeader %q", responseIDHeader, server.ResponseIDHeader)
 	}
 }
 
@@ -502,14 +492,14 @@ func TestLocalHeaderNamesMatchServer(t *testing.T) {
 // in our logs must be the same one.
 func TestUpstreamCannotOverwriteProxyRequestID(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set(responseIDHeader, "upstream-forged-id")
+		w.Header().Set(proxyhdr.RequestID, "upstream-forged-id")
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer upstream.Close()
 
 	leg := newTestLeg(t, upstream.URL)
 	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set(responseIDHeader, "proxy-minted-id")
+		w.Header().Set(proxyhdr.RequestID, "proxy-minted-id")
 		leg.ServeHTTP(w, r)
 	}))
 	defer proxy.Close()
@@ -520,8 +510,8 @@ func TestUpstreamCannotOverwriteProxyRequestID(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
-	if got := resp.Header.Get(responseIDHeader); got != "proxy-minted-id" {
-		t.Errorf("%s = %q, want the proxy's own id", responseIDHeader, got)
+	if got := resp.Header.Get(proxyhdr.RequestID); got != "proxy-minted-id" {
+		t.Errorf("%s = %q, want the proxy's own id", proxyhdr.RequestID, got)
 	}
 }
 
