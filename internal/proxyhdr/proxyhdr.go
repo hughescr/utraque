@@ -26,16 +26,17 @@ const (
 	// unmodified.
 	RequestID = "X-Utraque-Request-Id"
 
-	// Route names the leg that served the request. The Codex leg sets it;
-	// its absence on an Anthropic response is part of that leg's contract.
+	// Route names the leg that served the request. The Codex and DeepSeek legs
+	// set it; its absence on an Anthropic response is part of that leg's
+	// passthrough contract.
 	Route = "X-Utraque-Route"
 
 	// Model names the upstream slug the request was translated to. The Codex
-	// leg sets it beside Route.
+	// and DeepSeek legs set it beside Route.
 	Model = "X-Utraque-Model"
 
 	// TokenCountMethod says how a /count_tokens result was obtained when it
-	// is a local estimate rather than an upstream count. The DeepSeek leg
-	// sets it.
+	// is a local estimate rather than an upstream count. The DeepSeek and
+	// Codex legs set it.
 	TokenCountMethod = "X-Utraque-Token-Count-Method"
 )

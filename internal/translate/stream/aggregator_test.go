@@ -12,6 +12,7 @@ import (
 
 	"github.com/hughescr/utraque/internal/anthropic/schema"
 	"github.com/hughescr/utraque/internal/apierr"
+	"github.com/hughescr/utraque/internal/translate/fixtures"
 	"github.com/hughescr/utraque/internal/translate/stream"
 )
 
@@ -51,7 +52,7 @@ func TestAggregatorEqualsSSEFold(t *testing.T) {
 			if err != nil {
 				t.Fatalf("read: %v", err)
 			}
-			golden, err := os.ReadFile(filepath.Join(streamsDir, name+".anthropic.sse"))
+			golden, err := os.ReadFile(filepath.Join(streamsDir, name+fixtures.StreamGoldenSuffix))
 			if err != nil {
 				t.Fatalf("read golden: %v", err)
 			}
@@ -122,7 +123,7 @@ func TestAggregatorFoldsCleanFixtures(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.fixture, func(t *testing.T) {
-			raw, err := os.ReadFile(filepath.Join(streamsDir, c.fixture+".codex.sse"))
+			raw, err := os.ReadFile(filepath.Join(streamsDir, c.fixture+fixtures.StreamInputSuffix))
 			if err != nil {
 				t.Fatalf("read: %v", err)
 			}
@@ -140,7 +141,7 @@ func TestAggregatorFoldsCleanFixtures(t *testing.T) {
 // TestAggregatorOrdersBlocksAndKeepsThinking confirms multi-block folds keep
 // block order and carry the thinking text plus its synthetic signature.
 func TestAggregatorOrdersBlocksAndKeepsThinking(t *testing.T) {
-	raw, err := os.ReadFile(filepath.Join(streamsDir, "reasoning_and_text.codex.sse"))
+	raw, err := os.ReadFile(filepath.Join(streamsDir, "reasoning_and_text"+fixtures.StreamInputSuffix))
 	if err != nil {
 		t.Fatalf("read: %v", err)
 	}
@@ -176,7 +177,7 @@ func TestAggregatorOrdersBlocksAndKeepsThinking(t *testing.T) {
 // TestAggregatorTwoInterleavedTools confirms parallel items that arrive
 // interleaved fold into two ordered, individually valid tool_use blocks.
 func TestAggregatorTwoInterleavedTools(t *testing.T) {
-	raw, err := os.ReadFile(filepath.Join(streamsDir, "two_interleaved_tools.codex.sse"))
+	raw, err := os.ReadFile(filepath.Join(streamsDir, "two_interleaved_tools"+fixtures.StreamInputSuffix))
 	if err != nil {
 		t.Fatalf("read: %v", err)
 	}
@@ -217,7 +218,7 @@ func TestAggregatorTwoInterleavedTools(t *testing.T) {
 func TestAggregatorErrorPathSurfacesError(t *testing.T) {
 	for _, fixture := range []string{"midstream_error", "response_failed", "truncated_stream"} {
 		t.Run(fixture, func(t *testing.T) {
-			raw, err := os.ReadFile(filepath.Join(streamsDir, fixture+".codex.sse"))
+			raw, err := os.ReadFile(filepath.Join(streamsDir, fixture+fixtures.StreamInputSuffix))
 			if err != nil {
 				t.Fatalf("read: %v", err)
 			}
@@ -374,7 +375,7 @@ func TestAggregatorPingIsIgnored(t *testing.T) {
 func TestAggregatorMidStreamFailureIs502(t *testing.T) {
 	for _, fixture := range []string{"midstream_error", "response_failed", "truncated_stream"} {
 		t.Run(fixture, func(t *testing.T) {
-			raw, err := os.ReadFile(filepath.Join(streamsDir, fixture+".codex.sse"))
+			raw, err := os.ReadFile(filepath.Join(streamsDir, fixture+fixtures.StreamInputSuffix))
 			if err != nil {
 				t.Fatalf("read: %v", err)
 			}

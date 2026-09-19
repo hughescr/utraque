@@ -119,6 +119,12 @@ func TestMessagesOwnsCredentialAndCanonicalizesLegacyFlash(t *testing.T) {
 	if responseModel != "deepseek-flash" {
 		t.Errorf("response model = %q, want canonical deepseek-flash", responseModel)
 	}
+	if got := rec.Header().Get(proxyhdr.Route); got != string(router.BackendDeepSeek) {
+		t.Errorf("%s = %q, want %q", proxyhdr.Route, got, router.BackendDeepSeek)
+	}
+	if got := rec.Header().Get(proxyhdr.Model); got != "deepseek-flash" {
+		t.Errorf("%s = %q, want rewritten upstream model", proxyhdr.Model, got)
+	}
 }
 
 type followingTransport struct{ client *http.Client }

@@ -21,10 +21,11 @@ import (
 	"github.com/hughescr/utraque/internal/apierr"
 	"github.com/hughescr/utraque/internal/sse"
 	"github.com/hughescr/utraque/internal/synthetic"
+	"github.com/hughescr/utraque/internal/translate/fixtures"
 	"github.com/hughescr/utraque/internal/translate/stream"
 )
 
-// -update regenerates the *.anthropic.sse golden files from the current
+// -update regenerates the stream golden files from the current
 // translator output. The simplest goldens (text_only, one_tool_call) are
 // hand-verified against the Anthropic streaming spec and are ground truth;
 // commit with goldens fixed:
@@ -63,7 +64,7 @@ func runToBytes(t *testing.T, input []byte, opts stream.Options) ([]byte, stream
 
 func fixtureInputs(t *testing.T) []string {
 	t.Helper()
-	inputs, err := filepath.Glob(filepath.Join(streamsDir, "*.codex.sse"))
+	inputs, err := filepath.Glob(filepath.Join(streamsDir, "*"+fixtures.StreamInputSuffix))
 	if err != nil {
 		t.Fatalf("glob: %v", err)
 	}
@@ -74,7 +75,7 @@ func fixtureInputs(t *testing.T) []string {
 }
 
 func caseName(path string) string {
-	return strings.TrimSuffix(filepath.Base(path), ".codex.sse")
+	return strings.TrimSuffix(filepath.Base(path), fixtures.StreamInputSuffix)
 }
 
 // TestGolden runs every fixture and compares its Anthropic SSE output against
@@ -95,7 +96,7 @@ func TestGolden(t *testing.T) {
 			// The emitted stream must itself satisfy the grammar invariants.
 			checkGrammar(t, got)
 
-			goldenPath := filepath.Join(streamsDir, name+".anthropic.sse")
+			goldenPath := filepath.Join(streamsDir, name+fixtures.StreamGoldenSuffix)
 			if *update {
 				if err := os.WriteFile(goldenPath, got, 0o644); err != nil {
 					t.Fatalf("write golden: %v", err)
@@ -238,7 +239,7 @@ func TestNothingEmittedSignalsMode1(t *testing.T) {
 // TestReasoningDropMode confirms emit_reasoning=drop suppresses thinking blocks
 // entirely while the text answer still streams.
 func TestReasoningDropMode(t *testing.T) {
-	raw, err := os.ReadFile(filepath.Join(streamsDir, "reasoning_and_text.codex.sse"))
+	raw, err := os.ReadFile(filepath.Join(streamsDir, "reasoning_and_text"+fixtures.StreamInputSuffix))
 	if err != nil {
 		t.Fatalf("read: %v", err)
 	}
@@ -260,7 +261,7 @@ func TestReasoningDropMode(t *testing.T) {
 // TestOnTruncateFinish confirms on_truncate=finish synthesises a clean terminus
 // on a truncated stream instead of an error frame.
 func TestOnTruncateFinish(t *testing.T) {
-	raw, err := os.ReadFile(filepath.Join(streamsDir, "truncated_stream.codex.sse"))
+	raw, err := os.ReadFile(filepath.Join(streamsDir, "truncated_stream"+fixtures.StreamInputSuffix))
 	if err != nil {
 		t.Fatalf("read: %v", err)
 	}
@@ -557,7 +558,7 @@ func TestSinkFoldEquivalence(t *testing.T) {
 // TestSyntheticSignatureMarker confirms the reasoning close carries the fixed
 // marker the Anthropic-leg sanitizer strips.
 func TestSyntheticSignatureMarker(t *testing.T) {
-	raw, err := os.ReadFile(filepath.Join(streamsDir, "reasoning_and_text.codex.sse"))
+	raw, err := os.ReadFile(filepath.Join(streamsDir, "reasoning_and_text"+fixtures.StreamInputSuffix))
 	if err != nil {
 		t.Fatalf("read: %v", err)
 	}
@@ -573,7 +574,7 @@ func TestSyntheticSignatureMarker(t *testing.T) {
 
 // TestUnknownEventCounts confirms unknown event types are counted per type.
 func TestUnknownEventCounts(t *testing.T) {
-	raw, err := os.ReadFile(filepath.Join(streamsDir, "unknown_events.codex.sse"))
+	raw, err := os.ReadFile(filepath.Join(streamsDir, "unknown_events"+fixtures.StreamInputSuffix))
 	if err != nil {
 		t.Fatalf("read: %v", err)
 	}
@@ -1064,7 +1065,7 @@ func TestTerminalUsageAnthropicSemantics(t *testing.T) {
 // client keeps an unsigned thinking block, the Anthropic-leg sanitizer cannot
 // classify it, and the next turn on a Claude model is rejected with a 400.
 func TestMidStreamErrorSignsAnOpenThinkingBlock(t *testing.T) {
-	raw, err := os.ReadFile(filepath.Join(streamsDir, "midstream_error_in_thinking.codex.sse"))
+	raw, err := os.ReadFile(filepath.Join(streamsDir, "midstream_error_in_thinking"+fixtures.StreamInputSuffix))
 	if err != nil {
 		t.Fatalf("read: %v", err)
 	}

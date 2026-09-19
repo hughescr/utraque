@@ -13,10 +13,11 @@ import (
 	"github.com/hughescr/utraque/internal/codex/schema"
 	"github.com/hughescr/utraque/internal/effort"
 	"github.com/hughescr/utraque/internal/router"
+	"github.com/hughescr/utraque/internal/translate/fixtures"
 	"github.com/hughescr/utraque/internal/translate/request"
 )
 
-// -update regenerates the *.responses.golden.json files from the current
+// -update regenerates the request golden files from the current
 // translator output. Commit with goldens fixed:
 //
 //	go test ./internal/translate/request -run TestGolden -update
@@ -86,7 +87,7 @@ func defaultCase() caseCfg {
 }
 
 // caseConfigs overrides the default per-fixture. The keys are fixture basenames
-// (without the .anthropic.json suffix).
+// (without the .anthropic.input.json suffix).
 var caseConfigs = map[string]caseCfg{
 	"effort_suffix": {
 		dec:   router.Decision{Backend: router.BackendCodex, UpstreamModel: "gpt-5.6-sol", Effort: effort.High, EffortSource: router.EffortSourceSuffix},
@@ -106,7 +107,7 @@ func configFor(name string) caseCfg {
 }
 
 func TestGolden(t *testing.T) {
-	inputs, err := filepath.Glob(filepath.Join(requestsDir, "*.anthropic.json"))
+	inputs, err := filepath.Glob(filepath.Join(requestsDir, "*"+fixtures.RequestInputSuffix))
 	if err != nil {
 		t.Fatalf("glob: %v", err)
 	}
@@ -115,7 +116,7 @@ func TestGolden(t *testing.T) {
 	}
 
 	for _, in := range inputs {
-		name := strings.TrimSuffix(filepath.Base(in), ".anthropic.json")
+		name := strings.TrimSuffix(filepath.Base(in), fixtures.RequestInputSuffix)
 		t.Run(name, func(t *testing.T) {
 			raw, err := os.ReadFile(in)
 			if err != nil {
@@ -138,7 +139,7 @@ func TestGolden(t *testing.T) {
 			}
 			got = append(got, '\n')
 
-			goldenPath := filepath.Join(requestsDir, name+".responses.golden.json")
+			goldenPath := filepath.Join(requestsDir, name+fixtures.RequestGoldenSuffix)
 			if *update {
 				if err := os.WriteFile(goldenPath, got, 0o644); err != nil {
 					t.Fatalf("write golden: %v", err)
@@ -697,7 +698,7 @@ func TestSystemNonTextBlockDropped(t *testing.T) {
 
 func readFixture(t *testing.T, name string) []byte {
 	t.Helper()
-	raw, err := os.ReadFile(filepath.Join(requestsDir, name+".anthropic.json"))
+	raw, err := os.ReadFile(filepath.Join(requestsDir, name+fixtures.RequestInputSuffix))
 	if err != nil {
 		t.Fatalf("read fixture %s: %v", name, err)
 	}
@@ -710,7 +711,7 @@ func readFixture(t *testing.T, name string) []byte {
 // are not allowed"). They must be emitted as developer items, keeping their
 // position, while the top-level system field still becomes instructions.
 func TestMidConversationSystemRemapped(t *testing.T) {
-	raw, err := os.ReadFile(filepath.Join(requestsDir, "mid_conversation_system.anthropic.json"))
+	raw, err := os.ReadFile(filepath.Join(requestsDir, "mid_conversation_system"+fixtures.RequestInputSuffix))
 	if err != nil {
 		t.Fatalf("read fixture: %v", err)
 	}

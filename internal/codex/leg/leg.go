@@ -315,6 +315,7 @@ func (l *Leg) CountTokens(w http.ResponseWriter, r *http.Request, rq *router.Req
 	h := w.Header()
 	h.Set("Content-Type", "application/json")
 	h.Set("X-Content-Type-Options", "nosniff")
+	h.Set(proxyhdr.TokenCountMethod, "estimated; estimator="+l.est.Name())
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(body)
 	return nil

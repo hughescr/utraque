@@ -663,6 +663,8 @@ that is itself credential-shaped is refused and a generated one used instead.
 That is a backstop and not a guarantee: an opaque high-entropy string is
 exactly what a request id looks like.
 
+**Debug response headers.** Each non-passthrough leg stamps its own debug headers before it commits a response: Codex and DeepSeek Messages responses set `X-Utraque-Route` (`codex` or `deepseek`) and `X-Utraque-Model` to the upstream model actually requested. Anthropic passthrough responses set neither header. Locally estimated `/v1/messages/count_tokens` responses set `X-Utraque-Token-Count-Method`: DeepSeek reports `estimated; estimator=chars/4`, while Codex reports `estimated; estimator=o200k_base`.
+
 **Other per-request records.** The Codex leg writes one record per stream at
 DEBUG (`codex stream translated`) or, when the translator met event types it
 does not recognise, at INFO (`codex stream carried unrecognised event types`),

@@ -67,10 +67,10 @@ first request from a real client, with a green test suite.
 
 Trace dumps are source material, not fixtures to copy whole. Promote the
 `body` from `<id>.request.json` to a request corpus
-`<case>.anthropic.json` input and its translated result to
+`<case>.anthropic.input.json` input and its translated result to
 `<case>.responses.golden.json`; map `<id>.upstream.sse` to a stream corpus
-`<case>.codex.sse` input and `<id>.downstream.sse` to its
-`<case>.anthropic.sse` golden. Remove trace metadata and any sensitive prompt
+`<case>.responses.input.sse` input and `<id>.downstream.sse` to its
+`<case>.anthropic.golden.sse` golden. Remove trace metadata and any sensitive prompt
 material before committing.
 
 ## Logging

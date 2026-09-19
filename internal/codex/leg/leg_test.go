@@ -25,6 +25,7 @@ import (
 	"github.com/hughescr/utraque/internal/proxyhdr"
 	"github.com/hughescr/utraque/internal/router"
 	"github.com/hughescr/utraque/internal/tokens"
+	"github.com/hughescr/utraque/internal/translate/fixtures"
 	"github.com/hughescr/utraque/internal/translate/request"
 	"github.com/hughescr/utraque/internal/translate/stream"
 )
@@ -246,6 +247,9 @@ func TestCountTokensAnswersLocally(t *testing.T) {
 	if !strings.Contains(w.Body.String(), `"input_tokens"`) {
 		t.Errorf("body = %q, want an input_tokens count", w.Body.String())
 	}
+	if got := w.Header().Get(proxyhdr.TokenCountMethod); got != "estimated; estimator="+tokens.O200kName {
+		t.Errorf("%s = %q, want exact local-estimate method", proxyhdr.TokenCountMethod, got)
+	}
 	if st.calls != 0 {
 		t.Errorf("the responses client was called %d times, want 0", st.calls)
 	}
@@ -325,7 +329,7 @@ func (g *gatedEstimator) EstimateRequest(*cschema.ResponsesRequest) int {
 
 func textOnlyFixture(t *testing.T) string {
 	t.Helper()
-	raw, err := os.ReadFile("../../../testdata/streams/text_only.codex.sse")
+	raw, err := os.ReadFile("../../../testdata/streams/text_only" + fixtures.StreamInputSuffix)
 	if err != nil {
 		t.Fatalf("read fixture: %v", err)
 	}

@@ -111,6 +111,7 @@ func New(baseURL, apiKey string, tr transport.Transport, opts ...Option) (*Leg, 
 func (l *Leg) BaseURL() string { return l.base.String() }
 
 func (l *Leg) Messages(w http.ResponseWriter, r *http.Request, rq *router.Request) error {
+	markRoute(w.Header(), rq)
 	return l.forward(w, r, rq, "/v1/messages", true)
 }
 
@@ -138,6 +139,14 @@ func (l *Leg) CountTokens(w http.ResponseWriter, r *http.Request, rq *router.Req
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(body)
 	return nil
+}
+
+// markRoute stamps the rewritten model before any response bytes are committed.
+func markRoute(h http.Header, rq *router.Request) {
+	h.Set(proxyhdr.Route, string(router.BackendDeepSeek))
+	if rq != nil && rq.Dec.UpstreamModel != "" {
+		h.Set(proxyhdr.Model, rq.Dec.UpstreamModel)
+	}
 }
 
 func (l *Leg) forward(w http.ResponseWriter, r *http.Request, rq *router.Request, path string, responseHasModel bool) error {

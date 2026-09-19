@@ -13,6 +13,7 @@ import (
 	"github.com/hughescr/utraque/internal/codex/schema"
 	"github.com/hughescr/utraque/internal/router"
 	"github.com/hughescr/utraque/internal/synthetic"
+	"github.com/hughescr/utraque/internal/translate/fixtures"
 	"github.com/hughescr/utraque/internal/translate/request"
 	"github.com/hughescr/utraque/internal/translate/stream"
 )
@@ -26,7 +27,7 @@ import (
 // succeeds, it just silently stops matching the backend's prompt cache and
 // re-reads the whole conversation on every turn. So they are joined here.
 func TestReasoningSurvivesTheRoundTrip(t *testing.T) {
-	raw, err := os.ReadFile(filepath.Join("../../../testdata/streams", "reasoning_encrypted.codex.sse"))
+	raw, err := os.ReadFile(filepath.Join("../../../testdata/streams", "reasoning_encrypted"+fixtures.StreamInputSuffix))
 	if err != nil {
 		t.Fatalf("read fixture: %v", err)
 	}
