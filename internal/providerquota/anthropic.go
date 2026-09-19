@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"strconv"
 	"time"
+
+	"github.com/hughescr/utraque/internal/leg"
 )
 
 const DefaultAnthropicUsageURL = "https://api.anthropic.com/api/oauth/usage"
@@ -23,14 +25,14 @@ type AnthropicClient struct{ http httpSettings }
 // AnthropicCacheScope derives the same non-secret discriminator returned by
 // Observation.CacheScope without contacting Anthropic.
 func AnthropicCacheScope(oauthToken string) (string, error) {
-	return credentialScope(ProviderAnthropic, oauthToken)
+	return credentialScope(leg.Anthropic, oauthToken)
 }
 
 func NewAnthropicClient(opts AnthropicOptions) (*AnthropicClient, error) {
 	if opts.URL == "" {
 		opts.URL = DefaultAnthropicUsageURL
 	}
-	h, err := newHTTPSettings(ProviderAnthropic, opts.URL, opts.HTTPClient, opts.Timeout, opts.MaxResponseBytes, opts.Now)
+	h, err := newHTTPSettings(leg.Anthropic, opts.URL, opts.HTTPClient, opts.Timeout, opts.MaxResponseBytes, opts.Now)
 	if err != nil {
 		return nil, err
 	}
@@ -103,14 +105,14 @@ func (r *anthropicResponse) UnmarshalJSON(data []byte) error {
 
 func (c *AnthropicClient) Read(ctx context.Context, oauthToken string) (Observation, error) {
 	if c == nil {
-		return Observation{}, quotaError(ProviderAnthropic, CodeConfiguration, false)
+		return Observation{}, quotaError(leg.Anthropic, CodeConfiguration, false)
 	}
 	cacheScope, err := AnthropicCacheScope(oauthToken)
 	if err != nil {
-		return Observation{}, quotaError(ProviderAnthropic, CodeCredential, false)
+		return Observation{}, quotaError(leg.Anthropic, CodeCredential, false)
 	}
 	var payload anthropicResponse
-	err = c.http.getJSON(ctx, ProviderAnthropic, cacheScope, map[string]string{
+	err = c.http.getJSON(ctx, leg.Anthropic, cacheScope, map[string]string{
 		"Accept":         "application/json",
 		"Authorization":  "Bearer " + oauthToken,
 		"anthropic-beta": "oauth-2025-04-20",
@@ -119,9 +121,9 @@ func (c *AnthropicClient) Read(ctx context.Context, oauthToken string) (Observat
 		return Observation{}, err
 	}
 	if !payload.recognized {
-		return Observation{}, quotaError(ProviderAnthropic, CodeInvalidData, false)
+		return Observation{}, quotaError(leg.Anthropic, CodeInvalidData, false)
 	}
-	o := Observation{Source: ProviderAnthropic, CollectedAt: c.http.now().UTC(), cacheScope: cacheScope}
+	o := Observation{Source: leg.Anthropic, CollectedAt: c.http.now().UTC(), cacheScope: cacheScope}
 	if payload.Limits != nil {
 		for i, limit := range payload.Limits {
 			q, err := normalizeAnthropicLimit(limit, i, c.http.now())
@@ -170,9 +172,9 @@ func (c *AnthropicClient) Read(ctx context.Context, oauthToken string) (Observat
 
 func normalizeAnthropicWindow(id string, duration int64, w *anthropicWindow, now time.Time) (Quota, error) {
 	if w.Utilization == nil || !validPercent(*w.Utilization) {
-		return Quota{}, quotaError(ProviderAnthropic, CodeInvalidData, false)
+		return Quota{}, quotaError(leg.Anthropic, CodeInvalidData, false)
 	}
-	reset, err := parseReset(ProviderAnthropic, w.ResetsAt, now)
+	reset, err := parseReset(leg.Anthropic, w.ResetsAt, now)
 	if err != nil {
 		return Quota{}, err
 	}
@@ -185,9 +187,9 @@ func normalizeAnthropicWindow(id string, duration int64, w *anthropicWindow, now
 
 func normalizeAnthropicLimit(l anthropicLimit, index int, now time.Time) (Quota, error) {
 	if l.Percent == nil || !validPercent(*l.Percent) || !validNonemptyLabel(l.Kind) || !validNonemptyLabel(l.Group) {
-		return Quota{}, quotaError(ProviderAnthropic, CodeInvalidData, false)
+		return Quota{}, quotaError(leg.Anthropic, CodeInvalidData, false)
 	}
-	reset, err := parseReset(ProviderAnthropic, l.ResetsAt, now)
+	reset, err := parseReset(leg.Anthropic, l.ResetsAt, now)
 	if err != nil {
 		return Quota{}, err
 	}
@@ -246,18 +248,18 @@ func normalizeAnthropicScope(s *anthropicScope) (*Scope, error) {
 		label := &ScopeLabel{}
 		if in.ID != nil {
 			if !validLabel(*in.ID) {
-				return nil, quotaError(ProviderAnthropic, CodeInvalidData, false)
+				return nil, quotaError(leg.Anthropic, CodeInvalidData, false)
 			}
 			label.ID = *in.ID
 		}
 		if in.DisplayName != nil {
 			if !validLabel(*in.DisplayName) {
-				return nil, quotaError(ProviderAnthropic, CodeInvalidData, false)
+				return nil, quotaError(leg.Anthropic, CodeInvalidData, false)
 			}
 			label.DisplayName = *in.DisplayName
 		}
 		if label.ID == "" && label.DisplayName == "" {
-			return nil, quotaError(ProviderAnthropic, CodeInvalidData, false)
+			return nil, quotaError(leg.Anthropic, CodeInvalidData, false)
 		}
 		*out = label
 	}
@@ -269,7 +271,7 @@ func normalizeAnthropicScope(s *anthropicScope) (*Scope, error) {
 
 func normalizeAnthropicExtra(e *anthropicExtra) (*ExtraUsage, error) {
 	if e.Enabled == nil {
-		return nil, quotaError(ProviderAnthropic, CodeInvalidData, false)
+		return nil, quotaError(leg.Anthropic, CodeInvalidData, false)
 	}
 	result := &ExtraUsage{Enabled: *e.Enabled}
 	amounts := []struct {
@@ -282,21 +284,21 @@ func normalizeAnthropicExtra(e *anthropicExtra) (*ExtraUsage, error) {
 		}
 		s := amount.in.String()
 		if !validDecimal(s) {
-			return nil, quotaError(ProviderAnthropic, CodeInvalidData, false)
+			return nil, quotaError(leg.Anthropic, CodeInvalidData, false)
 		}
 		*amount.out = &s
 		result.AmountUnit = "provider_units"
 	}
 	if e.Utilization != nil {
 		if !validPercent(*e.Utilization) {
-			return nil, quotaError(ProviderAnthropic, CodeInvalidData, false)
+			return nil, quotaError(leg.Anthropic, CodeInvalidData, false)
 		}
 		result.UsedPercent = e.Utilization
 		result.Unit = PercentUnit
 	}
 	if e.Currency != nil {
 		if !validCurrency(*e.Currency) {
-			return nil, quotaError(ProviderAnthropic, CodeInvalidData, false)
+			return nil, quotaError(leg.Anthropic, CodeInvalidData, false)
 		}
 		result.Currency = *e.Currency
 	}

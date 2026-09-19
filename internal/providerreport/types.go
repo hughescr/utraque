@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/hughescr/utraque/internal/codex/auth"
+	"github.com/hughescr/utraque/internal/leg"
 	"github.com/hughescr/utraque/internal/providerquota"
 	"github.com/hughescr/utraque/internal/referenceprice"
 	"github.com/hughescr/utraque/internal/usagehistory"
@@ -144,7 +145,8 @@ type DateRange struct {
 }
 
 type ProviderReport struct {
-	Provider string `json:"provider"`
+	// Provider is the leg this section reports on.
+	Provider leg.ID `json:"provider"`
 	Status   Status `json:"status"`
 	// LastAttempt is normally this collection's end time (report.go's
 	// buildProvider receives it as ended). The one exception: when the quota
@@ -286,7 +288,7 @@ type PeriodSummary struct {
 type ModelStats struct {
 	Source                      string                  `json:"source"`
 	Model                       string                  `json:"model"`
-	Provider                    usagehistory.Provider   `json:"provider"`
+	Provider                    leg.ID                  `json:"provider"`
 	InputTokens                 uint64                  `json:"input_tokens"`
 	OutputTokens                uint64                  `json:"output_tokens"`
 	CacheCreationTokens         uint64                  `json:"cache_creation_tokens"`

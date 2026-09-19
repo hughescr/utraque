@@ -11,24 +11,19 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/hughescr/utraque/internal/leg"
 )
 
-type Provider string
-
-const (
-	ProviderAnthropic Provider = "anthropic"
-	ProviderCodex     Provider = "codex"
-	ProviderDeepSeek  Provider = "deepseek"
-
-	PercentUnit = "percent_0_100"
-)
+// PercentUnit is the Unit a percentage-valued Quota reports.
+const PercentUnit = "percent_0_100"
 
 // Observation is a provider snapshot collected at one instant. cacheScope is
 // intentionally unexported: it is available for account-safe cache matching,
 // but cannot leak through encoding/json.
 type Observation struct {
-	// Source names the provider that produced this observation.
-	Source Provider `json:"source"`
+	// Source names the leg whose account produced this observation.
+	Source leg.ID `json:"source"`
 	// CollectedAt is when this snapshot was taken.
 	CollectedAt time.Time `json:"collected_at"`
 	// Quotas contains Anthropic and Codex entries: Anthropic's session/weekly
@@ -355,7 +350,7 @@ const (
 // Error contains classification only. Provider bodies, URLs, subprocess
 // stderr, credentials, and account identifiers are never retained.
 type Error struct {
-	Provider  Provider
+	Provider  leg.ID
 	Code      ErrorCode
 	Retryable bool
 	// RetryAt is populated for rate-limit responses and locally enforced
@@ -372,21 +367,21 @@ func (e *Error) Error() string {
 	return fmt.Sprintf("provider quota: %s: %s", e.Provider, e.Code)
 }
 
-func quotaError(provider Provider, code ErrorCode, retryable bool) error {
+func quotaError(provider leg.ID, code ErrorCode, retryable bool) error {
 	return &Error{Provider: provider, Code: code, Retryable: retryable}
 }
 
-func rateLimitError(provider Provider, retryAt, attemptedAt time.Time) error {
+func rateLimitError(provider leg.ID, retryAt, attemptedAt time.Time) error {
 	retry := retryAt.UTC()
 	return &Error{Provider: provider, Code: CodeRateLimited, Retryable: true, RetryAt: &retry, AttemptedAt: attemptedAt.UTC()}
 }
 
-func scopeHash(provider Provider, secret string) string {
+func scopeHash(provider leg.ID, secret string) string {
 	sum := sha256.Sum256([]byte(string(provider) + "\x00" + secret))
 	return string(provider) + ":" + hex.EncodeToString(sum[:])
 }
 
-func credentialScope(provider Provider, secret string) (string, error) {
+func credentialScope(provider leg.ID, secret string) (string, error) {
 	if strings.TrimSpace(secret) == "" || len(secret) > 256<<10 {
 		return "", quotaError(provider, CodeCredential, false)
 	}

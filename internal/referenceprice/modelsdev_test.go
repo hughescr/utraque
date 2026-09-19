@@ -10,6 +10,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/hughescr/utraque/internal/leg"
 )
 
 type testClock struct {
@@ -231,4 +233,30 @@ func testCatalog(t *testing.T) []byte {
 		t.Fatal(err)
 	}
 	return body
+}
+
+func TestLegForCatalog(t *testing.T) {
+	// The models.dev "openai" catalog is filed under the Codex leg: the
+	// report's codex section carries OpenAI API list prices. Anything else
+	// utraque does not read is Unknown, never a guess.
+	for _, tc := range []struct {
+		catalog CatalogProvider
+		want    leg.ID
+	}{
+		{CatalogAnthropic, leg.Anthropic},
+		{CatalogOpenAI, leg.Codex},
+		{CatalogDeepSeek, leg.DeepSeek},
+		{"google", leg.Unknown},
+		{"codex", leg.Unknown},
+		{"", leg.Unknown},
+	} {
+		if got := legForCatalog(tc.catalog); got != tc.want {
+			t.Errorf("legForCatalog(%q) = %q, want %q", tc.catalog, got, tc.want)
+		}
+	}
+	for _, catalog := range catalogProviders {
+		if !legForCatalog(catalog).Valid() {
+			t.Errorf("catalog %q maps to no routable leg", catalog)
+		}
+	}
 }

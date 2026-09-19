@@ -1,7 +1,8 @@
 // Package router resolves a client-supplied model string to a routing
 // Decision naming one of the three backends (Anthropic passthrough, Codex
-// alias, or DeepSeek alias — see Backend in types.go), and holds the
-// multi-tier alias registry that maps short Codex names to upstream slugs.
+// alias, or DeepSeek alias — see Backend in types.go, an alias of leg.ID),
+// and holds the multi-tier alias registry that maps short Codex names to
+// upstream slugs.
 package router
 
 import (

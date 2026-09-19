@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/hughescr/utraque/internal/leg"
 )
 
 const (
@@ -50,7 +52,7 @@ type httpSettings struct {
 	state    *httpState
 }
 
-func newHTTPSettings(provider Provider, rawURL string, client *http.Client, timeout time.Duration, maxBody int64, now func() time.Time) (httpSettings, error) {
+func newHTTPSettings(provider leg.ID, rawURL string, client *http.Client, timeout time.Duration, maxBody int64, now func() time.Time) (httpSettings, error) {
 	u, err := url.Parse(strings.TrimSpace(rawURL))
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
 		return httpSettings{}, quotaError(provider, CodeConfiguration, false)
@@ -77,7 +79,7 @@ func newHTTPSettings(provider Provider, rawURL string, client *http.Client, time
 		state: &httpState{entries: make(map[string]*httpStateEntry)}}, nil
 }
 
-func (s httpSettings) getJSON(ctx context.Context, provider Provider, cacheScope string, headers map[string]string, out any) error {
+func (s httpSettings) getJSON(ctx context.Context, provider leg.ID, cacheScope string, headers map[string]string, out any) error {
 	flight, leader, err := s.acquire(ctx, provider, cacheScope)
 	if err != nil {
 		return err
@@ -138,7 +140,7 @@ func (s httpSettings) getJSON(ctx context.Context, provider Provider, cacheScope
 	return decodeHTTPResult(provider, body, nil, out)
 }
 
-func decodeHTTPResult(provider Provider, body []byte, err error, out any) error {
+func decodeHTTPResult(provider leg.ID, body []byte, err error, out any) error {
 	if err != nil {
 		return err
 	}
@@ -153,7 +155,7 @@ func decodeHTTPResult(provider Provider, body []byte, err error, out any) error 
 	return nil
 }
 
-func (s httpSettings) acquire(ctx context.Context, provider Provider, scope string) (*httpFlight, bool, error) {
+func (s httpSettings) acquire(ctx context.Context, provider leg.ID, scope string) (*httpFlight, bool, error) {
 	if s.state == nil || scope == "" {
 		return nil, false, quotaError(provider, CodeConfiguration, false)
 	}
@@ -228,7 +230,7 @@ func (s httpSettings) makeRoomLocked(now time.Time) bool {
 	return true
 }
 
-func (s httpSettings) finish(provider Provider, scope string, flight *httpFlight, body []byte, err error, attemptedAt time.Time, rateLimited bool, retryAfter string) {
+func (s httpSettings) finish(provider leg.ID, scope string, flight *httpFlight, body []byte, err error, attemptedAt time.Time, rateLimited bool, retryAfter string) {
 	s.state.mu.Lock()
 	entry := s.state.entries[scope]
 	if entry != nil && entry.flight == flight {
@@ -296,7 +298,7 @@ func parseRetryAfterDeadline(raw string, now time.Time) (time.Time, bool) {
 	return deadline, true
 }
 
-func parseReset(provider Provider, raw *string, now time.Time) (*time.Time, error) {
+func parseReset(provider leg.ID, raw *string, now time.Time) (*time.Time, error) {
 	if raw == nil {
 		return nil, nil
 	}
@@ -308,7 +310,7 @@ func parseReset(provider Provider, raw *string, now time.Time) (*time.Time, erro
 	return &u, nil
 }
 
-func parseUnixReset(provider Provider, raw *int64, now time.Time) (*time.Time, error) {
+func parseUnixReset(provider leg.ID, raw *int64, now time.Time) (*time.Time, error) {
 	if raw == nil {
 		return nil, nil
 	}
@@ -325,7 +327,7 @@ func validReset(t, now time.Time) bool {
 
 func validPercent(n float64) bool { return n >= 0 && n <= 100 }
 
-func durationSeconds(provider Provider, minutes *int64) (*int64, error) {
+func durationSeconds(provider leg.ID, minutes *int64) (*int64, error) {
 	if minutes == nil {
 		return nil, nil
 	}

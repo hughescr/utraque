@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hughescr/utraque/internal/leg"
 	"github.com/hughescr/utraque/internal/providerquota"
 	"github.com/hughescr/utraque/internal/referenceprice"
 	"github.com/hughescr/utraque/internal/usagehistory"
@@ -30,9 +31,9 @@ const (
 func wireHistory(now time.Time) usagehistory.Report {
 	history := sampleHistory(now)
 	history.Daily = append(history.Daily,
-		usagehistory.DailyModelUsage{Date: utcDate(now), Source: "claude", Model: "deepseek-x", Provider: usagehistory.ProviderDeepSeek, TotalTokens: 5, CostStatus: usagehistory.CostUnavailableOrUnpriced},
-		usagehistory.DailyModelUsage{Date: utcDate(now), Source: "claude", Model: "old-gpt", Provider: usagehistory.ProviderCodex, TotalTokens: 10},
-		usagehistory.DailyModelUsage{Date: utcDate(now), Source: "opencode", Model: "mystery", Provider: usagehistory.ProviderUnknown, TotalTokens: 7})
+		usagehistory.DailyModelUsage{Date: utcDate(now), Source: "claude", Model: "deepseek-x", InferredLeg: leg.DeepSeek, TotalTokens: 5, CostStatus: usagehistory.CostUnavailableOrUnpriced},
+		usagehistory.DailyModelUsage{Date: utcDate(now), Source: "claude", Model: "old-gpt", InferredLeg: leg.Codex, TotalTokens: 10},
+		usagehistory.DailyModelUsage{Date: utcDate(now), Source: "opencode", Model: "mystery", InferredLeg: leg.Unknown, TotalTokens: 7})
 	return history
 }
 
@@ -48,11 +49,11 @@ func wirePrices(now time.Time) referenceprice.Snapshot {
 		}}
 }
 
-func wireEligible(provider string) []string {
-	switch provider {
-	case "codex":
+func wireEligible(id leg.ID) []string {
+	switch id {
+	case leg.Codex:
 		return []string{"gpt-5.6-sol"}
-	case "anthropic":
+	case leg.Anthropic:
 		return []string{"claude-sonnet-5"}
 	}
 	return nil
@@ -68,11 +69,11 @@ func wireMixedReport(t *testing.T, now time.Time) Report {
 	h := New(Options{
 		History: historyFunc(func(context.Context, time.Time, time.Time) (usagehistory.Report, error) { return wireHistory(now), nil }),
 		Anthropic: anthropicFunc(func(context.Context, string) (providerquota.Observation, error) {
-			return providerquota.Observation{Source: providerquota.ProviderAnthropic, CollectedAt: now,
+			return providerquota.Observation{Source: leg.Anthropic, CollectedAt: now,
 				Quotas: []providerquota.Quota{{ID: "five_hour", UsedPercent: 31.5, Unit: "percent_0_100", ResetsAt: &reset}}}, nil
 		}),
 		DeepSeek: deepSeekFunc(func(context.Context) (providerquota.Observation, error) {
-			return providerquota.Observation{Source: providerquota.ProviderDeepSeek, CollectedAt: now, Available: &available,
+			return providerquota.Observation{Source: leg.DeepSeek, CollectedAt: now, Available: &available,
 				Balances: []providerquota.Balance{{Currency: "USD", Total: "2.50"}, {Currency: "CNY", Total: "10"}, {Currency: "USD", Total: "abc"}}}, nil
 		}),
 		ReferencePrices:     priceFunc(func(context.Context) (referenceprice.Snapshot, error) { return wirePrices(now), nil }),
@@ -94,7 +95,7 @@ func wireFailedReport(t *testing.T, now time.Time) Report {
 			return usagehistory.Report{}, &usagehistory.CollectError{Section: "daily", Kind: usagehistory.ErrorTimeout}
 		}),
 		Anthropic: anthropicFunc(func(context.Context, string) (providerquota.Observation, error) {
-			return providerquota.Observation{}, &providerquota.Error{Provider: providerquota.ProviderAnthropic, Code: providerquota.CodeRateLimited, Retryable: true, RetryAt: &retryAt}
+			return providerquota.Observation{}, &providerquota.Error{Provider: leg.Anthropic, Code: providerquota.CodeRateLimited, Retryable: true, RetryAt: &retryAt}
 		}),
 		ReferencePrices: priceFunc(func(context.Context) (referenceprice.Snapshot, error) {
 			return referenceprice.Snapshot{}, &referenceprice.Error{Code: referenceprice.CodeUnavailable, Retryable: true}
@@ -121,7 +122,7 @@ func wireCachedBody(t *testing.T, now time.Time) []byte {
 			if failing {
 				return providerquota.Observation{}, errors.New("failed")
 			}
-			return providerquota.Observation{Source: providerquota.ProviderDeepSeek, CollectedAt: now}, nil
+			return providerquota.Observation{Source: leg.DeepSeek, CollectedAt: now}, nil
 		}),
 		CacheTTL: time.Second, Now: func() time.Time { return now }})
 	request := func() []byte {

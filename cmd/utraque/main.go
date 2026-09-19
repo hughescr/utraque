@@ -28,7 +28,7 @@ import (
 	"github.com/hughescr/utraque/internal/apierr"
 	"github.com/hughescr/utraque/internal/codex/auth"
 	"github.com/hughescr/utraque/internal/codex/catalog"
-	"github.com/hughescr/utraque/internal/codex/leg"
+	codexleg "github.com/hughescr/utraque/internal/codex/leg"
 	"github.com/hughescr/utraque/internal/codex/responses"
 	"github.com/hughescr/utraque/internal/codex/schema"
 	"github.com/hughescr/utraque/internal/config"
@@ -36,6 +36,7 @@ import (
 	"github.com/hughescr/utraque/internal/discovery"
 	"github.com/hughescr/utraque/internal/idle"
 	"github.com/hughescr/utraque/internal/launchd"
+	"github.com/hughescr/utraque/internal/leg"
 	"github.com/hughescr/utraque/internal/obs"
 	"github.com/hughescr/utraque/internal/providerquota"
 	"github.com/hughescr/utraque/internal/providerreport"
@@ -388,7 +389,7 @@ func newApp(cfg config.Config, log *slog.Logger, activity server.ActivityTracker
 	// Only assign the interface field from a non-nil concrete source: a nil
 	// *auth.Source stored in an interface is a non-nil interface value, which
 	// would defeat the leg's own nil check.
-	legOpts := leg.Options{
+	legOpts := codexleg.Options{
 		Client: responses.New(responses.Options{
 			BaseURL:   cfg.Codex.BaseURL,
 			Transport: codexTr,
@@ -407,7 +408,7 @@ func newApp(cfg config.Config, log *slog.Logger, activity server.ActivityTracker
 	if credSource != nil {
 		legOpts.Credentials = credSource
 	}
-	codexLeg, err := leg.New(legOpts)
+	codexLeg, err := codexleg.New(legOpts)
 	if err != nil {
 		return nil, err
 	}
@@ -525,8 +526,8 @@ func newProviderReport(cfg config.Config, source auth.CredentialSource, deps *re
 		History:   deps.history,
 		Anthropic: deps.anthropic, DeepSeek: deps.deepseek, DeepSeekAPIKey: cfg.DeepSeek.APIKey,
 		Codex: deps.codex, CodexSource: source, ReferencePrices: deps.prices,
-		EligiblePriceModels: func(provider string) []string {
-			return eligibleReferencePriceModels(cfg, provider)
+		EligiblePriceModels: func(id leg.ID) []string {
+			return eligibleReferencePriceModels(cfg, id)
 		},
 		NormalizePriceModel: normalizeReferencePriceModel,
 		CacheTTL:            cfg.Reporting.CacheTTL,
@@ -535,14 +536,17 @@ func newProviderReport(cfg config.Config, source auth.CredentialSource, deps *re
 	}), nil
 }
 
-func eligibleReferencePriceModels(cfg config.Config, provider string) []string {
+// eligibleReferencePriceModels lists the model ids that are current routing
+// candidates on one leg, so the provider report can mark those reference
+// prices eligible even when history has not seen them yet.
+func eligibleReferencePriceModels(cfg config.Config, id leg.ID) []string {
 	models := []string{}
-	switch provider {
-	case "anthropic":
+	switch id {
+	case leg.Anthropic:
 		for _, candidate := range discovery.StaticAnthropicModels() {
 			models = append(models, strings.ToLower(candidate.ID))
 		}
-	case "codex":
+	case leg.Codex:
 		seen := map[string]bool{}
 		for _, alias := range router.DefaultRegistry.AliasList() {
 			model := strings.ToLower(alias.Slug)
@@ -551,7 +555,7 @@ func eligibleReferencePriceModels(cfg config.Config, provider string) []string {
 				seen[model] = true
 			}
 		}
-	case "deepseek":
+	case leg.DeepSeek:
 		if cfg.DeepSeek.Configured() {
 			models = append(models, "deepseek-flash", "deepseek-v4-pro")
 		}
@@ -559,17 +563,17 @@ func eligibleReferencePriceModels(cfg config.Config, provider string) []string {
 	return models
 }
 
-func normalizeReferencePriceModel(provider, model string) string {
+// normalizeReferencePriceModel maps a history model name to the upstream slug
+// its reference price is filed under: on the Codex and DeepSeek legs a short
+// alias resolves to a slug, and only when the router agrees the alias belongs
+// to that leg. Other legs and unresolvable names pass through lower-cased.
+func normalizeReferencePriceModel(id leg.ID, model string) string {
 	model = strings.ToLower(strings.TrimSpace(model))
-	if provider != "codex" && provider != "deepseek" {
+	if id != leg.Codex && id != leg.DeepSeek {
 		return model
 	}
 	decision, err := router.ResolveWith(router.DefaultRegistry, model, "")
-	if err != nil || decision.UpstreamModel == "" {
-		return model
-	}
-	if (provider == "codex" && decision.Backend != router.BackendCodex) ||
-		(provider == "deepseek" && decision.Backend != router.BackendDeepSeek) {
+	if err != nil || decision.UpstreamModel == "" || decision.Backend != id {
 		return model
 	}
 	return strings.ToLower(decision.UpstreamModel)

@@ -9,6 +9,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/hughescr/utraque/internal/leg"
 )
 
 const (
@@ -32,17 +34,6 @@ const (
 	// UnitPriceUnavailableCCUsage states why this collector cannot provide a
 	// live per-model unit-price catalog.
 	UnitPriceUnavailableCCUsage = "ccusage_does_not_report_unit_prices"
-)
-
-// Provider is inferred solely from a raw model name. It is distinct from
-// Source: a Claude log can contain GPT or DeepSeek models routed by a proxy.
-type Provider string
-
-const (
-	ProviderAnthropic Provider = "anthropic"
-	ProviderCodex     Provider = "codex"
-	ProviderDeepSeek  Provider = "deepseek"
-	ProviderUnknown   Provider = "unknown"
 )
 
 // CostStatus describes whether CostUSD can be used in sums. ccusage does not
@@ -117,14 +108,16 @@ type Report struct {
 
 // DailyModelUsage is one model, UTC date, and ccusage local-log source. Source
 // is an agent label such as "claude", "codex", or "opencode"; it does not
-// identify a provider billing account. Token categories are counted exactly
-// once; output tokens already include any reasoning-token subset reported by a
-// provider.
+// identify a provider billing account. InferredLeg is classifyLeg's guess
+// from the model name alone (leg.Unknown when no prefix matches); it is
+// serialised under the schema v1 key "provider". Token categories are counted
+// exactly once; output tokens already include any reasoning-token subset
+// reported by a provider.
 type DailyModelUsage struct {
 	Date                time.Time  `json:"date"`
 	Source              string     `json:"source"`
 	Model               string     `json:"model"`
-	Provider            Provider   `json:"provider"`
+	InferredLeg         leg.ID     `json:"provider"`
 	InputTokens         uint64     `json:"input_tokens"`
 	OutputTokens        uint64     `json:"output_tokens"`
 	CacheCreationTokens uint64     `json:"cache_creation_tokens"`
@@ -134,10 +127,11 @@ type DailyModelUsage struct {
 	CostStatus          CostStatus `json:"cost_status"`
 }
 
-// BlockModel is a raw model name plus its inferred provider.
+// BlockModel is a raw model name plus the leg classifyLeg infers from it,
+// serialised under the schema v1 key "provider".
 type BlockModel struct {
-	Model    string   `json:"model"`
-	Provider Provider `json:"provider"`
+	Model       string `json:"model"`
+	InferredLeg leg.ID `json:"provider"`
 }
 
 // BlockSummary is a Claude-log session block. ccusage does not provide
@@ -272,17 +266,24 @@ func New(opts Options) (*Collector, error) {
 	}, nil
 }
 
-func classifyProvider(model string) Provider {
+// classifyLeg is this package's attribution heuristic: it guesses which leg
+// a model name belongs to from its prefix alone, and answers leg.Unknown for
+// anything else. It is deliberately private and deliberately not the router's
+// model grammar (internal/router accepts broader Anthropic prefixes and gives
+// registered picker ids and "anthropic-compat." names their own precedence):
+// a GPT name in a Claude log establishes an attribution, not a billing
+// account, and the two rules are not required to agree.
+func classifyLeg(model string) leg.ID {
 	name := strings.ToLower(strings.TrimSpace(model))
 	switch {
 	case strings.HasPrefix(name, "claude-"):
-		return ProviderAnthropic
+		return leg.Anthropic
 	case strings.HasPrefix(name, "gpt-"):
-		return ProviderCodex
+		return leg.Codex
 	case strings.HasPrefix(name, "deepseek-"):
-		return ProviderDeepSeek
+		return leg.DeepSeek
 	default:
-		return ProviderUnknown
+		return leg.Unknown
 	}
 }
 

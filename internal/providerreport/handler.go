@@ -15,6 +15,7 @@ import (
 	"golang.org/x/sync/singleflight"
 
 	"github.com/hughescr/utraque/internal/codex/auth"
+	"github.com/hughescr/utraque/internal/leg"
 	"github.com/hughescr/utraque/internal/providerquota"
 )
 
@@ -32,8 +33,8 @@ type Options struct {
 	Codex                CodexReader
 	CodexSource          auth.CredentialSource
 	ReferencePrices      ReferencePriceReader
-	EligiblePriceModels  func(provider string) []string
-	NormalizePriceModel  func(provider, model string) string
+	EligiblePriceModels  func(id leg.ID) []string
+	NormalizePriceModel  func(id leg.ID, model string) string
 	CacheTTL             time.Duration
 	Timeout              time.Duration
 	ClaudePlan           string
@@ -54,8 +55,8 @@ type Handler struct {
 	codex          CodexReader
 	codexSource    auth.CredentialSource
 	prices         ReferencePriceReader
-	eligiblePrices func(provider string) []string
-	normalizePrice func(provider, model string) string
+	eligiblePrices func(id leg.ID) []string
+	normalizePrice func(id leg.ID, model string) string
 	ttl, timeout   time.Duration
 	planLabel      string
 	planMultiplier *float64
@@ -180,7 +181,7 @@ func markCodexScopeUnverified(r *Report) {
 func markCodexUnavailable(r *Report, code ErrorCode, message string) {
 	for i := range r.Providers {
 		p := &r.Providers[i]
-		if p.Provider != "codex" {
+		if p.Provider != leg.Codex {
 			continue
 		}
 		p.QuotaBefore, p.Quota, p.Paired = nil, nil, nil

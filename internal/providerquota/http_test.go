@@ -10,6 +10,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/hughescr/utraque/internal/leg"
 )
 
 type testClock struct {
@@ -304,7 +306,7 @@ func TestCooldownCapacityNeverEvictsActiveEntry(t *testing.T) {
 		state.entries[scope] = &httpStateEntry{retryAt: now.Add(time.Hour), lastAttempt: now, touchedAt: now}
 	}
 	settings := httpSettings{now: func() time.Time { return now }, state: state}
-	_, _, err := settings.acquire(context.Background(), ProviderAnthropic, "new-scope")
+	_, _, err := settings.acquire(context.Background(), leg.Anthropic, "new-scope")
 	var quotaErr *Error
 	if !errors.As(err, &quotaErr) || quotaErr.Code != CodeUnavailable {
 		t.Fatalf("capacity error=%v, want unavailable", err)

@@ -13,6 +13,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/hughescr/utraque/internal/leg"
 )
 
 const representativeDaily = `{
@@ -164,9 +166,9 @@ func TestCollectNormalizesHistoryAndUsesControlledCommands(t *testing.T) {
 	for _, row := range report.Daily {
 		rows[row.Model] = row
 	}
-	if rows["claude-sonnet-4-5"].Provider != ProviderAnthropic || rows["gpt-5.6-sol"].Provider != ProviderCodex ||
-		rows["deepseek-chat"].Provider != ProviderDeepSeek || rows["deepseek-reasoner"].Provider != ProviderDeepSeek ||
-		rows["mystery-model"].Provider != ProviderUnknown {
+	if rows["claude-sonnet-4-5"].InferredLeg != leg.Anthropic || rows["gpt-5.6-sol"].InferredLeg != leg.Codex ||
+		rows["deepseek-chat"].InferredLeg != leg.DeepSeek || rows["deepseek-reasoner"].InferredLeg != leg.DeepSeek ||
+		rows["mystery-model"].InferredLeg != leg.Unknown {
 		t.Fatalf("provider classification = %#v", rows)
 	}
 	if row := rows["deepseek-reasoner"]; row.Source != "opencode" {

@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/hughescr/utraque/internal/leg"
 )
 
 // The expected documents below were generated from the tree at commit 7f2c11b
@@ -59,7 +61,7 @@ func normalizeCodexBody(t *testing.T, body string) Observation {
 	if err := json.Unmarshal([]byte(body), &response); err != nil {
 		t.Fatal(err)
 	}
-	o := Observation{Source: ProviderCodex, CollectedAt: fixedNow}
+	o := Observation{Source: leg.Codex, CollectedAt: fixedNow}
 	if err := normalizeCodexLimits(&o, response, fixedNow); err != nil {
 		t.Fatal(err)
 	}

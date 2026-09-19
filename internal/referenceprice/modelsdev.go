@@ -17,6 +17,8 @@ import (
 	"time"
 
 	"golang.org/x/sync/singleflight"
+
+	"github.com/hughescr/utraque/internal/leg"
 )
 
 const (
@@ -41,8 +43,12 @@ type Options struct {
 }
 
 // ModelPrice is one exact model id from its author provider's models.dev
-// catalog. Provider and HasHigherTier are internal assembly metadata. Whether
-// a model is a current routing candidate is not a price fact: the provider
+// catalog. Provider and HasHigherTier are internal assembly metadata, never
+// serialised. Provider is the utraque leg the row is filed under, not the
+// models.dev author: the "openai" catalog is stored as leg.Codex, because the
+// provider report's codex section carries OpenAI API list prices for the
+// models the Codex leg serves (legForCatalog holds the mapping). Whether a
+// model is a current routing candidate is not a price fact: the provider
 // report attaches that after joining (providerreport.PriceRow).
 type ModelPrice struct {
 	Model      string   `json:"model"`
@@ -51,8 +57,41 @@ type ModelPrice struct {
 	CacheRead  *float64 `json:"cache_read,omitempty"`
 	CacheWrite *float64 `json:"cache_write,omitempty"`
 
-	Provider      string `json:"-"`
+	Provider      leg.ID `json:"-"`
 	HasHigherTier bool   `json:"-"`
+}
+
+// CatalogProvider is a models.dev author id: the top-level key the catalog
+// files a model's prices under. It is a different vocabulary from leg.ID —
+// models.dev knows "openai", utraque routes to "codex" — and the two must
+// never be compared directly; legForCatalog is the one place they meet.
+type CatalogProvider string
+
+// The models.dev catalogs utraque reads prices from.
+const (
+	CatalogAnthropic CatalogProvider = "anthropic"
+	CatalogOpenAI    CatalogProvider = "openai"
+	CatalogDeepSeek  CatalogProvider = "deepseek"
+)
+
+// catalogProviders lists the catalogs parseModelsDev requires, in the order
+// they are read. Every one must be present with at least one valid price.
+var catalogProviders = []CatalogProvider{CatalogAnthropic, CatalogOpenAI, CatalogDeepSeek}
+
+// legForCatalog maps a models.dev author to the utraque leg whose report
+// section carries its prices: OpenAI's list prices are filed under the Codex
+// leg. It answers leg.Unknown for a catalog utraque does not read.
+func legForCatalog(catalog CatalogProvider) leg.ID {
+	switch catalog {
+	case CatalogAnthropic:
+		return leg.Anthropic
+	case CatalogOpenAI:
+		return leg.Codex
+	case CatalogDeepSeek:
+		return leg.DeepSeek
+	default:
+		return leg.Unknown
+	}
 }
 
 type Snapshot struct {
@@ -308,20 +347,17 @@ func parseModelsDev(data []byte) ([]ModelPrice, error) {
 	if err := json.Unmarshal(data, &root); err != nil {
 		return nil, err
 	}
-	providers := []struct {
-		catalog string
-		report  string
-	}{{"anthropic", "anthropic"}, {"openai", "codex"}, {"deepseek", "deepseek"}}
 	models := make([]ModelPrice, 0, 64)
-	for _, provider := range providers {
-		raw, ok := root[provider.catalog]
+	for _, provider := range catalogProviders {
+		raw, ok := root[string(provider)]
 		if !ok {
-			return nil, fmt.Errorf("missing provider %s", provider.catalog)
+			return nil, fmt.Errorf("missing provider %s", provider)
 		}
 		var catalog rawProvider
-		if err := json.Unmarshal(raw, &catalog); err != nil || catalog.ID != provider.catalog || len(catalog.Models) == 0 {
-			return nil, fmt.Errorf("invalid provider %s", provider.catalog)
+		if err := json.Unmarshal(raw, &catalog); err != nil || catalog.ID != string(provider) || len(catalog.Models) == 0 {
+			return nil, fmt.Errorf("invalid provider %s", provider)
 		}
+		filedUnder := legForCatalog(provider)
 		providerPrices := 0
 		for key, model := range catalog.Models {
 			id := model.ID
@@ -334,14 +370,14 @@ func parseModelsDev(data []byte) ([]ModelPrice, error) {
 			if !validOptionalPrice(model.Cost.CacheRead) || !validOptionalPrice(model.Cost.CacheWrite) {
 				continue
 			}
-			models = append(models, ModelPrice{Provider: provider.report, Model: id,
+			models = append(models, ModelPrice{Provider: filedUnder, Model: id,
 				Input: *model.Cost.Input, Output: *model.Cost.Output,
 				CacheRead: cloneFloat(model.Cost.CacheRead), CacheWrite: cloneFloat(model.Cost.CacheWrite),
 				HasHigherTier: len(model.Cost.Tiers) > 0})
 			providerPrices++
 		}
 		if providerPrices == 0 {
-			return nil, fmt.Errorf("provider %s has no valid prices", provider.catalog)
+			return nil, fmt.Errorf("provider %s has no valid prices", provider)
 		}
 	}
 	if len(models) == 0 {

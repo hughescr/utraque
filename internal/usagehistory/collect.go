@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/hughescr/utraque/internal/leg"
 )
 
 var toolVersionPattern = regexp.MustCompile(`^(?:ccusage(?: version)?[[:space:]]+)?v?([0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?)$`)
@@ -361,7 +363,7 @@ func addDailyModel(acc map[dailyKey]*dailyAccumulator, date time.Time, source st
 	complete := total == 0 || *raw.Cost > 0
 	if item == nil {
 		item = &dailyAccumulator{
-			row:          DailyModelUsage{Date: date, Source: source, Model: *raw.ModelName, Provider: classifyProvider(*raw.ModelName)},
+			row:          DailyModelUsage{Date: date, Source: source, Model: *raw.ModelName, InferredLeg: classifyLeg(*raw.ModelName)},
 			costComplete: complete,
 		}
 		acc[key] = item
@@ -530,7 +532,7 @@ func normalizeBlock(raw rawBlock, path string) (BlockSummary, error) {
 
 	models := make([]BlockModel, 0, len(*raw.Models))
 	seenModels := make(map[string]struct{})
-	providers := make(map[Provider]struct{})
+	legs := make(map[leg.ID]struct{})
 	for modelIndex, model := range *raw.Models {
 		if strings.TrimSpace(model) == "" {
 			return BlockSummary{}, fmt.Errorf("%s.models[%d] is empty", path, modelIndex)
@@ -539,9 +541,9 @@ func normalizeBlock(raw rawBlock, path string) (BlockSummary, error) {
 			continue
 		}
 		seenModels[model] = struct{}{}
-		provider := classifyProvider(model)
-		providers[provider] = struct{}{}
-		models = append(models, BlockModel{Model: model, Provider: provider})
+		inferred := classifyLeg(model)
+		legs[inferred] = struct{}{}
+		models = append(models, BlockModel{Model: model, InferredLeg: inferred})
 	}
 	sort.Slice(models, func(i, j int) bool { return models[i].Model < models[j].Model })
 
@@ -550,7 +552,7 @@ func normalizeBlock(raw rawBlock, path string) (BlockSummary, error) {
 		IsActive: *raw.IsActive, IsGap: *raw.IsGap, Entries: *raw.Entries,
 		InputTokens: *counts.InputTokens, OutputTokens: *counts.OutputTokens,
 		CacheCreationTokens: *counts.CacheCreationInputTokens, CacheReadTokens: *counts.CacheReadInputTokens,
-		TotalTokens: *raw.TotalTokens, Models: models, MixedProvider: len(providers) > 1,
+		TotalTokens: *raw.TotalTokens, Models: models, MixedProvider: len(legs) > 1,
 	}
 	if result.TotalTokens > 0 && *raw.CostUSD == 0 {
 		result.CostStatus = CostUnavailableOrUnpriced

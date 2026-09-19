@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/hughescr/utraque/internal/codex/auth"
+	"github.com/hughescr/utraque/internal/leg"
 )
 
 const (
@@ -51,11 +52,11 @@ func NewCodexClient(opts CodexOptions) (*CodexClient, error) {
 		opts.Command = []string{"codex", "app-server", "--listen", "stdio://"}
 	}
 	if strings.TrimSpace(opts.Command[0]) == "" {
-		return nil, quotaError(ProviderCodex, CodeConfiguration, false)
+		return nil, quotaError(leg.Codex, CodeConfiguration, false)
 	}
 	for _, arg := range opts.Command[1:] {
 		if strings.IndexByte(arg, 0) >= 0 {
-			return nil, quotaError(ProviderCodex, CodeConfiguration, false)
+			return nil, quotaError(leg.Codex, CodeConfiguration, false)
 		}
 	}
 	if opts.Timeout <= 0 {
@@ -71,7 +72,7 @@ func NewCodexClient(opts CodexOptions) (*CodexClient, error) {
 		opts.MaxStderrBytes = defaultCodexMaxStderr
 	}
 	if opts.MaxLineBytes > 16<<20 || opts.MaxOutputBytes > 64<<20 || opts.MaxStderrBytes > 16<<20 {
-		return nil, quotaError(ProviderCodex, CodeConfiguration, false)
+		return nil, quotaError(leg.Codex, CodeConfiguration, false)
 	}
 	if opts.Now == nil {
 		opts.Now = time.Now
@@ -88,20 +89,20 @@ func NewCodexClient(opts CodexOptions) (*CodexClient, error) {
 // rotating access token.
 func CodexCacheScope(cred auth.Credential) (string, error) {
 	if strings.TrimSpace(cred.AccountID) == "" {
-		return "", quotaError(ProviderCodex, CodeCredential, false)
+		return "", quotaError(leg.Codex, CodeCredential, false)
 	}
-	return credentialScope(ProviderCodex, cred.AccountID)
+	return credentialScope(leg.Codex, cred.AccountID)
 }
 
 // Read resolves exactly one credential snapshot from src and uses that same
 // access-token/account pair for the entire app-server exchange.
 func (c *CodexClient) Read(ctx context.Context, src auth.CredentialSource) (Observation, error) {
 	if c == nil || src == nil {
-		return Observation{}, quotaError(ProviderCodex, CodeConfiguration, false)
+		return Observation{}, quotaError(leg.Codex, CodeConfiguration, false)
 	}
 	cred, err := src.Get(ctx)
 	if err != nil || strings.TrimSpace(cred.AccessToken) == "" || strings.TrimSpace(cred.AccountID) == "" || len(cred.AccessToken) > 256<<10 || len(cred.AccountID) > 4096 {
-		return Observation{}, quotaError(ProviderCodex, CodeCredential, true)
+		return Observation{}, quotaError(leg.Codex, CodeCredential, true)
 	}
 	return c.ReadCredential(ctx, src, cred)
 }
@@ -112,25 +113,25 @@ func (c *CodexClient) Read(ctx context.Context, src auth.CredentialSource) (Obse
 // retained solely so a server refresh request can invalidate that snapshot.
 func (c *CodexClient) ReadCredential(parent context.Context, src auth.CredentialSource, cred auth.Credential) (Observation, error) {
 	if c == nil || src == nil || strings.TrimSpace(cred.AccessToken) == "" || strings.TrimSpace(cred.AccountID) == "" || len(cred.AccessToken) > 256<<10 || len(cred.AccountID) > 4096 {
-		return Observation{}, quotaError(ProviderCodex, CodeCredential, false)
+		return Observation{}, quotaError(leg.Codex, CodeCredential, false)
 	}
 	ctx, cancel := context.WithTimeout(parent, c.timeout)
 	defer cancel()
 
 	root, err := os.MkdirTemp(c.tempRoot, "utraque-codex-app-server-")
 	if err != nil {
-		return Observation{}, quotaError(ProviderCodex, CodeUnavailable, true)
+		return Observation{}, quotaError(leg.Codex, CodeUnavailable, true)
 	}
 	defer os.RemoveAll(root)
 	for _, dir := range []string{"home", "tmp", "work"} {
 		if err := os.Mkdir(filepath.Join(root, dir), 0o700); err != nil {
-			return Observation{}, quotaError(ProviderCodex, CodeUnavailable, true)
+			return Observation{}, quotaError(leg.Codex, CodeUnavailable, true)
 		}
 	}
 
 	executable, err := exec.LookPath(c.command[0])
 	if err != nil {
-		return Observation{}, quotaError(ProviderCodex, CodeUnavailable, false)
+		return Observation{}, quotaError(leg.Codex, CodeUnavailable, false)
 	}
 	cmd := exec.Command(executable, c.command[1:]...)
 	cmd.Dir = filepath.Join(root, "work")
@@ -146,18 +147,18 @@ func (c *CodexClient) ReadCredential(parent context.Context, src auth.Credential
 	configureProcessGroup(cmd)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		return Observation{}, quotaError(ProviderCodex, CodeUnavailable, true)
+		return Observation{}, quotaError(leg.Codex, CodeUnavailable, true)
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return Observation{}, quotaError(ProviderCodex, CodeUnavailable, true)
+		return Observation{}, quotaError(leg.Codex, CodeUnavailable, true)
 	}
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
-		return Observation{}, quotaError(ProviderCodex, CodeUnavailable, true)
+		return Observation{}, quotaError(leg.Codex, CodeUnavailable, true)
 	}
 	if err := cmd.Start(); err != nil {
-		return Observation{}, quotaError(ProviderCodex, CodeUnavailable, true)
+		return Observation{}, quotaError(leg.Codex, CodeUnavailable, true)
 	}
 
 	waitCh := make(chan error, 1)
@@ -207,40 +208,40 @@ func (c *CodexClient) ReadCredential(parent context.Context, src auth.Credential
 	}, &login); err != nil {
 		if errors.Is(err, errRefreshRequested) {
 			src.Invalidate(cred)
-			return Observation{}, quotaError(ProviderCodex, CodeCredential, true)
+			return Observation{}, quotaError(leg.Codex, CodeCredential, true)
 		}
 		return Observation{}, err
 	}
 	if login.Type != "chatgptAuthTokens" {
-		return Observation{}, quotaError(ProviderCodex, CodeProtocol, false)
+		return Observation{}, quotaError(leg.Codex, CodeProtocol, false)
 	}
 	var account codexAccountResponse
 	if err := rpc.call(3, "account/read", map[string]any{"refreshToken": false}, &account); err != nil {
 		if errors.Is(err, errRefreshRequested) {
 			src.Invalidate(cred)
-			return Observation{}, quotaError(ProviderCodex, CodeCredential, true)
+			return Observation{}, quotaError(leg.Codex, CodeCredential, true)
 		}
 		return Observation{}, err
 	}
 	if account.Account == nil || account.Account.Type != "chatgpt" {
-		return Observation{}, quotaError(ProviderCodex, CodeProtocol, false)
+		return Observation{}, quotaError(leg.Codex, CodeProtocol, false)
 	}
 	var limits codexRateLimitsResponse
 	if err := rpc.call(4, "account/rateLimits/read", nil, &limits); err != nil {
 		if errors.Is(err, errRefreshRequested) {
 			src.Invalidate(cred)
-			return Observation{}, quotaError(ProviderCodex, CodeCredential, true)
+			return Observation{}, quotaError(leg.Codex, CodeCredential, true)
 		}
 		return Observation{}, err
 	}
 	if limits.AccountID != nil && *limits.AccountID != cred.AccountID {
-		return Observation{}, quotaError(ProviderCodex, CodeCredential, true)
+		return Observation{}, quotaError(leg.Codex, CodeCredential, true)
 	}
 	cacheScope, err := CodexCacheScope(cred)
 	if err != nil {
 		return Observation{}, err
 	}
-	o := Observation{Source: ProviderCodex, CollectedAt: c.now().UTC(), cacheScope: cacheScope}
+	o := Observation{Source: leg.Codex, CollectedAt: c.now().UTC(), cacheScope: cacheScope}
 	if knownPlan(account.Account.PlanType) {
 		o.Plan = &PlanInfo{Type: account.Account.PlanType}
 	}
@@ -320,7 +321,7 @@ func normalizeCodexLimits(o *Observation, response codexRateLimitsResponse, now 
 			s   codexSnapshot
 		}{"codex", *response.RateLimits})
 	} else {
-		return quotaError(ProviderCodex, CodeProtocol, false)
+		return quotaError(leg.Codex, CodeProtocol, false)
 	}
 	for _, item := range items {
 		id := item.key
@@ -328,7 +329,7 @@ func normalizeCodexLimits(o *Observation, response codexRateLimitsResponse, now 
 			id = *item.s.LimitID
 		}
 		if !validNonemptyLabel(id) || item.s.LimitName != nil && !validLabel(*item.s.LimitName) || item.s.ReachedType != nil && !validLabel(*item.s.ReachedType) {
-			return quotaError(ProviderCodex, CodeInvalidData, false)
+			return quotaError(leg.Codex, CodeInvalidData, false)
 		}
 		// spend collects the bucket's ceiling facts into one SpendLimit; the
 		// schema v1 fan-out (SpendControls, the spend_control Quota and
@@ -349,13 +350,13 @@ func normalizeCodexLimits(o *Observation, response codexRateLimitsResponse, now 
 				continue
 			}
 			if window.UsedPercent == nil || !validPercent(*window.UsedPercent) {
-				return quotaError(ProviderCodex, CodeInvalidData, false)
+				return quotaError(leg.Codex, CodeInvalidData, false)
 			}
-			duration, err := durationSeconds(ProviderCodex, window.WindowDurationMin)
+			duration, err := durationSeconds(leg.Codex, window.WindowDurationMin)
 			if err != nil {
 				return err
 			}
-			reset, err := parseUnixReset(ProviderCodex, window.ResetsAt, now)
+			reset, err := parseUnixReset(leg.Codex, window.ResetsAt, now)
 			if err != nil {
 				return err
 			}
@@ -373,12 +374,12 @@ func normalizeCodexLimits(o *Observation, response codexRateLimitsResponse, now 
 		}
 		if item.s.Credits != nil {
 			if item.s.Credits.HasCredits == nil || item.s.Credits.Unlimited == nil {
-				return quotaError(ProviderCodex, CodeInvalidData, false)
+				return quotaError(leg.Codex, CodeInvalidData, false)
 			}
 			b := Balance{Kind: "workspace_credits", LimitID: id, AmountUnit: "credits", Available: item.s.Credits.HasCredits, Unlimited: item.s.Credits.Unlimited}
 			if item.s.Credits.Balance != nil {
 				if !validDecimal(*item.s.Credits.Balance) {
-					return quotaError(ProviderCodex, CodeInvalidData, false)
+					return quotaError(leg.Codex, CodeInvalidData, false)
 				}
 				b.Total = *item.s.Credits.Balance
 			}
@@ -387,9 +388,9 @@ func normalizeCodexLimits(o *Observation, response codexRateLimitsResponse, now 
 		if item.s.IndividualLimit != nil {
 			s := item.s.IndividualLimit
 			if !validDecimal(s.Limit) || !validDecimal(s.Used) || s.RemainingPercent == nil || !validPercent(*s.RemainingPercent) || s.ResetsAt == nil {
-				return quotaError(ProviderCodex, CodeInvalidData, false)
+				return quotaError(leg.Codex, CodeInvalidData, false)
 			}
-			reset, err := parseUnixReset(ProviderCodex, s.ResetsAt, now)
+			reset, err := parseUnixReset(leg.Codex, s.ResetsAt, now)
 			if err != nil {
 				return err
 			}
@@ -409,7 +410,7 @@ func normalizeCodexLimits(o *Observation, response codexRateLimitsResponse, now 
 	}
 	if response.RateLimitReset != nil {
 		if response.RateLimitReset.AvailableCount == nil || *response.RateLimitReset.AvailableCount < 0 || *response.RateLimitReset.AvailableCount > 1_000_000 {
-			return quotaError(ProviderCodex, CodeInvalidData, false)
+			return quotaError(leg.Codex, CodeInvalidData, false)
 		}
 		o.ResetCredits = &ResetCredits{AvailableCount: *response.RateLimitReset.AvailableCount}
 	}
@@ -455,24 +456,24 @@ func (r rpcSession) call(id int, method string, params any, result any) error {
 	for {
 		select {
 		case <-r.ctx.Done():
-			return quotaError(ProviderCodex, CodeTimeout, true)
+			return quotaError(leg.Codex, CodeTimeout, true)
 		case line, ok := <-r.lines:
 			if !ok || line.err != nil {
 				if line.err != nil {
 					return line.err
 				}
-				return quotaError(ProviderCodex, CodeProtocol, true)
+				return quotaError(leg.Codex, CodeProtocol, true)
 			}
 			var envelope rpcEnvelope
 			if json.Unmarshal(line.data, &envelope) != nil {
-				return quotaError(ProviderCodex, CodeProtocol, false)
+				return quotaError(leg.Codex, CodeProtocol, false)
 			}
 			if envelope.Method != "" {
 				if envelope.Method == "account/chatgptAuthTokens/refresh" && len(envelope.ID) > 0 {
 					return errRefreshRequested
 				}
 				if len(envelope.ID) > 0 {
-					return quotaError(ProviderCodex, CodeProtocol, false)
+					return quotaError(leg.Codex, CodeProtocol, false)
 				}
 				continue
 			}
@@ -481,13 +482,13 @@ func (r rpcSession) call(id int, method string, params any, result any) error {
 				continue
 			}
 			if len(envelope.Error) > 0 && string(envelope.Error) != "null" {
-				return quotaError(ProviderCodex, CodeUnavailable, true)
+				return quotaError(leg.Codex, CodeUnavailable, true)
 			}
 			if len(envelope.Result) == 0 {
-				return quotaError(ProviderCodex, CodeProtocol, false)
+				return quotaError(leg.Codex, CodeProtocol, false)
 			}
 			if result != nil && json.Unmarshal(envelope.Result, result) != nil {
-				return quotaError(ProviderCodex, CodeProtocol, false)
+				return quotaError(leg.Codex, CodeProtocol, false)
 			}
 			return nil
 		}
@@ -499,10 +500,10 @@ func (r rpcSession) write(value any) error {
 	go func() { done <- json.NewEncoder(r.stdin).Encode(value) }()
 	select {
 	case <-r.ctx.Done():
-		return quotaError(ProviderCodex, CodeTimeout, true)
+		return quotaError(leg.Codex, CodeTimeout, true)
 	case err := <-done:
 		if err != nil {
-			return quotaError(ProviderCodex, CodeUnavailable, true)
+			return quotaError(leg.Codex, CodeUnavailable, true)
 		}
 		return nil
 	}
@@ -529,7 +530,7 @@ func startJSONLines(ctx context.Context, r io.Reader, maxLine int, maxOutput int
 			total += int64(len(line)) + 1
 			if total > maxOutput {
 				select {
-				case ch <- jsonLine{err: quotaError(ProviderCodex, CodeTooLarge, false)}:
+				case ch <- jsonLine{err: quotaError(leg.Codex, CodeTooLarge, false)}:
 				case <-ctx.Done():
 				}
 				return
@@ -542,7 +543,7 @@ func startJSONLines(ctx context.Context, r io.Reader, maxLine int, maxOutput int
 		}
 		if err := scanner.Err(); err != nil {
 			select {
-			case ch <- jsonLine{err: quotaError(ProviderCodex, CodeTooLarge, false)}:
+			case ch <- jsonLine{err: quotaError(leg.Codex, CodeTooLarge, false)}:
 			case <-ctx.Done():
 			}
 		}

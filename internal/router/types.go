@@ -4,6 +4,8 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+
+	"github.com/hughescr/utraque/internal/leg"
 )
 
 // The two conditions every leg must be able to report to the dispatcher, and
@@ -45,28 +47,20 @@ var (
 // — does that cleanup in a defer, so unwinding past them loses nothing.
 func AbortResponse() { panic(http.ErrAbortHandler) }
 
-// Backend names one of the upstream legs a request can be sent to.
-type Backend string
+// Backend names one of the upstream legs a request can be sent to. It is an
+// alias of leg.ID, the shared leg identity, so a Decision's Backend and a
+// provider-quota Observation's Source are the same type; the Backend name and
+// the Backend* constants are kept so existing call sites read as before.
+// leg.ID.Valid excludes leg.Unknown, which is how SetPickerRoutes keeps an
+// unattributed value out of the picker tier.
+type Backend = leg.ID
 
 // The backends utraque can route to.
 const (
-	BackendAnthropic Backend = "anthropic"
-	BackendCodex     Backend = "codex"
-	BackendDeepSeek  Backend = "deepseek"
+	BackendAnthropic = leg.Anthropic
+	BackendCodex     = leg.Codex
+	BackendDeepSeek  = leg.DeepSeek
 )
-
-// String renders the backend name.
-func (b Backend) String() string { return string(b) }
-
-// Valid reports whether b is one of the known backends.
-func (b Backend) Valid() bool {
-	switch b {
-	case BackendAnthropic, BackendCodex, BackendDeepSeek:
-		return true
-	default:
-		return false
-	}
-}
 
 // Effort provenance, highest precedence first. A Decision records which of
 // these supplied its Effort so a later phase can apply the plan's precedence

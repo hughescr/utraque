@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/hughescr/utraque/internal/codex/auth"
+	"github.com/hughescr/utraque/internal/leg"
 	"github.com/hughescr/utraque/internal/providerquota"
 	"github.com/hughescr/utraque/internal/referenceprice"
 	"github.com/hughescr/utraque/internal/usagehistory"
@@ -123,19 +124,19 @@ func TestReportUsesCallerBearerOnlyForAnthropicAndCachesCoherently(t *testing.T)
 		historyCalls.Add(1)
 		return sampleHistory(now), nil
 	})
-	obs := func(p providerquota.Provider) providerquota.Observation {
+	obs := func(p leg.ID) providerquota.Observation {
 		return providerquota.Observation{Source: p, CollectedAt: now}
 	}
 	h := New(Options{History: history,
 		Anthropic: anthropicFunc(func(_ context.Context, token string) (providerquota.Observation, error) {
 			anthToken = token
-			return obs(providerquota.ProviderAnthropic), nil
+			return obs(leg.Anthropic), nil
 		}),
 		DeepSeek: deepSeekFunc(func(context.Context) (providerquota.Observation, error) {
-			return obs(providerquota.ProviderDeepSeek), nil
+			return obs(leg.DeepSeek), nil
 		}),
 		Codex: codexFunc(func(context.Context, auth.CredentialSource, auth.Credential) (providerquota.Observation, error) {
-			return obs(providerquota.ProviderCodex), nil
+			return obs(leg.Codex), nil
 		}),
 		CodexSource: sourceFunc(func(context.Context) (auth.Credential, error) {
 			return auth.Credential{AccessToken: "codex-secret", AccountID: "account"}, nil
@@ -180,7 +181,7 @@ func TestRateLimitedQuotaReportsRetryTimeAndActualAttempt(t *testing.T) {
 			return sampleHistory(now), nil
 		}),
 		Anthropic: anthropicFunc(func(context.Context, string) (providerquota.Observation, error) {
-			return providerquota.Observation{}, &providerquota.Error{Provider: providerquota.ProviderAnthropic, Code: providerquota.CodeRateLimited, Retryable: true, RetryAt: &retryAt, AttemptedAt: attempted}
+			return providerquota.Observation{}, &providerquota.Error{Provider: leg.Anthropic, Code: providerquota.CodeRateLimited, Retryable: true, RetryAt: &retryAt, AttemptedAt: attempted}
 		}),
 		Now: func() time.Time { return now },
 	})
@@ -234,7 +235,7 @@ func TestSlowHistoryDoesNotDelayHealthyQuotaRead(t *testing.T) {
 		}),
 		Anthropic: anthropicFunc(func(context.Context, string) (providerquota.Observation, error) {
 			close(quotaRead)
-			return providerquota.Observation{Source: providerquota.ProviderAnthropic, CollectedAt: now}, nil
+			return providerquota.Observation{Source: leg.Anthropic, CollectedAt: now}, nil
 		}),
 		Now: func() time.Time { return now },
 	})
@@ -260,8 +261,8 @@ func TestReferencePricesUseCanonicalCandidatesAndObservedHistory(t *testing.T) {
 	cacheRead, cacheWrite := .4, 5.0
 	history := sampleHistory(now)
 	history.Daily = append(history.Daily,
-		usagehistory.DailyModelUsage{Date: utcDate(now), Source: "claude", Model: "old-gpt", Provider: usagehistory.ProviderCodex, TotalTokens: 10},
-		usagehistory.DailyModelUsage{Date: utcDate(now), Source: "claude", Model: "sol", Provider: usagehistory.ProviderCodex, TotalTokens: 10})
+		usagehistory.DailyModelUsage{Date: utcDate(now), Source: "claude", Model: "old-gpt", InferredLeg: leg.Codex, TotalTokens: 10},
+		usagehistory.DailyModelUsage{Date: utcDate(now), Source: "claude", Model: "sol", InferredLeg: leg.Codex, TotalTokens: 10})
 	h := New(Options{
 		History: historyFunc(func(context.Context, time.Time, time.Time) (usagehistory.Report, error) { return history, nil }),
 		ReferencePrices: priceFunc(func(context.Context) (referenceprice.Snapshot, error) {
@@ -273,14 +274,14 @@ func TestReferencePricesUseCanonicalCandidatesAndObservedHistory(t *testing.T) {
 					{Provider: "anthropic", Model: "claude-sonnet-5", Input: 2, Output: 10},
 				}}, nil
 		}),
-		EligiblePriceModels: func(provider string) []string {
-			if provider == "codex" {
+		EligiblePriceModels: func(id leg.ID) []string {
+			if id == leg.Codex {
 				return []string{"gpt-5.6-sol"}
 			}
 			return nil
 		},
-		NormalizePriceModel: func(provider, model string) string {
-			if provider == "codex" && model == "sol" {
+		NormalizePriceModel: func(id leg.ID, model string) string {
+			if id == leg.Codex && model == "sol" {
 				return "gpt-5.6-sol"
 			}
 			return model
@@ -320,7 +321,7 @@ func TestReferencePriceFailureIsProviderLocalAndCollectionConcurrent(t *testing.
 		}),
 		Anthropic: anthropicFunc(func(context.Context, string) (providerquota.Observation, error) {
 			close(quotaRead)
-			return providerquota.Observation{Source: providerquota.ProviderAnthropic, CollectedAt: now}, nil
+			return providerquota.Observation{Source: leg.Anthropic, CollectedAt: now}, nil
 		}),
 		ReferencePrices: priceFunc(func(context.Context) (referenceprice.Snapshot, error) {
 			close(priceStarted)
@@ -381,7 +382,7 @@ func TestConcurrentRequestsCoalesceAndFailedRefreshRetainsSeparateSnapshot(t *te
 		if failing {
 			return providerquota.Observation{}, errors.New("failed")
 		}
-		return providerquota.Observation{Source: providerquota.ProviderDeepSeek, CollectedAt: now}, nil
+		return providerquota.Observation{Source: leg.DeepSeek, CollectedAt: now}, nil
 	})
 	h := New(Options{History: history, DeepSeek: reader, CacheTTL: time.Second, Now: func() time.Time { return now }})
 	request := func() Report {
@@ -464,7 +465,7 @@ func TestCodexAccountSwitchDuringCollectionCannotReplaceNewAccount(t *testing.T)
 		if cred.AccountID == "account-b" {
 			pct = 20
 		}
-		return providerquota.Observation{Source: providerquota.ProviderCodex, CollectedAt: now, Quotas: []providerquota.Quota{{ID: "primary", UsedPercent: pct}}}, nil
+		return providerquota.Observation{Source: leg.Codex, CollectedAt: now, Quotas: []providerquota.Quota{{ID: "primary", UsedPercent: pct}}}, nil
 	})
 	h := New(Options{History: history, Codex: codex, CodexSource: source, Now: func() time.Time { return now }})
 	request := func() Report {
@@ -555,7 +556,7 @@ func TestMalformedFinalCodexScopeCannotRestorePreviousSnapshot(t *testing.T) {
 				return sampleHistory(now), nil
 			})
 			codex := codexFunc(func(context.Context, auth.CredentialSource, auth.Credential) (providerquota.Observation, error) {
-				return providerquota.Observation{Source: providerquota.ProviderCodex, CollectedAt: now}, nil
+				return providerquota.Observation{Source: leg.Codex, CollectedAt: now}, nil
 			})
 			h := New(Options{History: history, Codex: codex, CodexSource: source, CacheTTL: time.Second, Now: func() time.Time { return now }})
 			request := func() Report {
@@ -589,9 +590,9 @@ func TestMalformedFinalCodexScopeCannotRestorePreviousSnapshot(t *testing.T) {
 	}
 }
 
-func providerNamed(r Report, name string) *ProviderReport {
+func providerNamed(r Report, id leg.ID) *ProviderReport {
 	for i := range r.Providers {
-		if r.Providers[i].Provider == name {
+		if r.Providers[i].Provider == id {
 			return &r.Providers[i]
 		}
 	}
@@ -654,7 +655,7 @@ func sampleHistory(now time.Time) usagehistory.Report {
 	return usagehistory.Report{StartedAt: now, FinishedAt: now, SinceDate: now.AddDate(0, 0, -29), UntilDate: now,
 		ToolVersion: "20.0.20", InvocationMode: usagehistory.InvocationNative, Source: usagehistory.SourceCCUsage, Coverage: usagehistory.CoverageLocalOnly,
 		CostBasis: usagehistory.CostBasisCalculatedAPIReference, UnitPriceUnavailableReason: usagehistory.UnitPriceUnavailableCCUsage,
-		Daily: []usagehistory.DailyModelUsage{{Date: utcDate(now), Source: "claude", Model: "deepseek-v4", Provider: usagehistory.ProviderDeepSeek, TotalTokens: 100, CostUSD: &cost, CostStatus: usagehistory.CostAvailable}}}
+		Daily: []usagehistory.DailyModelUsage{{Date: utcDate(now), Source: "claude", Model: "deepseek-v4", InferredLeg: leg.DeepSeek, TotalTokens: 100, CostUSD: &cost, CostStatus: usagehistory.CostAvailable}}}
 }
 
 func ptr[T any](v T) *T { return &v }

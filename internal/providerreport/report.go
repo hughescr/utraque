@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/hughescr/utraque/internal/codex/auth"
+	"github.com/hughescr/utraque/internal/leg"
 	"github.com/hughescr/utraque/internal/providerquota"
 	"github.com/hughescr/utraque/internal/referenceprice"
 	"github.com/hughescr/utraque/internal/usagehistory"
@@ -74,43 +75,43 @@ func (h *Handler) collect(ctx context.Context, creds credentials, since, until t
 	r := Report{SchemaVersion: SchemaVersion, GeneratedAt: ended,
 		CollectionStartedAt: started, CollectionEndedAt: ended,
 		HistoryRange: DateRange{Since: since, Until: until}}
-	providers := []struct {
-		name string
-		kind usagehistory.Provider
-	}{{"anthropic", usagehistory.ProviderAnthropic}, {"codex", usagehistory.ProviderCodex}, {"deepseek", usagehistory.ProviderDeepSeek}}
-	for _, p := range providers {
-		pr := h.buildProvider(p.name, p.kind, ended, quotas[p.name], prices, history, historyErr, since, until)
+	for _, id := range reportedLegs {
+		pr := h.buildProvider(id, ended, quotas[id], prices, history, historyErr, since, until)
 		r.Providers = append(r.Providers, pr)
 	}
-	r.UnattributedHistory = aggregateModels(history.Daily, usagehistory.ProviderUnknown, since, until)
+	r.UnattributedHistory = aggregateModels(history.Daily, leg.Unknown, since, until)
 	return r
 }
 
-func (h *Handler) readQuotas(ctx context.Context, creds credentials) map[string]quotaResult {
-	out := make(map[string]quotaResult, 3)
+// reportedLegs is the order of the report's providers array: one section per
+// leg, whether or not that leg is configured.
+var reportedLegs = []leg.ID{leg.Anthropic, leg.Codex, leg.DeepSeek}
+
+func (h *Handler) readQuotas(ctx context.Context, creds credentials) map[leg.ID]quotaResult {
+	out := make(map[leg.ID]quotaResult, len(reportedLegs))
 	var mu sync.Mutex
 	var wg sync.WaitGroup
-	read := func(name string, fn func() (providerquota.Observation, error)) {
+	read := func(id leg.ID, fn func() (providerquota.Observation, error)) {
 		defer wg.Done()
 		o, err := fn()
 		mu.Lock()
-		out[name] = quotaResult{o, err}
+		out[id] = quotaResult{o, err}
 		mu.Unlock()
 	}
-	wg.Add(3)
-	go read("anthropic", func() (providerquota.Observation, error) {
+	wg.Add(len(reportedLegs))
+	go read(leg.Anthropic, func() (providerquota.Observation, error) {
 		if h.anthropic == nil || creds.anthropicToken == "" {
 			return providerquota.Observation{}, errCredentialUnavailable
 		}
 		return h.anthropic.Read(ctx, creds.anthropicToken)
 	})
-	go read("deepseek", func() (providerquota.Observation, error) {
+	go read(leg.DeepSeek, func() (providerquota.Observation, error) {
 		if h.deepseek == nil {
 			return providerquota.Observation{}, errNotConfigured
 		}
 		return h.deepseek.Read(ctx)
 	})
-	go read("codex", func() (providerquota.Observation, error) {
+	go read(leg.Codex, func() (providerquota.Observation, error) {
 		if h.codex == nil || h.codexSource == nil || creds.codex.AccountID == "" {
 			return providerquota.Observation{}, errCredentialUnavailable
 		}
@@ -120,8 +121,11 @@ func (h *Handler) readQuotas(ctx context.Context, creds credentials) map[string]
 	return out
 }
 
-func (h *Handler) buildProvider(name string, kind usagehistory.Provider, ended time.Time, quota quotaResult, prices priceResult, history usagehistory.Report, historyErr error, since, until time.Time) ProviderReport {
-	pr := ProviderReport{Provider: name, LastAttempt: ended, Errors: []ReportError{}}
+// buildProvider assembles one leg's report section: its quota observation or
+// error, the history rows usagehistory attributed to the same leg, and the
+// reference prices filed under it.
+func (h *Handler) buildProvider(id leg.ID, ended time.Time, quota quotaResult, prices priceResult, history usagehistory.Report, historyErr error, since, until time.Time) ProviderReport {
+	pr := ProviderReport{Provider: id, LastAttempt: ended, Errors: []ReportError{}}
 	var quotaErr *providerquota.Error
 	if errors.As(quota.err, &quotaErr) && !quotaErr.AttemptedAt.IsZero() {
 		pr.LastAttempt = quotaErr.AttemptedAt
@@ -134,9 +138,9 @@ func (h *Handler) buildProvider(name string, kind usagehistory.Provider, ended t
 		pr.Errors = append(pr.Errors, safeError(SectionQuota, quota.err))
 	}
 
-	rows30 := aggregateModels(history.Daily, kind, since, until)
-	rows7 := aggregateModels(history.Daily, kind, until.AddDate(0, 0, -6), until)
-	blocks := filterBlocks(history.Blocks, kind)
+	rows30 := aggregateModels(history.Daily, id, since, until)
+	rows7 := aggregateModels(history.Daily, id, until.AddDate(0, 0, -6), until)
+	blocks := filterBlocks(history.Blocks, id)
 	if len(rows30) > 0 || len(blocks) > 0 || historyErr == nil {
 		pr.History = &HistorySummary{StartedAt: history.StartedAt, FinishedAt: history.FinishedAt,
 			Source: history.Source, Coverage: history.Coverage, CostBasis: history.CostBasis,
@@ -148,7 +152,7 @@ func (h *Handler) buildProvider(name string, kind usagehistory.Provider, ended t
 	if historyErr != nil {
 		pr.Errors = append(pr.Errors, safeError(SectionHistory, historyErr))
 	}
-	if reference := h.referencePrices(name, rows30, prices.snapshot); reference != nil {
+	if reference := h.referencePrices(id, rows30, prices.snapshot); reference != nil {
 		pr.ReferencePrices = reference
 	}
 	if prices.err != nil {
@@ -169,19 +173,19 @@ func (h *Handler) buildProvider(name string, kind usagehistory.Provider, ended t
 		t := ended
 		pr.LastSuccess = &t
 	}
-	if name == "anthropic" {
+	if id == leg.Anthropic {
 		pr.Calibration = &Calibration{UnavailableReason: ReasonPairedMeasurementUnavailable}
 		if h.planLabel != "" || h.planMultiplier != nil {
 			pr.ConfiguredPlan = &ConfiguredPlan{Label: h.planLabel, Multiplier: h.planMultiplier, Source: "configured"}
 		}
 	}
-	if name == "deepseek" {
+	if id == leg.DeepSeek {
 		pr.Remaining = estimateDeepSeek(quota.obs, rows30)
 	}
 	return pr
 }
 
-func (h *Handler) referencePrices(provider string, history []ModelStats, snapshot referenceprice.Snapshot) *PriceSnapshot {
+func (h *Handler) referencePrices(provider leg.ID, history []ModelStats, snapshot referenceprice.Snapshot) *PriceSnapshot {
 	if len(snapshot.Models) == 0 {
 		return nil
 	}
@@ -223,7 +227,7 @@ func (h *Handler) referencePrices(provider string, history []ModelStats, snapsho
 	if baseTier {
 		out.Assumptions = append(out.Assumptions, "base_tier")
 	}
-	if provider == "anthropic" && slices.ContainsFunc(out.Models, func(row PriceRow) bool { return row.CacheWrite != nil }) {
+	if provider == leg.Anthropic && slices.ContainsFunc(out.Models, func(row PriceRow) bool { return row.CacheWrite != nil }) {
 		out.Assumptions = append(out.Assumptions, "cache_write_5m")
 	}
 	return &out
@@ -271,16 +275,16 @@ type modelAccum struct {
 	priced bool
 }
 
-func aggregateModels(rows []usagehistory.DailyModelUsage, provider usagehistory.Provider, since, until time.Time) []ModelStats {
+func aggregateModels(rows []usagehistory.DailyModelUsage, id leg.ID, since, until time.Time) []ModelStats {
 	m := map[modelKey]*modelAccum{}
 	for _, row := range rows {
-		if row.Provider != provider || row.Date.Before(since) || row.Date.After(until) {
+		if row.InferredLeg != id || row.Date.Before(since) || row.Date.After(until) {
 			continue
 		}
 		k := modelKey{row.Source, row.Model}
 		a := m[k]
 		if a == nil {
-			a = &modelAccum{row: ModelStats{Source: row.Source, Model: row.Model, Provider: row.Provider}, priced: true}
+			a = &modelAccum{row: ModelStats{Source: row.Source, Model: row.Model, Provider: row.InferredLeg}, priced: true}
 			m[k] = a
 		}
 		a.row.InputTokens += row.InputTokens
@@ -316,12 +320,12 @@ func aggregateModels(rows []usagehistory.DailyModelUsage, provider usagehistory.
 	return out
 }
 
-func filterBlocks(blocks []usagehistory.BlockSummary, provider usagehistory.Provider) []usagehistory.BlockSummary {
+func filterBlocks(blocks []usagehistory.BlockSummary, id leg.ID) []usagehistory.BlockSummary {
 	out := []usagehistory.BlockSummary{}
 	for _, b := range blocks {
 		matched := false
 		for _, m := range b.Models {
-			if m.Provider == provider {
+			if m.InferredLeg == id {
 				matched = true
 			}
 		}
