@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -91,27 +92,29 @@ func TestRequestLineCarriesEveryField(t *testing.T) {
 
 	for _, key := range []string{
 		"request_id", "method", "path", "status", "req_bytes", "ttfb_ms", "total_ms",
-		"route", "client_model", "upstream_model", "effort", "stream",
-		"upstream_status", "output_tokens", "stop_reason", "interrupted", "transport",
+		"route", "client_model", "upstream_model", "effort_requested", "effort_applied", "stream",
+		"upstream_status", "output_tokens", "input_tokens", "cache_read_input_tokens",
+		"cache_creation_input_tokens", "stop_reason", "interrupted", "transport",
 	} {
 		if _, ok := rec[key]; !ok {
 			t.Errorf("the request line is missing %q:\n%v", key, rec)
 		}
 	}
 	for key, want := range map[string]any{
-		"method":          "POST",
-		"path":            "/v1/messages",
-		"route":           "codex",
-		"client_model":    "sol-high",
-		"upstream_model":  "gpt-5.6-sol",
-		"effort":          "high",
-		"stream":          true,
-		"stop_reason":     "end_turn",
-		"interrupted":     false,
-		"transport":       "std",
-		"status":          float64(http.StatusOK),
-		"upstream_status": float64(http.StatusOK),
-		"output_tokens":   float64(4),
+		"method":           "POST",
+		"path":             "/v1/messages",
+		"route":            "codex",
+		"client_model":     "sol-high",
+		"upstream_model":   "gpt-5.6-sol",
+		"effort_requested": "high",
+		"effort_applied":   "high",
+		"stream":           true,
+		"stop_reason":      "end_turn",
+		"interrupted":      false,
+		"transport":        "std",
+		"status":           float64(http.StatusOK),
+		"upstream_status":  float64(http.StatusOK),
+		"output_tokens":    float64(4),
 	} {
 		if rec[key] != want {
 			t.Errorf("request line %q = %v, want %v", key, rec[key], want)
@@ -124,6 +127,189 @@ func TestRequestLineCarriesEveryField(t *testing.T) {
 	// on the field's presence should find only real failures.
 	if _, present := rec["err"]; present {
 		t.Errorf("a successful request logged an err field: %v", rec)
+	}
+	if _, present := rec["effort"]; present {
+		t.Errorf("the request line still carries the old effort key: %v", rec)
+	}
+	// The header group names what it withheld under headers_withheld, the
+	// trace manifest's key; "redacted" is reserved for a substituted value.
+	headers, _ := rec["headers"].(map[string]any)
+	if _, ok := headers["headers_withheld"].([]any); !ok {
+		t.Errorf("headers.headers_withheld missing or not a list: %v", rec["headers"])
+	}
+	if _, present := headers["redacted"]; present {
+		t.Errorf("headers group still carries the old key redacted: %v", rec["headers"])
+	}
+}
+
+// TestRoutedRecordCarriesRouteAndRequestedEffort pins the DEBUG "routed"
+// record's keys: route (not backend) and effort_requested (the suffix value,
+// before any clamp), which is the only effort the dispatcher knows.
+func TestRoutedRecordCarriesRouteAndRequestedEffort(t *testing.T) {
+	restoreRegistry(t)
+	env := newCodexEnvOpts(t, nil, codexEnvOptions{CaptureLogs: true, Level: slog.LevelDebug})
+
+	resp := post(t, env.front.URL+"/v1/messages",
+		`{"model":"sol-high","max_tokens":16,"stream":true,"messages":[{"role":"user","content":"hi"}]}`, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
+
+	var routed map[string]any
+	for _, rec := range logLines(t, env.logs.String()) {
+		if rec["msg"] == "routed" {
+			routed = rec
+		}
+	}
+	if routed == nil {
+		t.Fatalf("no routed record:\n%s", env.logs.String())
+	}
+	for key, want := range map[string]any{
+		"route":            "codex",
+		"client_model":     "sol-high",
+		"upstream_model":   "gpt-5.6-sol",
+		"effort_requested": "high",
+		"effort_source":    "suffix",
+		"stream":           true,
+	} {
+		if routed[key] != want {
+			t.Errorf("routed %q = %v, want %v", key, routed[key], want)
+		}
+	}
+	for _, old := range []string{"backend", "effort", "effort_applied"} {
+		if _, present := routed[old]; present {
+			t.Errorf("routed record carries %q, which it must not: %v", old, routed)
+		}
+	}
+}
+
+// TestRequestLineEffortOnEveryRoute pins the presence contract of the effort
+// pair. effort_requested is the model-name suffix and nothing else, so an
+// unsuffixed name routes with an EMPTY value that is still on the line — on
+// every leg — because "the client asked for none" is an observation, not an
+// absence. effort_applied appears only once the Codex translator has resolved
+// a level (here the catalog default), so the Anthropic and DeepSeek lines
+// never carry it, and the Codex stream record carries the pair the
+// translator saw.
+func TestRequestLineEffortOnEveryRoute(t *testing.T) {
+	restoreRegistry(t)
+	deepseek := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"msg_ds","type":"message","role":"assistant","model":"deepseek-flash","content":[],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`)
+	}))
+	t.Cleanup(deepseek.Close)
+	env := newCodexEnvOpts(t, func(cfg *config.Config) {
+		cfg.DeepSeek.BaseURL = deepseek.URL
+		cfg.DeepSeek.APIKey = "deepseek-test-key"
+	}, codexEnvOptions{CaptureLogs: true, Level: slog.LevelDebug})
+
+	for _, body := range []string{
+		`{"model":"sol","max_tokens":16,"stream":true,"messages":[{"role":"user","content":"hi"}]}`,
+		`{"model":"claude-sonnet-4-5-20250929","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`,
+		`{"model":"anthropic-compat.deepseek-flash","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`,
+	} {
+		resp := post(t, env.front.URL+"/v1/messages", body, nil)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d, want 200 for %s", resp.StatusCode, body)
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+	}
+
+	lines := requestLines(t, env.logs.String())
+	if len(lines) != 3 {
+		t.Fatalf("want three request lines, got %d:\n%s", len(lines), env.logs.String())
+	}
+	byRoute := map[string]map[string]any{}
+	for _, rec := range lines {
+		byRoute[rec["route"].(string)] = rec
+	}
+	for _, route := range []string{"codex", "anthropic", "deepseek"} {
+		rec := byRoute[route]
+		if rec == nil {
+			t.Fatalf("no request line for route %s: %v", route, lines)
+		}
+		got, present := rec["effort_requested"]
+		if !present || got != "" {
+			t.Errorf("%s: effort_requested = %v (present %v), want present and empty", route, got, present)
+		}
+		applied, present := rec["effort_applied"]
+		switch route {
+		case "codex":
+			// The catalog default for the unsuffixed slug (see fakeCatalogBody).
+			if applied != "low" {
+				t.Errorf("codex: effort_applied = %v, want the catalog default low", applied)
+			}
+		default:
+			if present {
+				t.Errorf("%s: effort_applied = %v, want it absent on a leg that applies none", route, applied)
+			}
+		}
+	}
+
+	// The routed record of an unsuffixed name says so: empty requested effort
+	// and an empty source, never a resolved default.
+	var routed, streamed []map[string]any
+	for _, rec := range logLines(t, env.logs.String()) {
+		switch rec["msg"] {
+		case "routed":
+			routed = append(routed, rec)
+		case "codex stream translated":
+			streamed = append(streamed, rec)
+		}
+	}
+	if len(routed) != 3 {
+		t.Fatalf("want three routed records, got %d", len(routed))
+	}
+	for _, rec := range routed {
+		if v, present := rec["effort_requested"]; !present || v != "" {
+			t.Errorf("routed %s: effort_requested = %v (present %v), want present and empty", rec["route"], v, present)
+		}
+		if rec["effort_source"] != "" {
+			t.Errorf("routed %s: effort_source = %v, want empty for an unsuffixed name", rec["route"], rec["effort_source"])
+		}
+	}
+	// The Codex stream record carries the pair as the translator resolved it:
+	// the catalog default was chosen (requested) and sent unclamped (applied).
+	if len(streamed) != 1 {
+		t.Fatalf("want one codex stream record, got %d", len(streamed))
+	}
+	if streamed[0]["effort_requested"] != "low" || streamed[0]["effort_applied"] != "low" {
+		t.Errorf("stream record effort pair = %v / %v, want low / low", streamed[0]["effort_requested"], streamed[0]["effort_applied"])
+	}
+	if _, present := streamed[0]["effort"]; present {
+		t.Errorf("stream record still carries the old effort key: %v", streamed[0])
+	}
+}
+
+// TestStartupTransportWarningNamesTheMode pins the WARN the app writes when the
+// Codex leg starts on a non-standard TLS transport: the configured mode is
+// keyed codex.transport_mode, the same key the startup config line uses,
+// distinct from the per-request `transport` key that carries the live kind.
+func TestStartupTransportWarningNamesTheMode(t *testing.T) {
+	restoreRegistry(t)
+	env := newCodexEnvOpts(t, func(cfg *config.Config) { cfg.Codex.Transport = "utls" },
+		codexEnvOptions{CaptureLogs: true, Level: slog.LevelWarn})
+
+	var warned map[string]any
+	for _, rec := range logLines(t, env.logs.String()) {
+		if rec["msg"] == "the codex leg is starting on a non-standard TLS transport" {
+			warned = rec
+		}
+	}
+	if warned == nil {
+		t.Fatalf("no transport warning:\n%s", env.logs.String())
+	}
+	if warned["level"] != "WARN" {
+		t.Errorf("level = %v, want WARN", warned["level"])
+	}
+	if warned["codex.transport_mode"] != "utls" || warned["kind"] != "utls" {
+		t.Errorf("warning = %v, want codex.transport_mode=utls kind=utls", warned)
+	}
+	if _, present := warned["codex.transport"]; present {
+		t.Errorf("warning still carries the old key codex.transport: %v", warned)
 	}
 }
 
@@ -287,7 +473,7 @@ func TestTraceDumpsWriteRedactedFixtures(t *testing.T) {
 	}
 
 	read := func(suffix string) string {
-		b, err := os.ReadFile(filepath.Join(dir, "trace-me-1"+suffix))
+		b, err := os.ReadFile(filepath.Join(dir, obs.TraceStem("trace-me-1")+suffix))
 		if err != nil {
 			t.Fatalf("trace file %s missing: %v", suffix, err)
 		}

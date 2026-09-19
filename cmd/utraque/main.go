@@ -289,7 +289,7 @@ func newApp(cfg config.Config, log *slog.Logger, activity server.ActivityTracker
 	}
 	if codexTr.Kind() != transport.KindStd {
 		log.Warn("the codex leg is starting on a non-standard TLS transport",
-			slog.String("codex.transport", cfg.Codex.Transport),
+			slog.String("codex.transport_mode", cfg.Codex.Transport),
 			slog.String("kind", codexTr.Kind()))
 	}
 
@@ -1140,17 +1140,17 @@ func (d *dispatcher) dispatch(w http.ResponseWriter, r *http.Request, call legCa
 	sum := obs.SummaryFrom(ctx)
 	sum.SetRoute(dec.Backend.String())
 	sum.SetModels(dec.ClientModel, dec.UpstreamModel)
-	sum.SetEffort(dec.Effort.String())
+	sum.SetEffortRequested(dec.Effort.String())
 	sum.SetStream(p.Stream)
 	// The dispatcher read the body, so it knows its real size — better than the
 	// declared Content-Length the middleware had to settle for.
 	sum.SetReqBytes(int64(len(raw)))
 
 	log.LogAttrs(ctx, slog.LevelDebug, "routed",
-		slog.String("backend", dec.Backend.String()),
+		slog.String("route", dec.Backend.String()),
 		slog.String("client_model", dec.ClientModel),
 		slog.String("upstream_model", dec.UpstreamModel),
-		slog.String("effort", dec.Effort.String()),
+		slog.String("effort_requested", dec.Effort.String()),
 		slog.String("effort_source", dec.EffortSource.String()),
 		slog.Bool("stream", p.Stream),
 	)

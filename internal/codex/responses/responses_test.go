@@ -220,6 +220,42 @@ func TestStreamResponseCarriesMetadata(t *testing.T) {
 	}
 }
 
+// The class values are logged as `class`, so they are a log-schema contract.
+// The 5xx class is spelled for what it is; it was "upstream" before the
+// log-schema change that renamed it.
+func TestClassValuesAreTheLoggedSpelling(t *testing.T) {
+	for c, want := range map[Class]string{
+		ClassAuth: "auth", ClassRateLimit: "rate_limit", ClassServerError: "server_error",
+		ClassTerminal: "terminal", ClassGate: "gate", ClassNetwork: "network", ClassTimeout: "timeout",
+	} {
+		if string(c) != want {
+			t.Errorf("class %q, want %q", c, want)
+		}
+	}
+}
+
+// TestUpstreamErrorTextKeepsTheUpstreamSpelling pins the other half of that
+// contract: the error STRING is the request line's err and the trace
+// manifest's summary.err, and the log-schema change that renamed the `class`
+// attribute did not touch it, so a 5xx still reads "codex responses: upstream
+// (HTTP 503)" while every other class reads as its value.
+func TestUpstreamErrorTextKeepsTheUpstreamSpelling(t *testing.T) {
+	e := classifyResponse(http.StatusServiceUnavailable, http.Header{"Content-Type": {"application/json"}},
+		RateLimits{}, []byte(`{"error":{"message":"overloaded"}}`))
+	if e.Class != ClassServerError {
+		t.Fatalf("Class = %q, want server_error", e.Class)
+	}
+	const want = "codex responses: upstream (HTTP 503): codex upstream error (HTTP 503): overloaded"
+	if got := e.Error(); got != want {
+		t.Errorf("Error() = %q, want %q", got, want)
+	}
+	for _, c := range []Class{ClassAuth, ClassRateLimit, ClassTerminal, ClassGate, ClassNetwork, ClassTimeout, ClassCanceled} {
+		if got := (&UpstreamError{Class: c}).Error(); got != "codex responses: "+string(c) {
+			t.Errorf("Error() for %q = %q, want the class value", c, got)
+		}
+	}
+}
+
 func TestStreamErrorClassification(t *testing.T) {
 	cases := []struct {
 		name        string
@@ -931,7 +967,7 @@ func TestStreamWithRefreshDoesNotRetryOtherFailures(t *testing.T) {
 	src := &fakeSource{tokens: []string{"tok-a", "tok-b"}}
 	_, err := newClient(t, srv.URL).StreamWithRefresh(context.Background(), src, testRequest())
 	if ClassOf(err) != ClassServerError {
-		t.Errorf("Class = %q, want upstream", ClassOf(err))
+		t.Errorf("Class = %q, want server_error", ClassOf(err))
 	}
 	mu.Lock()
 	defer mu.Unlock()

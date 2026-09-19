@@ -215,7 +215,8 @@ func TestSummaryIsNilSafeAndRendersFields(t *testing.T) {
 	}
 	sum.SetRoute("codex")
 	sum.SetModels("sol", "gpt-5.6-sol")
-	sum.SetEffort("high")
+	sum.SetEffortRequested("high")
+	sum.SetEffortApplied("medium")
 	sum.SetStream(true)
 	sum.SetReqBytes(128)
 	sum.SetReqBytes(-1) // ignored: an undeclared Content-Length is not a size
@@ -232,7 +233,7 @@ func TestSummaryIsNilSafeAndRendersFields(t *testing.T) {
 	}
 	for k, want := range map[string]any{
 		"route": "codex", "client_model": "sol", "upstream_model": "gpt-5.6-sol",
-		"effort": "high", "stream": true, "req_bytes": int64(128),
+		"effort_requested": "high", "effort_applied": "medium", "stream": true, "req_bytes": int64(128),
 		"upstream_status": int64(200), "output_tokens": int64(42), "stop_reason": "end_turn",
 		"interrupted": false, "transport": "std",
 	} {
@@ -242,5 +243,80 @@ func TestSummaryIsNilSafeAndRendersFields(t *testing.T) {
 	}
 	if _, present := got["err"]; present {
 		t.Error("a nil error must not produce an err field")
+	}
+	if _, present := got["effort"]; present {
+		t.Error("the old effort key must not be emitted beside effort_requested/effort_applied")
+	}
+	// effort_applied is absent, not empty, until a leg reports one: the
+	// Anthropic and DeepSeek legs never do.
+	fresh := obs.NewSummary()
+	fresh.SetEffortRequested("high")
+	for _, a := range fresh.Attrs() {
+		if a.Key == "effort_applied" {
+			t.Errorf("effort_applied emitted before any leg applied one: %v", a)
+		}
+	}
+}
+
+// TestSummaryEffortPresenceIsSeparateFromValue pins that the effort fields
+// are presence-tracked: a model name with no "-<level>" suffix routes with an
+// EMPTY requested effort, and the request line must still carry the key (an
+// empty value is the observation "the client asked for none"), while a
+// request that never routed carries neither key. The same holds for the
+// applied effort once a leg reports it.
+func TestSummaryEffortPresenceIsSeparateFromValue(t *testing.T) {
+	has := func(sum *obs.Summary, key string) (string, bool) {
+		for _, a := range sum.Attrs() {
+			if a.Key == key {
+				return a.Value.String(), true
+			}
+		}
+		return "", false
+	}
+
+	// Never routed (a /healthz poll): neither key.
+	never := obs.NewSummary()
+	for _, key := range []string{"effort_requested", "effort_applied"} {
+		if _, ok := has(never, key); ok {
+			t.Errorf("%s emitted on a request that never routed", key)
+		}
+	}
+
+	// Routed with no suffix, on every leg: effort_requested is present and
+	// empty; effort_applied stays absent on the legs that never resolve one.
+	for _, route := range []string{"anthropic", "deepseek", "codex"} {
+		sum := obs.NewSummary()
+		sum.SetRoute(route)
+		sum.SetEffortRequested("")
+		if v, ok := has(sum, "effort_requested"); !ok || v != "" {
+			t.Errorf("route %s: effort_requested = %q (present %v), want present and empty", route, v, ok)
+		}
+		if _, ok := has(sum, "effort_applied"); ok {
+			t.Errorf("route %s: effort_applied emitted before any leg applied one", route)
+		}
+	}
+
+	// An unsuffixed Codex request whose translation resolved an effort from a
+	// fallback: requested stays empty (the suffix is what the router saw; a
+	// fallback is not a router-resolved default) and applied names the level.
+	codex := obs.NewSummary()
+	codex.SetRoute("codex")
+	codex.SetEffortRequested("")
+	codex.SetEffortApplied("medium")
+	if v, ok := has(codex, "effort_requested"); !ok || v != "" {
+		t.Errorf("effort_requested = %q (present %v), want present and empty", v, ok)
+	}
+	if v, ok := has(codex, "effort_applied"); !ok || v != "medium" {
+		t.Errorf("effort_applied = %q (present %v), want medium", v, ok)
+	}
+
+	// A Codex translation that sent no effort at all: applied is present and
+	// empty, which is "known: none", not "unknown".
+	none := obs.NewSummary()
+	none.SetRoute("codex")
+	none.SetEffortRequested("")
+	none.SetEffortApplied("")
+	if v, ok := has(none, "effort_applied"); !ok || v != "" {
+		t.Errorf("effort_applied = %q (present %v), want present and empty", v, ok)
 	}
 }

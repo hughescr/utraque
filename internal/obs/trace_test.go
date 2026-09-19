@@ -3,6 +3,7 @@ package obs_test
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -116,7 +117,7 @@ func TestTraceWritesThreeRedactedFiles(t *testing.T) {
 	trace.Close() // idempotent
 
 	read := func(suffix string) string {
-		b, err := os.ReadFile(filepath.Join(dir, "req-abc"+suffix))
+		b, err := os.ReadFile(filepath.Join(dir, obs.TraceStem("req-abc")+suffix))
 		if err != nil {
 			t.Fatalf("read %s: %v", suffix, err)
 		}
@@ -191,7 +192,7 @@ func TestTraceManifestScrubsTheSummary(t *testing.T) {
 	trace.SetSummary(sum)
 	trace.Close()
 
-	b, err := os.ReadFile(filepath.Join(dir, "req-err"+obs.SuffixRequest))
+	b, err := os.ReadFile(filepath.Join(dir, obs.TraceStem("req-err")+obs.SuffixRequest))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -244,7 +245,7 @@ func TestTraceStreamScrubsAcrossAForcedFlush(t *testing.T) {
 	}
 	trace.Close()
 
-	b, err := os.ReadFile(filepath.Join(dir, "req-flush"+obs.SuffixDownstream))
+	b, err := os.ReadFile(filepath.Join(dir, obs.TraceStem("req-flush")+obs.SuffixDownstream))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -297,7 +298,7 @@ func TestTraceNonStreamingBody(t *testing.T) {
 	trace.WriteDownstream([]byte(`{"id":"msg_1","content":[{"type":"text","text":"hi"}]}`))
 	trace.Close()
 
-	b, err := os.ReadFile(filepath.Join(dir, "agg-1"+obs.SuffixDownstreamJSON))
+	b, err := os.ReadFile(filepath.Join(dir, obs.TraceStem("agg-1")+obs.SuffixDownstreamJSON))
 	if err != nil {
 		t.Fatalf("non-streaming dump missing: %v", err)
 	}
@@ -306,12 +307,12 @@ func TestTraceNonStreamingBody(t *testing.T) {
 	}
 }
 
-// The log's "redacted" list (Redactor.Header) and the manifest's
+// The log's headers_withheld list (Redactor.Header) and the manifest's
 // headers_withheld list (Trace.SetRequest) are decided by one helper, so the
-// two must name the same withheld headers. Only the log list is sorted; the
-// manifest keeps http.Header iteration order, so membership is compared
-// order-insensitively.
-func TestTraceWithheldMatchesLogRedacted(t *testing.T) {
+// two must name the same withheld headers under the same key. Only the log
+// list is sorted; the manifest keeps http.Header iteration order, so
+// membership is compared order-insensitively.
+func TestTraceWithheldMatchesLogWithheld(t *testing.T) {
 	dir := t.TempDir()
 	tr, err := obs.NewTracer(dir, slog.New(slog.DiscardHandler))
 	if err != nil {
@@ -326,18 +327,21 @@ func TestTraceWithheldMatchesLogRedacted(t *testing.T) {
 
 	var fromLog []string
 	for _, a := range obs.DefaultRedactor().Header(h).Group() {
-		if a.Key == "redacted" {
+		if a.Key == "headers_withheld" {
 			fromLog = a.Value.Any().([]string)
+		}
+		if a.Key == "redacted" {
+			t.Errorf("the log group still carries the old key %q", a.Key)
 		}
 	}
 	if len(fromLog) == 0 {
-		t.Fatal("the log group names no withheld headers")
+		t.Fatal("the log group names no withheld headers under headers_withheld")
 	}
 
 	trace := tr.Begin("req-withheld")
 	trace.SetRequest("POST", "/v1/messages", h)
 	trace.Close()
-	b, err := os.ReadFile(filepath.Join(dir, "req-withheld"+obs.SuffixRequest))
+	b, err := os.ReadFile(filepath.Join(dir, obs.TraceStem("req-withheld")+obs.SuffixRequest))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -348,11 +352,111 @@ func TestTraceWithheldMatchesLogRedacted(t *testing.T) {
 		t.Fatalf("manifest is not JSON: %v\n%s", err, b)
 	}
 	if !slices.IsSorted(fromLog) {
-		t.Errorf("log redacted list is not sorted: %v", fromLog)
+		t.Errorf("log headers_withheld list is not sorted: %v", fromLog)
 	}
 	gotTrace := slices.Clone(meta.Withheld)
 	slices.Sort(gotTrace)
 	if !slices.Equal(gotTrace, fromLog) {
-		t.Errorf("headers_withheld = %v, log redacted = %v; want the same members", meta.Withheld, fromLog)
+		t.Errorf("manifest headers_withheld = %v, log headers_withheld = %v; want the same members", meta.Withheld, fromLog)
+	}
+}
+
+// The file stem is a filesystem-safe form of the id plus a short hash of the
+// raw id. The sanitiser alone collapses ids that differ only in a disallowed
+// byte, and the files are opened with O_TRUNC, so without the hash the second
+// of two such requests would overwrite the first's dump.
+func TestTraceStemDistinguishesIDsThatSanitiseAlike(t *testing.T) {
+	a, b := obs.TraceStem("req/1"), obs.TraceStem("req.1")
+	if a == "" || b == "" {
+		t.Fatalf("stems empty: %q %q", a, b)
+	}
+	if a == b {
+		t.Fatalf("ids differing only in punctuation share a stem: %q", a)
+	}
+	// Shape: the sanitised id, a hyphen, eight hex characters.
+	for _, stem := range []string{a, b} {
+		if !strings.HasPrefix(stem, "req_1-") || len(stem) != len("req_1-")+8 {
+			t.Errorf("stem %q is not <safe-id>-<8 hex>", stem)
+		}
+		if _, err := hex.DecodeString(stem[len("req_1-"):]); err != nil {
+			t.Errorf("stem %q suffix is not hex: %v", stem, err)
+		}
+	}
+	if obs.TraceStem("req/1") != a {
+		t.Error("TraceStem is not deterministic")
+	}
+	for _, bad := range []string{"", "   ", "/", "..."} {
+		if got := obs.TraceStem(bad); got != "" {
+			t.Errorf("TraceStem(%q) = %q, want \"\"", bad, got)
+		}
+	}
+
+	dir := t.TempDir()
+	tr, err := obs.NewTracer(dir, slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"req/1", "req.1"} {
+		trace := tr.Begin(id)
+		trace.WriteDownstream([]byte(`{"id":"` + id + `"}`))
+		trace.Close()
+	}
+	for id, stem := range map[string]string{"req/1": a, "req.1": b} {
+		got, err := os.ReadFile(filepath.Join(dir, stem+obs.SuffixDownstreamJSON))
+		if err != nil {
+			t.Fatalf("trace for %q missing: %v", id, err)
+		}
+		if !strings.Contains(string(got), `"`+id+`"`) {
+			t.Errorf("trace for %q was truncated by the other id: %s", id, got)
+		}
+		manifest, err := os.ReadFile(filepath.Join(dir, stem+obs.SuffixRequest))
+		if err != nil {
+			t.Fatalf("manifest for %q missing: %v", id, err)
+		}
+		var meta struct {
+			RequestID string `json:"request_id"`
+		}
+		if err := json.Unmarshal(manifest, &meta); err != nil {
+			t.Fatal(err)
+		}
+		if meta.RequestID != id {
+			t.Errorf("manifest request_id = %q, want the raw id %q", meta.RequestID, id)
+		}
+	}
+}
+
+// A trace failure is logged under the raw request id, which is what the
+// request line carries, with the file stem beside it under its own key.
+func TestTraceFailureLogsRawIDAndStem(t *testing.T) {
+	l, buf := newBufLogger(t)
+	dir := t.TempDir()
+	tr, err := obs.NewTracer(dir, l)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Make the manifest unwritable by putting a directory where the file goes.
+	const id = "req:blocked"
+	if err := os.Mkdir(filepath.Join(dir, obs.TraceStem(id)+obs.SuffixRequest), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	trace := tr.Begin(id)
+	trace.SetBody([]byte(`{}`))
+	trace.Close()
+
+	var rec map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+		var m map[string]any
+		if json.Unmarshal([]byte(line), &m) == nil && strings.HasPrefix(m["msg"].(string), "trace: writing") {
+			rec = m
+		}
+	}
+	if rec == nil {
+		t.Fatalf("no manifest-write failure was logged:\n%s", buf.String())
+	}
+	if rec["request_id"] != id {
+		t.Errorf("request_id = %v, want the raw id %q", rec["request_id"], id)
+	}
+	if rec["trace_stem"] != obs.TraceStem(id) {
+		t.Errorf("trace_stem = %v, want %q", rec["trace_stem"], obs.TraceStem(id))
 	}
 }

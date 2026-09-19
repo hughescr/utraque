@@ -3,6 +3,8 @@ package obs
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -22,11 +24,12 @@ import (
 const TraceWarning = "REQUEST TRACING IS ENABLED: trace dumps contain PROMPT TEXT and model output in the clear. " +
 	"Credentials are redacted, the conversation is NOT. Unset UTRAQUE_TRACE_DIR to turn this off."
 
-// Trace file suffixes. Every traced request writes a manifest, named by
-// request id; a successful Codex request also writes up to two companion
-// files. These dumps are source material for a test fixture, not a format
-// any fixture reader accepts as-is today — a fixture test unmarshals a bare
-// request body, not this envelope shape or these file names.
+// Trace file suffixes. Every traced request writes a manifest, named by the
+// request id's file stem (see TraceStem); a successful Codex request also
+// writes up to two companion files. These dumps are source material for a
+// test fixture, not a format any fixture reader accepts as-is today — a
+// fixture test unmarshals a bare request body, not this envelope shape or
+// these file names.
 //
 // Anthropic passthrough, DeepSeek, discovery, health checks, and a Codex
 // request that fails before its upstream stream opens write only the
@@ -34,12 +37,12 @@ const TraceWarning = "REQUEST TRACING IS ENABLED: trace dumps contain PROMPT TEX
 // upstream file, plus exactly one of the two downstream files, depending on
 // whether the client asked to stream:
 //
-//	<id>.request.json    the inbound request: method, path, allowlisted
-//	                     headers, and the body as it was received
-//	<id>.upstream.sse    the raw upstream stream, byte for byte
-//	<id>.downstream.sse  the translated stream this proxy wrote back
-//	<id>.downstream.json a non-streaming answer, which is a body and not a
-//	                     stream, so it is not pretended to be one
+//	<stem>.request.json    the inbound request: method, path, allowlisted
+//	                       headers, and the body as it was received
+//	<stem>.upstream.sse    the raw upstream stream, byte for byte
+//	<stem>.downstream.sse  the translated stream this proxy wrote back
+//	<stem>.downstream.json a non-streaming answer, which is a body and not a
+//	                       stream, so it is not pretended to be one
 const (
 	SuffixRequest        = ".request.json"
 	SuffixUpstream       = ".upstream.sse"
@@ -91,11 +94,32 @@ func (t *Tracer) Begin(id string) *Trace {
 	if !t.Enabled() {
 		return nil
 	}
-	name := safeFileID(id)
-	if name == "" {
+	stem := TraceStem(id)
+	if stem == "" {
 		return nil
 	}
-	return &Trace{tracer: t, fileStem: name, meta: traceMeta{RequestID: id}}
+	return &Trace{tracer: t, fileStem: stem, meta: traceMeta{RequestID: id}}
+}
+
+// TraceStem is the file stem the trace files for request id are named by:
+// safeFileID(id), a hyphen, and the first 8 hex characters of sha256(id).
+// It is "" for an id that cannot name a file (empty, or nothing but
+// disallowed bytes), in which case the request is not traced.
+//
+// The hash is there because safeFileID alone is lossy: distinct ids that
+// differ only in a disallowed byte ("a/b" and "a.b"), in surrounding
+// whitespace, or beyond the 128-byte truncation collapse to one sanitised
+// stem, and the files are opened with O_TRUNC, so without the hash a later
+// request would overwrite an earlier request's dump while each manifest
+// reported a different request_id. The hash is over the raw id, so two ids
+// share a stem only if they share the id.
+func TraceStem(id string) string {
+	name := safeFileID(id)
+	if name == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(id))
+	return name + "-" + hex.EncodeToString(sum[:4])
 }
 
 // safeFileID reduces a request id to something that can only ever name a file
@@ -105,11 +129,11 @@ func (t *Tracer) Begin(id string) *Trace {
 // The result is a sanitised derivative of id, not id itself: id is trimmed
 // of surrounding whitespace, truncated to 128 bytes, and then every
 // remaining byte outside [A-Za-z0-9_-] is replaced with '_'. Any of those
-// three steps can make distinct ids collide on one stem — trimming and
-// truncation drop bytes rather than replace them, and the replacement step
-// alone already collapses ids that differ only in a disallowed byte (e.g.
-// "a/b" and "a.b") — and on the same trace directory a collision means both
-// ids name the same files.
+// three steps can make distinct ids collide on one sanitised name — trimming
+// and truncation drop bytes rather than replace them, and the replacement
+// step alone already collapses ids that differ only in a disallowed byte
+// (e.g. "a/b" and "a.b") — which is why TraceStem appends a hash of the raw
+// id before the name reaches the filesystem.
 func safeFileID(id string) string {
 	id = strings.TrimSpace(id)
 	if id == "" {
@@ -135,7 +159,7 @@ func safeFileID(id string) string {
 	return out
 }
 
-// traceMeta is the <id>.request.json shape: source material for a test
+// traceMeta is the <stem>.request.json shape: source material for a test
 // fixture, not a fixture itself and not commit-safe as written. Headers only
 // holds the redactor's small allowlist (protocol version, capability flags,
 // media type, caller); Withheld names everything else that arrived and was
@@ -162,9 +186,9 @@ type traceMeta struct {
 // different goroutines.
 type Trace struct {
 	tracer *Tracer
-	// fileStem names the trace files: the caller's raw id (meta.RequestID)
-	// sanitised by safeFileID, so it is a derivative of the id, not the id.
-	// Close's log lines still report it under the key "request_id".
+	// fileStem names the trace files: TraceStem of the caller's raw id
+	// (meta.RequestID), so it is a derivative of the id, not the id. Close's
+	// log lines report it as trace_stem beside the raw id as request_id.
 	fileStem string
 
 	mu       sync.Mutex
@@ -202,7 +226,7 @@ func (t *Trace) SetRequest(method, path string, h http.Header) {
 		return
 	}
 	// Names are taken in http.Header iteration order, as they always were:
-	// headers_withheld is not sorted (the log's "redacted" list is).
+	// headers_withheld is not sorted here (the log's list is).
 	names := make([]string, 0, len(h))
 	for name := range h {
 		names = append(names, name)
@@ -336,7 +360,8 @@ func (t *Trace) Close() {
 	data, err := json.MarshalIndent(meta, "", "  ")
 	if err != nil {
 		t.tracer.log.Warn("trace: encoding the request manifest failed",
-			slog.String("request_id", t.fileStem), slog.String("err", err.Error()))
+			slog.String("request_id", meta.RequestID), slog.String("trace_stem", t.fileStem),
+			slog.String("err", err.Error()))
 		return
 	}
 	// Scrub the ENCODED manifest, not merely the fields that were scrubbed on
@@ -352,7 +377,8 @@ func (t *Trace) Close() {
 	path := filepath.Join(t.tracer.dir, t.fileStem+SuffixRequest)
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		t.tracer.log.Warn("trace: writing the request manifest failed",
-			slog.String("request_id", t.fileStem), slog.String("err", err.Error()))
+			slog.String("request_id", meta.RequestID), slog.String("trace_stem", t.fileStem),
+			slog.String("err", err.Error()))
 	}
 }
 

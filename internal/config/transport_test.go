@@ -85,11 +85,13 @@ func TestCodexTransportIsReported(t *testing.T) {
 	}
 	// A non-default transport changes how every Codex request looks on the
 	// wire, so it has to be visible in the startup line and the log record.
-	if got := cfg.String(); !strings.Contains(got, "codex.transport=utls") {
-		t.Errorf("String() lacks codex.transport=utls: %s", got)
+	if got := cfg.String(); !strings.Contains(got, "codex.transport_mode=utls") {
+		t.Errorf("String() lacks codex.transport_mode=utls: %s", got)
 	}
-	if got := cfg.LogValue().String(); !strings.Contains(got, "utls") {
-		t.Errorf("LogValue() lacks the transport: %s", got)
+	// The key names the configured MODE (auto/std/utls), distinct from the
+	// per-request `transport` key, which is the live kind (std/utls).
+	if got := cfg.LogValue().String(); !strings.Contains(got, "codex.transport_mode=utls") {
+		t.Errorf("LogValue() lacks codex.transport_mode=utls: %s", got)
 	}
 }
 

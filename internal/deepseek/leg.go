@@ -359,7 +359,7 @@ func observeMessage(ctx context.Context, b []byte) {
 		return
 	}
 	sum := obs.SummaryFrom(ctx)
-	sum.SetInputTokens(msg.Usage.InputTokens, msg.Usage.CacheReadInputTokens)
+	sum.SetInputTokens(msg.Usage.InputTokens, msg.Usage.CacheReadInputTokens, msg.Usage.CacheCreationInputTokens)
 	sum.SetOutputTokens(msg.Usage.OutputTokens)
 	sum.SetStopReason(msg.StopReason)
 }
@@ -370,7 +370,8 @@ func observeStreamFrame(ctx context.Context, event string, data []byte) {
 	case aschema.EventMessageStart:
 		var e aschema.MessageStartEvent
 		if json.Unmarshal(data, &e) == nil {
-			sum.SetInputTokens(e.Message.Usage.InputTokens, e.Message.Usage.CacheReadInputTokens)
+			u := e.Message.Usage
+			sum.SetInputTokens(u.InputTokens, u.CacheReadInputTokens, u.CacheCreationInputTokens)
 		}
 	case aschema.EventMessageDelta:
 		var e aschema.MessageDeltaEvent

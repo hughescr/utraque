@@ -515,17 +515,50 @@ transports (`anthropic`, shared with DeepSeek, is always `std`; `codex` is the o
 that can move), read fresh each time, because `auto` can change it mid-process.
 The per-request `transport` field is recorded by the leg that dispatched the
 request, immediately before it goes out, so the request that trips a gate reads
-`std` and its successor reads `utls`.
+`std` and its successor reads `utls`. The startup configuration record, and
+the `WARN` written when the Codex leg starts on a non-standard transport, log
+the configured MODE (`auto`, `std`, or `utls`) as `codex.transport_mode` (it
+was `codex.transport`), which is distinct from that per-request `transport`
+key and from `/healthz`'s live kind.
 
 ## Logging and traces
 
-One structured line per request, on stderr (launchd captures it), carrying
-`request_id`, `method`, `path`, `status`, `req_bytes`, `resp_bytes`, `ttfb_ms`,
-`total_ms`, `route` (`anthropic`, `codex`, `deepseek`, or `discovery`),
-`client_model`, `upstream_model`, `effort`, `stream`, `upstream_status`,
+One structured line per request (`msg` = `request`), on stderr (launchd
+captures it), carrying `request_id`, `method`, `path`, `status`, `req_bytes`,
+`resp_bytes`, `ttfb_ms`, `total_ms`, `route` (`anthropic`, `codex`,
+`deepseek`, or `discovery`), `client_model`, `upstream_model`,
+`effort_requested`, `effort_applied`, `stream`, `upstream_status`,
 `output_tokens`, `input_tokens`, `cache_read_input_tokens`,
-`estimated_input_tokens`, `stop_reason`, `interrupted`, `transport`, and `err`
-when there was one.
+`cache_creation_input_tokens`, `estimated_input_tokens`, `stop_reason`,
+`interrupted`, `transport`, `err` when there was one, and a `headers` group
+holding the four allowlisted request headers by value and, under
+`headers_withheld`, the names of every other header that arrived (see
+*Redaction* below).
+
+`effort_requested` is the reasoning effort the client asked for: the
+`-<level>` suffix on the model name, and nothing else. The router parses only
+the suffix, so a name without one logs an EMPTY `effort_requested` — the key is
+present on every routed request, Anthropic and DeepSeek included, and an empty
+value means "the client asked for none", never a default the router resolved
+(the `anthropic-beta`, config and catalog fallbacks are applied later, by the
+Codex translator, and show up in `effort_applied`). Only a request that never
+routed, such as a `/healthz` poll, lacks the key. `effort_applied` is the
+effort actually sent upstream after those fallbacks and the catalog clamp; only
+the Codex leg knows it, so it is absent on Anthropic and DeepSeek lines and on
+a Codex request that failed before translation, and once known it is emitted
+even when empty (a translation that sent no reasoning effort at all). So an
+unsuffixed `sol` request reads `effort_requested="" effort_applied="low"` when
+the catalog default is `low`. (Both replaced a single `effort` field that meant
+the requested value before translation and the applied value after it.)
+
+At DEBUG the dispatcher also writes a `routed` record carrying `route`,
+`client_model`, `upstream_model`, `effort_requested` (the suffix value, empty
+when the name had none), `effort_source` (`suffix` when a suffix was parsed,
+otherwise `""` — the router never resolves the other sources) and `stream`.
+(`route` was `backend`, and `effort_requested` was `effort`, before the
+log-schema change that aligned the record with the request line.) The Codex
+leg's own DEBUG records are listed under *Prompt caching* (the translation
+record) and below (the stream record).
 
 Two of those fields earn their place by being *differences*. `upstream_status`
 is the status the BACKEND gave, which is not always the one you were answered
@@ -533,19 +566,23 @@ with — an upstream 200 whose body carried no events becomes a 502 downstream,
 and an upstream 401 becomes a refresh and a retry. `interrupted` separates "you
 hung up" from "it broke", so a cancelled turn never reads as an incident.
 
-On the Codex and DeepSeek legs, `input_tokens` and `cache_read_input_tokens` are
-the two fields to watch for prompt-cache behavior. `input_tokens` is the
-UNCACHED part of the prompt and `cache_read_input_tokens` the part served from
-the cache, so their hit rate is `cache_read_input_tokens / (input_tokens +
-cache_read_input_tokens)`. This two-slot figure does not include
-`cache_creation_input_tokens`, which is also part of the prompt under Anthropic
-semantics. (The Responses API reports its `input_tokens` inclusive of the cached
-count; the translator subtracts it out, so the Codex leg's two logged counts do
-not double count the cached part.) In a healthy agentic loop the cached count
-tracks the prompt as the conversation grows and `input_tokens` stays small. A
-cached count that stays FLAT while `input_tokens` climbs means the replayed
-history has stopped matching what the model saw, and every turn is paying full
-price for the whole conversation — see *Prompt caching*.
+On the Codex and DeepSeek legs, `input_tokens`, `cache_read_input_tokens` and
+`cache_creation_input_tokens` are the three components of the prompt under
+Anthropic semantics, and the whole prompt is their sum. `input_tokens` is the
+UNCACHED part billed at full price, `cache_read_input_tokens` the part served
+from the cache, and `cache_creation_input_tokens` the part written into it, so
+the hit rate is `cache_read_input_tokens / (input_tokens +
+cache_read_input_tokens + cache_creation_input_tokens)`. The DeepSeek leg
+reports all three from the upstream's own usage block. The Responses API
+reports its `input_tokens` inclusive of the cached count and reports no
+cache-write count at all; the translator subtracts the cached part out, so the
+Codex leg's logged counts do not double count it, and its
+`cache_creation_input_tokens` is the `0` the client was told. In a healthy
+agentic loop the cached count tracks the prompt as the conversation grows and
+`input_tokens` stays small. A cached count that stays FLAT while `input_tokens`
+climbs means the replayed history has stopped matching what the model saw, and
+every turn is paying full price for the whole conversation — see *Prompt
+caching*.
 
 `estimated_input_tokens` is the prompt count utraque computed locally and
 seeded into `message_start` before the backend reported the real usage. It is
@@ -556,8 +593,12 @@ instead of the truth — see *Token counts and the message_start seed*.
 
 **Redaction is by allowlist.** Exactly four request headers may be logged with
 their values — `anthropic-version`, `anthropic-beta`, `content-type`,
-`user-agent`. Every other header is named but never valued, so the shape of a
-request stays debuggable without its contents being disclosed. `Authorization`,
+`user-agent`. Every other header is named but never valued — the header group
+lists them under `headers_withheld`, the same key the trace manifest uses (it
+was `redacted` before the log-schema change) — so the shape of a request stays
+debuggable without its contents being disclosed. "Redacted", and the
+`[REDACTED]` marker, are reserved for a VALUE that was substituted: a withheld
+header was never valued in the first place. `Authorization`,
 `x-api-key`, `access_token`, `refresh_token` and `id_token` cannot be logged:
 the slog handler is wrapped in a scrubber that blanks any attribute whose key
 names a credential — including under a namespacing prefix, so `codex_token` is
@@ -579,10 +620,10 @@ body, which becomes the request line's `err` — it goes through the scrubber li
 every other string, on the log path and on the trace path alike.
 
 **Trace dumps** are the exception, and they are behind their own switch. Setting
-`UTRAQUE_TRACE_DIR` writes `<id>.request.json` for every request, and — for a
-Codex request that got as far as opening a stream — `<id>.upstream.sse` and
-`<id>.downstream.sse` beside it (a non-streaming answer lands in
-`<id>.downstream.json`). An Anthropic passthrough, a `/healthz` poll, a
+`UTRAQUE_TRACE_DIR` writes `<stem>.request.json` for every request, and — for a
+Codex request that got as far as opening a stream — `<stem>.upstream.sse` and
+`<stem>.downstream.sse` beside it (a non-streaming answer lands in
+`<stem>.downstream.json`). An Anthropic passthrough, a `/healthz` poll, a
 `/v1/models` open, or a Codex request that failed before the stream opened leave
 the manifest alone. The same redaction is applied, manifest included. They are
 source material for test fixtures: the bytes received and the bytes sent, side
@@ -590,13 +631,43 @@ by side, can turn a translation bug into a reproducible case. **A trace holds
 the prompt text and the model's output in the clear**, which is why enabling it
 logs a loud `WARN` at startup.
 
-A caller may supply `X-Request-Id`; when accepted, it is logged and its
-filesystem-safe form names the trace files. Utraque echoes the chosen request id
-in the separate `X-Utraque-Request-Id` response header, leaving a passthrough
-response's `X-Request-Id` available to Anthropic. An id that is itself
-credential-shaped is refused and a generated one used instead. That is a
-backstop and not a guarantee: an opaque high-entropy string is exactly what a
-request id looks like.
+A caller may supply `X-Request-Id`; when accepted, it is logged as
+`request_id`, and a filesystem-safe form of the id plus a short hash names the
+trace files: the `<stem>` is the id with every byte outside `[A-Za-z0-9_-]`
+replaced by `_`, a hyphen, and the first eight hex characters of the id's
+SHA-256, so `req/1` traces to `req_1-388947b8.request.json` while `req.1`,
+which sanitises to the same `req_1`, gets a different hash and its own files.
+(Without the hash, the second of two such requests would overwrite the first's
+dump.) The manifest's `request_id` is the raw id; a trace-write failure is
+logged with `request_id` (raw) and `trace_stem` side by side. Utraque echoes
+the chosen request id in the separate `X-Utraque-Request-Id` response header,
+leaving a passthrough response's `X-Request-Id` available to Anthropic. An id
+that is itself credential-shaped is refused and a generated one used instead.
+That is a backstop and not a guarantee: an opaque high-entropy string is
+exactly what a request id looks like.
+
+**Other per-request records.** The Codex leg writes one record per stream at
+DEBUG (`codex stream translated`) or, when the translator met event types it
+does not recognise, at INFO (`codex stream carried unrecognised event types`),
+carrying `upstream_model`, `effort_requested`, `effort_applied`, `started`,
+`terminated`, `errored` and, on the INFO form, `unknown_events` (the total) and
+`unknown_event_types` (the per-type map) — the same spelling `/healthz`'s
+`codex_stream` block uses. (Before the log-schema change `unknown_events` was
+the map, and the record carried no effort.) On this record and the translation
+record, `effort_requested` is the level the translator chose by precedence
+(suffix, then `anthropic-beta`, config and the catalog default) before
+clamping, so it equals the request line's suffix value whenever there was a
+suffix and names the fallback otherwise; `effort_applied` is the level sent,
+the same value the request line carries. Both are always present on the
+stream record, empty when the translation sent no effort. A Codex call that
+fails before its response starts is logged with `class` (`auth`, `rate_limit`,
+`server_error`, `terminal`, `gate`, `network`, `timeout`), `upstream_status`
+and `status`; `server_error` — an upstream 5xx — was spelled `upstream` before
+the log-schema change. The error TEXT of such a failure, which is what the
+request line's `err` and the trace manifest's `summary.err` carry, still reads
+`codex responses: upstream (HTTP 5xx): …`; only the `class` attribute was
+renamed. The Anthropic leg's sanitizer logs `stripped synthetic thinking
+blocks` with `thinking_blocks_removed` (an int; it was `dropped`).
 
 ## Prompt caching
 
@@ -656,11 +727,18 @@ exactly as Claude Code wrote it.
 request contains any tool in its built-in mutating-tools set or when the client
 sets `tool_choice.disable_parallel_tool_use`. Its `MutatingTools` override is
 programmatic only; there is no environment or configuration setting for it. The
-DEBUG translation line records `parallel_tool_calls_disabled` alongside
-`upstream_model`, `effort`, `effort_requested`, `effort_source`, and
-`effort_clamped`, plus applicable `reasoning_replayed`, `reasoning_unreplayable`,
-`dropped`, `orphaned_tool_results`, `dropped_images`, `rewritten_patterns`, and
-`dropped_patterns`.
+DEBUG translation record (`translated a Messages request for the codex
+backend`) says why with `parallel_tool_calls_reason` (`""` when the field was
+left unset, `client_flag`, `tool_trigger`, or `both`) and, when a tool
+triggered it, `parallel_tool_calls_triggers` (the sorted tool names). The
+older bool `parallel_tool_calls_disabled` is still emitted beside them for one
+release and will then be removed. The record also carries `upstream_model`,
+`effort_requested`, `effort_applied` (it was `effort`), `effort_source`, and
+`effort_clamped`, plus applicable `reasoning_replayed`,
+`reasoning_unreplayable`, `dropped_params` (the Anthropic parameter names the
+backend ignores) and `dropped_system_blocks` (the `system:*` markers; the two
+were one `dropped` list), `orphaned_tool_results`, `dropped_images`,
+`rewritten_patterns`, and `dropped_patterns`.
 
 **`session_id`.** Derived from the same hash, so the header and the body always
 name the same conversation. The Codex CLI sends one, the backend is

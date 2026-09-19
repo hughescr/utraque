@@ -16,6 +16,7 @@ import (
 	"testing"
 
 	"github.com/hughescr/utraque/internal/apierr"
+	"github.com/hughescr/utraque/internal/obs"
 	"github.com/hughescr/utraque/internal/proxyhdr"
 	"github.com/hughescr/utraque/internal/router"
 	"github.com/hughescr/utraque/internal/sse"
@@ -647,5 +648,52 @@ func TestCanceledCallerStopsUpstreamRequest(t *testing.T) {
 	err := l.Messages(httptest.NewRecorder(), req, &router.Request{Raw: []byte(body), Dec: dec})
 	if !errors.Is(err, router.ErrClientGone) {
 		t.Fatalf("error = %v, want ErrClientGone", err)
+	}
+}
+
+// TestUsageReachesTheRequestLineWithAllThreePromptParts pins that the leg
+// records every prompt component the upstream reported — uncached,
+// cache-read and cache-creation — on both the non-streaming and streaming
+// paths, so the access line's cache_creation_input_tokens is the upstream's
+// figure rather than a dropped one.
+func TestUsageReachesTheRequestLineWithAllThreePromptParts(t *testing.T) {
+	const usage = `"usage":{"input_tokens":11,"cache_read_input_tokens":7,"cache_creation_input_tokens":5,"output_tokens":2}`
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Stream bool `json:"stream"`
+		}
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &req)
+		if req.Stream {
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = io.WriteString(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"deepseek-flash\",\"content\":[],"+usage+"}}\n\n")
+			_, _ = io.WriteString(w, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"msg_1","type":"message","role":"assistant","model":"deepseek-flash","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn",`+usage+`}`)
+	}))
+	defer upstream.Close()
+
+	for _, stream := range []bool{false, true} {
+		body := `{"model":"deepseek-flash","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}`
+		if stream {
+			body = `{"model":"deepseek-flash","max_tokens":8,"stream":true,"messages":[{"role":"user","content":"hi"}]}`
+		}
+		dec, err := router.Resolve("deepseek-flash", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		sum := obs.NewSummary()
+		req := httptest.NewRequest(http.MethodPost, "http://utraque.test/v1/messages", strings.NewReader(body))
+		req = req.WithContext(obs.WithSummary(context.Background(), sum))
+		rec := httptest.NewRecorder()
+		if err := testLeg(t, upstream.URL).Messages(rec, req, &router.Request{Raw: []byte(body), Stream: stream, Dec: dec}); err != nil {
+			t.Fatalf("stream=%v: Messages: %v", stream, err)
+		}
+		f := sum.Fields()
+		if f["input_tokens"] != int64(11) || f["cache_read_input_tokens"] != int64(7) || f["cache_creation_input_tokens"] != int64(5) {
+			t.Errorf("stream=%v: summary token fields = %v, want 11/7/5", stream, f)
+		}
 	}
 }

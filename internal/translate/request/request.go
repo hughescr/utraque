@@ -53,9 +53,8 @@ var DefaultMutatingTools = map[string]bool{
 const SummaryNone = "none"
 
 // ParallelDisableReason records why parallel_tool_calls:false was sent, when
-// it was. It is Metadata-only for now: the codex leg logs the decision as the
-// bool parallel_tool_calls_disabled (reason != ParallelDisableNone), and the
-// reason itself is not yet logged.
+// it was. The codex leg logs it as parallel_tool_calls_reason (and, for one
+// more release, folded to the bool parallel_tool_calls_disabled).
 type ParallelDisableReason string
 
 // The provenance of a parallel_tool_calls:false. ParallelDisableNone means the

@@ -29,9 +29,11 @@ const (
 	// Retry-After and the usage-window headers are carried on RateLimits.
 	ClassRateLimit Class = "rate_limit"
 	// ClassServerError is an upstream 5xx: transient on the backend's side.
-	// The value "upstream" is logged as `class`, so it is kept for log
-	// compatibility even though the identifier names the 5xx subset.
-	ClassServerError Class = "upstream"
+	// The value is logged as `class`; it was "upstream" before the log-schema
+	// change that made it name the 5xx subset it covers. The error TEXT
+	// (UpstreamError.Error, which reaches the request line's err and the
+	// trace manifest) still spells it "upstream": see errorLabel.
+	ClassServerError Class = "server_error"
 	// ClassTerminal is a 4xx (other than 401/429) or an otherwise unusable
 	// response: the request itself will never succeed as sent.
 	ClassTerminal Class = "terminal"
@@ -82,13 +84,26 @@ type UpstreamError struct {
 
 var _ error = (*UpstreamError)(nil)
 
+// errorLabel is how a class is spelled inside UpstreamError.Error. It is the
+// class value except for the 5xx class, whose text keeps the "upstream" it
+// has always had: the error string is the request line's err and the trace
+// manifest's summary.err, a surface the log-schema change that renamed the
+// `class` attribute did not touch. Realigning the text is a change to those
+// surfaces and is left for a later log-schema change.
+func errorLabel(c Class) string {
+	if c == ClassServerError {
+		return "upstream"
+	}
+	return string(c)
+}
+
 func (e *UpstreamError) Error() string {
 	if e == nil {
 		return "<nil>"
 	}
 	var b strings.Builder
 	b.WriteString("codex responses: ")
-	b.WriteString(string(e.Class))
+	b.WriteString(errorLabel(e.Class))
 	if e.Status > 0 {
 		fmt.Fprintf(&b, " (HTTP %d)", e.Status)
 	}

@@ -217,16 +217,20 @@ type Result struct {
 	StopReason string
 	// OutputTokens is the completion token count reported on that terminus.
 	OutputTokens int
-	// InputTokens and CachedInputTokens follow Anthropic semantics: InputTokens
-	// is the UNCACHED part of the prompt reported on that terminus, and
-	// CachedInputTokens is the part the backend served from its prompt cache,
-	// so the whole prompt is their sum (see mapUsage). The pair is the only
-	// visible measure of whether the conversation's prefix is still matching: a
+	// InputTokens, CachedInputTokens and CacheCreationInputTokens follow
+	// Anthropic semantics: InputTokens is the UNCACHED part of the prompt
+	// reported on that terminus, CachedInputTokens is the part the backend
+	// served from its prompt cache, and CacheCreationInputTokens the part it
+	// wrote into the cache, so the whole prompt is their sum (see mapUsage
+	// and promptTokens). Responses reports no cache-write count, so the third
+	// is the 0 the client was told. The first two are the only visible
+	// measure of whether the conversation's prefix is still matching: a
 	// cached count that stays flat while the uncached count grows means the
-	// replayed history has diverged from what the model saw, and every turn is
-	// paying full price for the whole conversation.
-	InputTokens       int
-	CachedInputTokens int
+	// replayed history has diverged from what the model saw, and every turn
+	// is paying full price for the whole conversation.
+	InputTokens              int
+	CachedInputTokens        int
+	CacheCreationInputTokens int
 
 	UnknownEvents map[string]int
 }
@@ -293,6 +297,7 @@ type Translator struct {
 	finalOutputTokens   int
 	finalInputTokens    int
 	finalCachedTokens   int
+	finalCreatedTokens  int
 }
 
 // New builds a Translator from opts, filling defaults. It does not validate the
@@ -354,17 +359,19 @@ func (t *Translator) reset() {
 	t.finalOutputTokens = 0
 	t.finalInputTokens = 0
 	t.finalCachedTokens = 0
+	t.finalCreatedTokens = 0
 }
 
 func (t *Translator) result() Result {
 	return Result{
-		Started:           t.started,
-		Terminus:          t.terminus,
-		StopReason:        t.finalStop,
-		OutputTokens:      t.finalOutputTokens,
-		InputTokens:       t.finalInputTokens,
-		CachedInputTokens: t.finalCachedTokens,
-		UnknownEvents:     t.unknown,
+		Started:                  t.started,
+		Terminus:                 t.terminus,
+		StopReason:               t.finalStop,
+		OutputTokens:             t.finalOutputTokens,
+		InputTokens:              t.finalInputTokens,
+		CachedInputTokens:        t.finalCachedTokens,
+		CacheCreationInputTokens: t.finalCreatedTokens,
+		UnknownEvents:            t.unknown,
 	}
 }
 
@@ -813,6 +820,7 @@ func (t *Translator) finalizeClean(sink Sink) error {
 	// disagree with what the client was told.
 	t.finalStop, t.finalOutputTokens = stop, usage.OutputTokens
 	t.finalInputTokens, t.finalCachedTokens = usage.InputTokens, usage.CacheReadInputTokens
+	t.finalCreatedTokens = usage.CacheCreationInputTokens
 	if err := sink.MessageStop(); err != nil {
 		return err
 	}

@@ -1,10 +1,12 @@
 package leg
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -18,10 +20,12 @@ import (
 	"github.com/hughescr/utraque/internal/apierr"
 	"github.com/hughescr/utraque/internal/codex/auth"
 	"github.com/hughescr/utraque/internal/codex/schema"
+	"github.com/hughescr/utraque/internal/effort"
 	"github.com/hughescr/utraque/internal/obs"
 	"github.com/hughescr/utraque/internal/proxyhdr"
 	"github.com/hughescr/utraque/internal/router"
 	"github.com/hughescr/utraque/internal/tokens"
+	"github.com/hughescr/utraque/internal/translate/request"
 	"github.com/hughescr/utraque/internal/translate/stream"
 )
 
@@ -496,5 +500,202 @@ func TestCountTokensCountsTheTranslatedRequest(t *testing.T) {
 		`{"role":"assistant","content":[{"type":"thinking","thinking":"`+strings.Repeat("deep thoughts about the port number ", 50)+`","signature":"nope"}]}]}`)
 	if withThinking != plain {
 		t.Errorf("unreplayable thinking text was counted: %d vs %d", withThinking, plain)
+	}
+}
+
+// debugRecords runs f against a JSON logger at DEBUG and returns every record
+// it wrote, keyed by msg, for asserting the log-schema contract of this leg's
+// per-request records.
+func debugRecords(t *testing.T, f func(*slog.Logger)) map[string]map[string]any {
+	t.Helper()
+	var buf bytes.Buffer
+	f(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	out := map[string]map[string]any{}
+	for _, line := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+		if line == "" {
+			continue
+		}
+		var rec map[string]any
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			t.Fatalf("log line is not JSON: %v\n%s", err, line)
+		}
+		out[rec["msg"].(string)] = rec
+	}
+	return out
+}
+
+// TestLogTranslationKeys pins the DEBUG translation record: both efforts
+// under their own names, the parallel_tool_calls provenance beside the bool it
+// folds to, and a key per kind of drop.
+func TestLogTranslationKeys(t *testing.T) {
+	rq := &router.Request{Dec: router.Decision{UpstreamModel: "gpt-5.6-sol"}}
+	meta := request.Metadata{
+		DroppedParams:           []string{request.DroppedTemperature, request.DroppedTopP},
+		DroppedSystemBlocks:     []string{request.DroppedBillingHeader},
+		ParallelDisableReason:   request.ParallelDisableBoth,
+		ParallelDisableTriggers: []string{"Bash", "Edit"},
+		Effort: request.EffortResult{
+			Requested: effort.Ultra, Applied: effort.High, Source: effort.SourceSuffix, Clamped: true,
+		},
+	}
+	recs := debugRecords(t, func(log *slog.Logger) {
+		logTranslation(context.Background(), log, rq, meta)
+	})
+	rec := recs["translated a Messages request for the codex backend"]
+	if rec == nil {
+		t.Fatalf("no translation record: %v", recs)
+	}
+	for key, want := range map[string]any{
+		"upstream_model":               "gpt-5.6-sol",
+		"effort_requested":             "ultra",
+		"effort_applied":               "high",
+		"effort_source":                "suffix",
+		"effort_clamped":               true,
+		"parallel_tool_calls_disabled": true, // deprecated: remove in the next release
+		"parallel_tool_calls_reason":   "both",
+	} {
+		if rec[key] != want {
+			t.Errorf("%s = %v, want %v", key, rec[key], want)
+		}
+	}
+	for key, want := range map[string][]any{
+		"parallel_tool_calls_triggers": {"Bash", "Edit"},
+		"dropped_params":               {"temperature", "top_p"},
+		"dropped_system_blocks":        {"system:billing-header"},
+	} {
+		got, _ := rec[key].([]any)
+		if len(got) != len(want) {
+			t.Errorf("%s = %v, want %v", key, rec[key], want)
+			continue
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Errorf("%s = %v, want %v", key, rec[key], want)
+			}
+		}
+	}
+	for _, old := range []string{"effort", "dropped"} {
+		if _, present := rec[old]; present {
+			t.Errorf("translation record still carries the old key %q: %v", old, rec)
+		}
+	}
+
+	// Nothing dropped and parallelism untouched: the per-kind keys are absent
+	// rather than empty, and the reason is the empty string.
+	recs = debugRecords(t, func(log *slog.Logger) {
+		logTranslation(context.Background(), log, rq, request.Metadata{})
+	})
+	rec = recs["translated a Messages request for the codex backend"]
+	for _, key := range []string{"dropped_params", "dropped_system_blocks", "parallel_tool_calls_triggers"} {
+		if _, present := rec[key]; present {
+			t.Errorf("%s present with nothing to report: %v", key, rec)
+		}
+	}
+	if rec["parallel_tool_calls_reason"] != "" || rec["parallel_tool_calls_disabled"] != false {
+		t.Errorf("parallel keys = %v / %v, want \"\" / false", rec["parallel_tool_calls_reason"], rec["parallel_tool_calls_disabled"])
+	}
+}
+
+// TestLogResultUnknownEventsMatchHealthz pins that the stream record spells
+// the unknown-event counts the way /healthz does: unknown_events is the total
+// and unknown_event_types the per-type map.
+func TestLogResultUnknownEventsMatchHealthz(t *testing.T) {
+	var seen map[string]int
+	l, err := New(Options{Client: &stubStreamer{}, OnUnknownEvents: func(m map[string]int) { seen = m }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rq := &router.Request{Dec: router.Decision{UpstreamModel: "gpt-5.6-sol"}}
+	res := stream.Result{
+		Started: true, Terminus: stream.TerminusClean, StopReason: "end_turn",
+		InputTokens: 7, CachedInputTokens: 3, CacheCreationInputTokens: 0, OutputTokens: 2,
+		UnknownEvents: map[string]int{"response.novel": 2, "response.other": 1},
+	}
+	sum := obs.NewSummary()
+	ctx := obs.WithSummary(context.Background(), sum)
+	sd := &seed{done: make(chan struct{}), n: 5}
+	close(sd.done)
+	eff := request.EffortResult{Requested: effort.Ultra, Applied: effort.High, Source: effort.SourceSuffix, Clamped: true}
+	recs := debugRecords(t, func(log *slog.Logger) {
+		l.logResult(ctx, log, rq, res, sd, eff)
+	})
+	rec := recs["codex stream carried unrecognised event types"]
+	if rec == nil {
+		t.Fatalf("no unknown-events record: %v", recs)
+	}
+	if rec["unknown_events"] != float64(3) {
+		t.Errorf("unknown_events = %v, want the total 3", rec["unknown_events"])
+	}
+	types, _ := rec["unknown_event_types"].(map[string]any)
+	if types["response.novel"] != float64(2) || types["response.other"] != float64(1) {
+		t.Errorf("unknown_event_types = %v, want the per-type map", rec["unknown_event_types"])
+	}
+	if seen["response.novel"] != 2 {
+		t.Errorf("OnUnknownEvents saw %v", seen)
+	}
+	// The INFO form is the DEBUG record plus the counts, so it carries the
+	// effort pair too.
+	if rec["effort_requested"] != "ultra" || rec["effort_applied"] != "high" {
+		t.Errorf("effort pair = %v / %v, want ultra / high", rec["effort_requested"], rec["effort_applied"])
+	}
+	// The three prompt components reach the request line together.
+	f := sum.Fields()
+	if f["input_tokens"] != int64(7) || f["cache_read_input_tokens"] != int64(3) || f["cache_creation_input_tokens"] != int64(0) {
+		t.Errorf("summary token fields = %v", f)
+	}
+}
+
+// TestLogResultStreamRecordCarriesEffort pins the DEBUG "codex stream
+// translated" record: the effort the translator chose and the one it sent,
+// under the same keys the request line uses, beside the model — and never
+// under the old single `effort` key.
+func TestLogResultStreamRecordCarriesEffort(t *testing.T) {
+	l, err := New(Options{Client: &stubStreamer{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rq := &router.Request{Dec: router.Decision{UpstreamModel: "gpt-5.6-sol"}}
+	res := stream.Result{Started: true, Terminus: stream.TerminusClean, StopReason: "end_turn"}
+	sd := &seed{done: make(chan struct{}), n: 5}
+	close(sd.done)
+
+	eff := request.EffortResult{Requested: effort.Ultra, Applied: effort.High, Source: effort.SourceSuffix, Clamped: true}
+	recs := debugRecords(t, func(log *slog.Logger) {
+		l.logResult(context.Background(), log, rq, res, sd, eff)
+	})
+	rec := recs["codex stream translated"]
+	if rec == nil {
+		t.Fatalf("no stream record: %v", recs)
+	}
+	for key, want := range map[string]any{
+		"upstream_model":   "gpt-5.6-sol",
+		"effort_requested": "ultra",
+		"effort_applied":   "high",
+		"started":          true,
+		"terminated":       true,
+		"errored":          false,
+	} {
+		if rec[key] != want {
+			t.Errorf("%s = %v, want %v", key, rec[key], want)
+		}
+	}
+	for _, absent := range []string{"effort", "unknown_events", "unknown_event_types"} {
+		if _, present := rec[absent]; present {
+			t.Errorf("stream record carries %q, which it must not: %v", absent, rec)
+		}
+	}
+
+	// A translation that resolved no effort at all (no suffix, no beta, no
+	// config, no catalog default) is a known outcome, not an unknown one:
+	// both keys are present and empty rather than missing.
+	recs = debugRecords(t, func(log *slog.Logger) {
+		l.logResult(context.Background(), log, rq, res, sd, request.EffortResult{})
+	})
+	rec = recs["codex stream translated"]
+	for _, key := range []string{"effort_requested", "effort_applied"} {
+		got, present := rec[key]
+		if !present || got != "" {
+			t.Errorf("%s = %v (present %v), want an empty string", key, got, present)
+		}
 	}
 }

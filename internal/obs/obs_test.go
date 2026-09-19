@@ -165,7 +165,15 @@ func TestAttrsMatchesHeader(t *testing.T) {
 	h := http.Header{"Content-Type": {"application/json"}, "Authorization": {"Bearer x"}}
 	attrs := obs.DefaultRedactor().Attrs(h)
 	if len(attrs) != 2 {
-		t.Fatalf("Attrs = %d attrs, want content-type plus redacted", len(attrs))
+		t.Fatalf("Attrs = %d attrs, want content-type plus headers_withheld", len(attrs))
+	}
+	// The withheld list is named for what it is; "redacted" is reserved for a
+	// substituted value.
+	if attrs[1].Key != "headers_withheld" {
+		t.Errorf("withheld list key = %q, want headers_withheld", attrs[1].Key)
+	}
+	if got := attrs[1].Value.Any().([]string); len(got) != 1 || got[0] != "authorization" {
+		t.Errorf("headers_withheld = %v, want [authorization]", got)
 	}
 }
 
@@ -229,10 +237,11 @@ func TestSummaryTokenFields(t *testing.T) {
 	if f := sum.Fields(); f["estimated_input_tokens"] != nil {
 		t.Fatalf("a negative seed was logged: %v", f)
 	}
-	sum.SetInputTokens(11, 8)
+	sum.SetInputTokens(11, 8, 5)
 	sum.SetEstimatedInputTokens(17)
 	f := sum.Fields()
-	if f["input_tokens"] != int64(11) || f["cache_read_input_tokens"] != int64(8) || f["estimated_input_tokens"] != int64(17) {
+	if f["input_tokens"] != int64(11) || f["cache_read_input_tokens"] != int64(8) ||
+		f["cache_creation_input_tokens"] != int64(5) || f["estimated_input_tokens"] != int64(17) {
 		t.Errorf("fields = %v", f)
 	}
 	var nilSum *obs.Summary

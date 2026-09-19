@@ -1,8 +1,10 @@
 package anthropic
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -384,5 +386,52 @@ func TestSanitizeDoesNotReportHeadlessToolUseForTextOnlyTurns(t *testing.T) {
 	}
 	if rep.HeadlessToolUse {
 		t.Error("HeadlessToolUse = true for a turn carrying no tool_use")
+	}
+}
+
+// The sanitizer's DEBUG record counts what it removed under a key that says
+// so: thinking_blocks_removed, an int, rather than a "dropped" that the Codex
+// leg spells as a list of names.
+func TestSanitizerLogsThinkingBlocksRemoved(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	var buf bytes.Buffer
+	log := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	leg, err := New(upstream.URL, transport.NewStd(transport.DefaultOptions()), WithLogger(log))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	proxy := httptest.NewServer(leg)
+	defer proxy.Close()
+
+	marked := `{"model":"claude-opus-5","messages":[{"role":"assistant","content":[` +
+		`{"type":"thinking","thinking":"gpt","signature":"` + synthetic.Marker + `s"},` +
+		`{"type":"text","text":"hi"}]}]}`
+	resp, err := noRedirectClient().Post(proxy.URL+"/v1/messages", "application/json", strings.NewReader(marked))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+
+	var rec map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+		var m map[string]any
+		if json.Unmarshal([]byte(line), &m) == nil && m["msg"] == "stripped synthetic thinking blocks" {
+			rec = m
+		}
+	}
+	if rec == nil {
+		t.Fatalf("no sanitizer record:\n%s", buf.String())
+	}
+	if rec["thinking_blocks_removed"] != float64(1) {
+		t.Errorf("thinking_blocks_removed = %v, want 1", rec["thinking_blocks_removed"])
+	}
+	if _, present := rec["dropped"]; present {
+		t.Errorf("sanitizer record still carries the old key dropped: %v", rec)
 	}
 }

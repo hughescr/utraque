@@ -45,7 +45,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"slices"
 	"strings"
 	"time"
 
@@ -239,9 +238,10 @@ func (l *Leg) Messages(w http.ResponseWriter, r *http.Request, rq *router.Reques
 	// only if the count is slower than the upstream's first event.
 	seed := startSeed(l.est, creq, log)
 
-	// The resolved effort belongs on the request line: "why did this answer
-	// take so long" is usually answered by the effort, not the model.
-	obs.SummaryFrom(ctx).SetEffort(meta.Effort.Applied.String())
+	// The applied effort belongs on the request line beside the requested one
+	// the router already put there: "why did this answer take so long" is
+	// usually answered by the effort, not the model.
+	obs.SummaryFrom(ctx).SetEffortApplied(meta.Effort.Applied.String())
 
 	// The request body as it was received. This is prompt text, which is why
 	// tracing is behind its own env var and prints a warning at startup.
@@ -264,9 +264,9 @@ func (l *Leg) Messages(w http.ResponseWriter, r *http.Request, rq *router.Reques
 	upstream = trace.TeeUpstream(upstream)
 
 	if rq.Stream {
-		return l.serveStream(ctx, w, rq, upstream, seed, log)
+		return l.serveStream(ctx, w, rq, upstream, seed, meta.Effort, log)
 	}
-	return l.serveAggregate(ctx, w, rq, upstream, seed, log)
+	return l.serveAggregate(ctx, w, rq, upstream, seed, meta.Effort, log)
 }
 
 // CountTokens serves POST /v1/messages/count_tokens for a codex-routed model.
@@ -327,7 +327,7 @@ func (l *Leg) CountTokens(w http.ResponseWriter, r *http.Request, rq *router.Req
 // sink frame. That is what keeps failure mode 1 available for a 200 whose body
 // turns out to be empty — a status line already on the wire could not be taken
 // back, and an error envelope appended to it would corrupt the stream.
-func (l *Leg) serveStream(ctx context.Context, w http.ResponseWriter, rq *router.Request, upstream io.ReadCloser, seed *seed, log *slog.Logger) error {
+func (l *Leg) serveStream(ctx context.Context, w http.ResponseWriter, rq *router.Request, upstream io.ReadCloser, seed *seed, eff request.EffortResult, log *slog.Logger) error {
 	lw := newLazyWriter(w, func(h http.Header) {
 		h.Set("Content-Type", "text/event-stream")
 		h.Set("Cache-Control", "no-cache")
@@ -345,7 +345,7 @@ func (l *Leg) serveStream(ctx context.Context, w http.ResponseWriter, rq *router
 	// usually is.
 	tr := stream.New(l.translatorOptions(ctx, rq, seed, l.heartbeat, log))
 	res, err := tr.Run(ctx, upstream, stream.NewSSEWriter(obs.TraceFrom(ctx).TeeDownstream(lw)))
-	l.logResult(ctx, log, rq, res, seed)
+	l.logResult(ctx, log, rq, res, seed, eff)
 
 	if err == nil {
 		return nil
@@ -364,12 +364,12 @@ func (l *Leg) serveStream(ctx context.Context, w http.ResponseWriter, rq *router
 // Nothing is written until the fold succeeds, so every failure — including a
 // mid-stream one — reaches the client as a real HTTP status rather than as a
 // truncated answer dressed up as a complete one.
-func (l *Leg) serveAggregate(ctx context.Context, w http.ResponseWriter, rq *router.Request, upstream io.ReadCloser, seed *seed, log *slog.Logger) error {
+func (l *Leg) serveAggregate(ctx context.Context, w http.ResponseWriter, rq *router.Request, upstream io.ReadCloser, seed *seed, eff request.EffortResult, log *slog.Logger) error {
 	agg := stream.NewAggregator()
 	// A keepalive has no meaning when nothing is on the wire yet.
 	tr := stream.New(l.translatorOptions(ctx, rq, seed, -1, log))
 	res, err := tr.Run(ctx, upstream, agg)
-	l.logResult(ctx, log, rq, res, seed)
+	l.logResult(ctx, log, rq, res, seed, eff)
 	if err != nil {
 		return l.renderStartFailure(ctx, w, log, err)
 	}
@@ -565,13 +565,16 @@ func (l *Leg) logger(rq *router.Request) *slog.Logger {
 //
 // How the answer ended — the stop reason and the completion size — goes on the
 // request line rather than a second log line of its own, so one request stays
-// one record.
-func (l *Leg) logResult(ctx context.Context, log *slog.Logger, rq *router.Request, res stream.Result, seed *seed) {
+// one record. The stream record carries the effort pair beside the model so
+// "why was this answer slow" is answerable from it alone: eff is the
+// resolution the translator made for this request, so both values are always
+// known here (an empty applied effort is a translation that sent none).
+func (l *Leg) logResult(ctx context.Context, log *slog.Logger, rq *router.Request, res stream.Result, seed *seed, eff request.EffortResult) {
 	if sum := obs.SummaryFrom(ctx); sum != nil {
 		sum.SetStopReason(res.StopReason)
 		if res.Terminus == stream.TerminusClean {
 			sum.SetOutputTokens(res.OutputTokens)
-			sum.SetInputTokens(res.InputTokens, res.CachedInputTokens)
+			sum.SetInputTokens(res.InputTokens, res.CachedInputTokens, res.CacheCreationInputTokens)
 		}
 		// The seed goes beside the real counts so the lower-bound invariant
 		// (estimated <= input + cache_read) can be checked from the log. Once
@@ -587,6 +590,8 @@ func (l *Leg) logResult(ctx context.Context, log *slog.Logger, rq *router.Reques
 
 	attrs := []slog.Attr{
 		slog.String("upstream_model", rq.Dec.UpstreamModel),
+		slog.String("effort_requested", eff.Requested.String()),
+		slog.String("effort_applied", eff.Applied.String()),
 		slog.Bool("started", res.Started),
 		slog.Bool("terminated", res.Terminated()),
 		slog.Bool("errored", res.Errored()),
@@ -595,7 +600,15 @@ func (l *Leg) logResult(ctx context.Context, log *slog.Logger, rq *router.Reques
 		if l.onUnknown != nil {
 			l.onUnknown(res.UnknownEvents)
 		}
-		attrs = append(attrs, slog.Any("unknown_events", res.UnknownEvents))
+		// Spelled as /healthz spells them: unknown_events is the total and
+		// unknown_event_types the per-type breakdown.
+		total := 0
+		for _, n := range res.UnknownEvents {
+			total += n
+		}
+		attrs = append(attrs,
+			slog.Int("unknown_events", total),
+			slog.Any("unknown_event_types", res.UnknownEvents))
 		log.LogAttrs(ctx, slog.LevelInfo, "codex stream carried unrecognised event types", attrs...)
 		return
 	}
@@ -611,25 +624,29 @@ func logTranslation(ctx context.Context, log *slog.Logger, rq *router.Request, m
 	}
 	attrs := []slog.Attr{
 		slog.String("upstream_model", rq.Dec.UpstreamModel),
-		slog.String("effort", meta.Effort.Applied.String()),
 		slog.String("effort_requested", meta.Effort.Requested.String()),
+		slog.String("effort_applied", meta.Effort.Applied.String()),
 		slog.String("effort_source", meta.Effort.Source.String()),
 		slog.Bool("effort_clamped", meta.Effort.Clamped),
-		// The reason is folded to the bool this key has always carried; the
-		// reason and trigger names get keys of their own in a later log-schema
-		// change.
+		// deprecated: remove in the next release. The bool is kept for one
+		// release beside the reason it folds to; readers should move to
+		// parallel_tool_calls_reason.
 		slog.Bool("parallel_tool_calls_disabled", meta.ParallelDisableReason != request.ParallelDisableNone),
+		slog.String("parallel_tool_calls_reason", string(meta.ParallelDisableReason)),
+	}
+	if len(meta.ParallelDisableTriggers) > 0 {
+		attrs = append(attrs, slog.Any("parallel_tool_calls_triggers", meta.ParallelDisableTriggers))
 	}
 	if meta.ReasoningReplayed > 0 || meta.ReasoningUnreplayable > 0 {
 		attrs = append(attrs,
 			slog.Int("reasoning_replayed", meta.ReasoningReplayed),
 			slog.Int("reasoning_unreplayable", meta.ReasoningUnreplayable))
 	}
-	// The "dropped" key carries the parameter names and the system-block
-	// markers as one list, params first, exactly as it did when Metadata held
-	// them in a single field; a key per kind is a log-schema change for later.
-	if dropped := slices.Concat(meta.DroppedParams, meta.DroppedSystemBlocks); len(dropped) > 0 {
-		attrs = append(attrs, slog.Any("dropped", dropped))
+	if len(meta.DroppedParams) > 0 {
+		attrs = append(attrs, slog.Any("dropped_params", meta.DroppedParams))
+	}
+	if len(meta.DroppedSystemBlocks) > 0 {
+		attrs = append(attrs, slog.Any("dropped_system_blocks", meta.DroppedSystemBlocks))
 	}
 	if len(meta.OrphanedToolResults) > 0 {
 		attrs = append(attrs, slog.Int("orphaned_tool_results", len(meta.OrphanedToolResults)))

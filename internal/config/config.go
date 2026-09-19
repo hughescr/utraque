@@ -786,7 +786,7 @@ func (c Config) String() string {
 	fmt.Fprintf(&b, " codex.client_id=%s", c.Codex.ClientID)
 	fmt.Fprintf(&b, " codex.refresh_skew=%s", c.Codex.RefreshSkew)
 	fmt.Fprintf(&b, " codex.lock_timeout=%s", c.Codex.LockTimeout)
-	fmt.Fprintf(&b, " codex.transport=%s", c.Codex.Transport)
+	fmt.Fprintf(&b, " codex.transport_mode=%s", c.Codex.Transport)
 	fmt.Fprintf(&b, " codex.client_version=%s", c.Codex.ClientVersion)
 	fmt.Fprintf(&b, " routing.alias_overrides=[%s]", joinOverrides(c.Routing.AliasOverrides))
 	fmt.Fprintf(&b, " idle_timeout=%s", c.Idle.Timeout)
@@ -820,7 +820,7 @@ func (c Config) LogValue() slog.Value {
 		slog.String("codex.client_id", c.Codex.ClientID),
 		slog.Duration("codex.refresh_skew", c.Codex.RefreshSkew),
 		slog.Duration("codex.lock_timeout", c.Codex.LockTimeout),
-		slog.String("codex.transport", c.Codex.Transport),
+		slog.String("codex.transport_mode", c.Codex.Transport),
 		slog.String("codex.client_version", c.Codex.ClientVersion),
 		slog.String("routing.alias_overrides", joinOverrides(c.Routing.AliasOverrides)),
 		slog.Duration("idle_timeout", c.Idle.Timeout),

@@ -190,7 +190,9 @@ func (r *Redactor) Allowed(name string) bool {
 }
 
 // Header renders h as a slog group holding the allowlisted headers plus a
-// "redacted" attr naming, but never valuing, everything withheld.
+// "headers_withheld" attr naming, but never valuing, everything withheld. The
+// key matches the trace manifest's; "redacted" is reserved for a value that
+// was substituted (see Redacted).
 func (r *Redactor) Header(h http.Header) slog.Value {
 	if r == nil || len(h) == 0 {
 		return slog.GroupValue()
@@ -219,7 +221,7 @@ func (r *Redactor) Header(h http.Header) slog.Value {
 		}
 	}
 	if len(withheld) > 0 {
-		attrs = append(attrs, slog.Any("redacted", withheld))
+		attrs = append(attrs, slog.Any("headers_withheld", withheld))
 	}
 	return slog.GroupValue(attrs...)
 }
@@ -227,8 +229,8 @@ func (r *Redactor) Header(h http.Header) slog.Value {
 // partitionHeaders splits header names, in the order given, into those whose
 // values may be logged (as spelled, so they still index the http.Header) and
 // those that are withheld (lower-cased, as they are reported). Redactor.Header's
-// "redacted" list and Trace.SetRequest's headers_withheld list are both decided
-// here, so the log and the trace always name the same withheld headers; each
+// and Trace.SetRequest's headers_withheld lists are both decided here, so the
+// log and the trace always name the same withheld headers; each
 // caller keeps its own ordering (Header passes sorted names, SetRequest passes
 // them in http.Header iteration order).
 func (r *Redactor) partitionHeaders(names []string) (allowed, withheld []string) {
