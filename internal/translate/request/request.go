@@ -56,9 +56,26 @@ var effortRank = map[string]int{
 	cschema.EffortUltra:  5,
 }
 
-// summaryNone is the catalog's sentinel for "request no reasoning summary". It
-// is not a valid Responses summary mode, so it is treated as "omit summary".
-const summaryNone = "none"
+// SummaryNone is the catalog's sentinel for "request no reasoning summary". It
+// is not a valid Responses summary mode, so it is treated as "omit summary". It
+// is exported so a caller that sets Options.Summary (internal/codex/leg) can
+// name the sentinel rather than re-spell it.
+const SummaryNone = "none"
+
+// ParallelDisableReason records why parallel_tool_calls:false was sent, when
+// it was. It is Metadata-only for now: the codex leg logs the decision as the
+// bool parallel_tool_calls_disabled (reason != ParallelDisableNone), and the
+// reason itself is not yet logged.
+type ParallelDisableReason string
+
+// The provenance of a parallel_tool_calls:false. ParallelDisableNone means the
+// field was left unset.
+const (
+	ParallelDisableNone        ParallelDisableReason = ""
+	ParallelDisableClientFlag  ParallelDisableReason = "client_flag"
+	ParallelDisableToolTrigger ParallelDisableReason = "tool_trigger"
+	ParallelDisableBoth        ParallelDisableReason = "both"
+)
 
 // The Anthropic parameters utraque drops because the Codex backend ignores
 // them. Recorded in Metadata.DroppedParams when present so the caller can log
@@ -115,8 +132,8 @@ type Options struct {
 	// below the anthropic-beta signal and above the catalog default.
 	ConfigEffort string
 	// Summary overrides the reasoning summary mode. Empty falls back to the
-	// model's default_reasoning_summary. A value of "none" (from either source)
-	// omits the summary field entirely.
+	// model's default_reasoning_summary. A value of SummaryNone (from either
+	// source) omits the summary field entirely.
 	Summary string
 	// MutatingTools overrides DefaultMutatingTools. Nil uses the default set; a
 	// non-nil (even empty) map replaces it wholesale.
@@ -161,14 +178,16 @@ type Metadata struct {
 	Effort EffortResult
 	// Summary is the reasoning summary mode actually applied ("" when none).
 	Summary string
-	// ParallelToolCallsDisabled reports whether parallel_tool_calls:false was
-	// forced, by either a mutating tool or the client's explicit
-	// tool_choice.disable_parallel_tool_use.
-	ParallelToolCallsDisabled bool
-	// MutatingTools lists the request tool names that triggered the disable,
-	// sorted, for logging. It may be empty when the disable came solely from the
-	// client's disable_parallel_tool_use flag.
-	MutatingTools []string
+	// ParallelDisableReason records whether parallel_tool_calls:false was
+	// forced and by what: a mutating tool (ParallelDisableToolTrigger), the
+	// client's explicit tool_choice.disable_parallel_tool_use
+	// (ParallelDisableClientFlag), or both. ParallelDisableNone means the field
+	// was left unset.
+	ParallelDisableReason ParallelDisableReason
+	// ParallelDisableTriggers lists the request tool names that triggered the
+	// disable, sorted, for logging. It is empty when the disable came solely
+	// from the client's flag.
+	ParallelDisableTriggers []string
 	// OrphanedToolResults lists tool_result call_ids with no matching prior
 	// tool_use in the same request. They are still emitted as
 	// function_call_output items (structural passthrough), but recorded here
@@ -242,13 +261,24 @@ func Translate(req *aschema.MessagesRequest, dec router.Decision, model cschema.
 
 	disabled, names := disableParallel(req.Tools, opts.mutatingSet())
 	clientDisableParallel := req.ToolChoice != nil && req.ToolChoice.DisableParallelToolUse
-	if disabled || clientDisableParallel {
-		// Either a mutating tool (the local footgun heuristic) or the client's
-		// explicit tool_choice.disable_parallel_tool_use forces serial calls.
+	// Either a mutating tool (the local footgun heuristic) or the client's
+	// explicit tool_choice.disable_parallel_tool_use forces serial calls. Both
+	// are kept in the reason so a heuristic-only disable stays distinguishable
+	// from one the client also asked for.
+	reason := ParallelDisableNone
+	switch {
+	case disabled && clientDisableParallel:
+		reason = ParallelDisableBoth
+	case disabled:
+		reason = ParallelDisableToolTrigger
+	case clientDisableParallel:
+		reason = ParallelDisableClientFlag
+	}
+	if reason != ParallelDisableNone {
 		f := false
 		out.ParallelToolCalls = &f
-		meta.ParallelToolCallsDisabled = true
-		meta.MutatingTools = names
+		meta.ParallelDisableReason = reason
+		meta.ParallelDisableTriggers = names
 	}
 
 	out.Reasoning, meta.Effort, meta.Summary = translateReasoning(dec, model, opts)
@@ -620,7 +650,7 @@ func disableParallel(tools []aschema.Tool, mutating map[string]bool) (bool, []st
 // translateReasoning resolves the reasoning block: the effort by precedence
 // (suffix > anthropic-beta > config > catalog default), clamped to the model's
 // supported levels, and the summary (config override else catalog default,
-// with "none" meaning omit). It returns nil reasoning only when there is no
+// with SummaryNone meaning omit). It returns nil reasoning only when there is no
 // effort and no summary to send.
 func translateReasoning(dec router.Decision, model cschema.CatalogModel, opts Options) (*cschema.Reasoning, EffortResult, string) {
 	requested, source := chooseEffort(dec, model, opts)
@@ -632,7 +662,7 @@ func translateReasoning(dec router.Decision, model cschema.CatalogModel, opts Op
 		summary = model.DefaultReasoningSummary
 	}
 	emitSummary := summary
-	if emitSummary == summaryNone {
+	if emitSummary == SummaryNone {
 		emitSummary = ""
 	}
 

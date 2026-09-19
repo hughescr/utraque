@@ -329,11 +329,11 @@ func TestParallelDisable(t *testing.T) {
 	if out.ParallelToolCalls == nil || *out.ParallelToolCalls != false {
 		t.Fatalf("ParallelToolCalls = %v, want *false", out.ParallelToolCalls)
 	}
-	if !meta.ParallelToolCallsDisabled {
-		t.Error("metadata should record ParallelToolCallsDisabled")
+	if meta.ParallelDisableReason != request.ParallelDisableToolTrigger {
+		t.Errorf("ParallelDisableReason = %q, want %q", meta.ParallelDisableReason, request.ParallelDisableToolTrigger)
 	}
-	if !reflect.DeepEqual(meta.MutatingTools, []string{"Bash"}) {
-		t.Errorf("MutatingTools = %v, want [Bash]", meta.MutatingTools)
+	if !reflect.DeepEqual(meta.ParallelDisableTriggers, []string{"Bash"}) {
+		t.Errorf("ParallelDisableTriggers = %v, want [Bash]", meta.ParallelDisableTriggers)
 	}
 
 	// A non-mutating tool set: field stays unset.
@@ -349,8 +349,40 @@ func TestParallelDisable(t *testing.T) {
 	if out2.ParallelToolCalls != nil {
 		t.Errorf("ParallelToolCalls = %v, want nil for non-mutating tools", *out2.ParallelToolCalls)
 	}
-	if meta2.ParallelToolCallsDisabled {
-		t.Error("non-mutating tools should not disable parallel calls")
+	if meta2.ParallelDisableReason != request.ParallelDisableNone {
+		t.Errorf("non-mutating tools should not disable parallel calls, got reason %q", meta2.ParallelDisableReason)
+	}
+}
+
+// TestParallelDisableBoth confirms that a mutating tool beside the client's
+// disable_parallel_tool_use flag is recorded as ParallelDisableBoth, with the
+// trigger names kept, and that the wire document is exactly what a single
+// reason produced before the reason was recorded (the literal below was
+// generated before ParallelDisableReason existed).
+func TestParallelDisableBoth(t *testing.T) {
+	req := &aschema.MessagesRequest{
+		Model: "m", MaxTokens: 10,
+		Tools:      []aschema.Tool{{Name: "Read"}, {Name: "Bash"}},
+		ToolChoice: &aschema.ToolChoice{Type: aschema.ToolChoiceAuto, DisableParallelToolUse: true},
+		Messages:   []aschema.Message{{Role: "user", Content: aschema.StringContent("hi")}},
+	}
+	out, meta, err := request.Translate(req, defaultCase().dec, defaultCase().model, request.Options{})
+	if err != nil {
+		t.Fatalf("translate: %v", err)
+	}
+	if meta.ParallelDisableReason != request.ParallelDisableBoth {
+		t.Errorf("ParallelDisableReason = %q, want %q", meta.ParallelDisableReason, request.ParallelDisableBoth)
+	}
+	if !reflect.DeepEqual(meta.ParallelDisableTriggers, []string{"Bash"}) {
+		t.Errorf("ParallelDisableTriggers = %v, want [Bash]", meta.ParallelDisableTriggers)
+	}
+	got, err := json.Marshal(out)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	const want = `{"model":"gpt-5.6-sol","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}],"tools":[{"type":"function","name":"Read"},{"type":"function","name":"Bash"}],"tool_choice":"auto","parallel_tool_calls":false,"reasoning":{"effort":"low"},"include":["reasoning.encrypted_content"],"prompt_cache_key":"utq-fad4234920c575b4d617be304f537eba","store":false,"stream":true}`
+	if string(got) != want {
+		t.Errorf("wire document changed:\n got %s\nwant %s", got, want)
 	}
 }
 
@@ -370,8 +402,8 @@ func TestCustomMutatingSet(t *testing.T) {
 	if out.ParallelToolCalls == nil {
 		t.Fatal("expected parallel disabled by DangerTool")
 	}
-	if !reflect.DeepEqual(meta.MutatingTools, []string{"DangerTool"}) {
-		t.Errorf("MutatingTools = %v, want [DangerTool]", meta.MutatingTools)
+	if !reflect.DeepEqual(meta.ParallelDisableTriggers, []string{"DangerTool"}) {
+		t.Errorf("ParallelDisableTriggers = %v, want [DangerTool]", meta.ParallelDisableTriggers)
 	}
 
 	// An empty (non-nil) set disables the default behaviour entirely.
@@ -475,11 +507,11 @@ func TestDisableParallelToolUseFlag(t *testing.T) {
 	if out.ParallelToolCalls == nil || *out.ParallelToolCalls != false {
 		t.Fatalf("ParallelToolCalls = %v, want *false from client flag", out.ParallelToolCalls)
 	}
-	if !meta.ParallelToolCallsDisabled {
-		t.Error("metadata should record ParallelToolCallsDisabled from client flag")
+	if meta.ParallelDisableReason != request.ParallelDisableClientFlag {
+		t.Errorf("ParallelDisableReason = %q, want %q", meta.ParallelDisableReason, request.ParallelDisableClientFlag)
 	}
-	if len(meta.MutatingTools) != 0 {
-		t.Errorf("MutatingTools = %v, want empty (no mutating tool triggered it)", meta.MutatingTools)
+	if len(meta.ParallelDisableTriggers) != 0 {
+		t.Errorf("ParallelDisableTriggers = %v, want empty (no mutating tool triggered it)", meta.ParallelDisableTriggers)
 	}
 
 	// Without the flag and with non-mutating tools, the field stays unset.

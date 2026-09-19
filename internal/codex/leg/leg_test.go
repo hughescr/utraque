@@ -56,6 +56,29 @@ func TestNewRejectsNilClient(t *testing.T) {
 	}
 }
 
+// TestNewValidatesStreamPolicies pins that New, not the Translator, is where an
+// unknown emit_reasoning / on_truncate mode is rejected: the Translator takes
+// its modes as validated, and an unknown value there would silently behave as
+// the default.
+func TestNewValidatesStreamPolicies(t *testing.T) {
+	if _, err := New(Options{Client: &stubStreamer{}, EmitReasoning: "loud"}); err == nil {
+		t.Error("New accepted an unknown EmitReasoning mode")
+	}
+	if _, err := New(Options{Client: &stubStreamer{}, TruncateMode: "ignore"}); err == nil {
+		t.Error("New accepted an unknown TruncateMode")
+	}
+	for _, m := range []stream.ReasoningMode{"", stream.ReasoningThinking, stream.ReasoningDrop} {
+		if _, err := New(Options{Client: &stubStreamer{}, EmitReasoning: m}); err != nil {
+			t.Errorf("New(EmitReasoning=%q): %v", m, err)
+		}
+	}
+	for _, m := range []stream.TruncateMode{"", stream.TruncateError, stream.TruncateFinish} {
+		if _, err := New(Options{Client: &stubStreamer{}, TruncateMode: m}); err != nil {
+			t.Errorf("New(TruncateMode=%q): %v", m, err)
+		}
+	}
+}
+
 // TestMessagesWithoutCredentialsIs503 pins the "no `codex login` here" answer:
 // a 503 naming both the client model and the resolved slug, never a 401 that
 // would send Claude Code off to re-authenticate against the wrong provider.

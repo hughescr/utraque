@@ -57,7 +57,7 @@ func (t *Translator) blockFor(outIdx int, kind string) *block {
 		return b
 	}
 	b := &block{outIdx: outIdx, kind: kind}
-	if kind == kindThinking && t.emitReasoning == emitReasoningDrop {
+	if kind == kindThinking && t.emitReasoning == ReasoningDrop {
 		b.dropped = true
 	}
 	t.blocks[outIdx] = b

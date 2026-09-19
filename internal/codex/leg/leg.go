@@ -121,13 +121,16 @@ type Options struct {
 	// count_tokens. Nil uses tokens.Codex(), the exact o200k_base count.
 	Estimator tokens.RequestEstimator
 
-	// EmitReasoning is "thinking" (default) or "drop"; OnTruncate is "error"
-	// (default) or "finish". Both are passed through to the Translator.
-	EmitReasoning string
-	OnTruncate    string
+	// EmitReasoning is stream.ReasoningThinking (the default for the zero
+	// value) or stream.ReasoningDrop; TruncateMode is stream.TruncateError (the
+	// default) or stream.TruncateFinish. Both are passed through to the
+	// Translator, and New rejects any other non-empty value, because the
+	// Translator itself assumes a validated mode.
+	EmitReasoning stream.ReasoningMode
+	TruncateMode  stream.TruncateMode
 
-	// Summary overrides the reasoning summary mode ("none" omits it). Empty
-	// takes the model's catalog default.
+	// Summary overrides the reasoning summary mode (request.SummaryNone omits
+	// it). Empty takes the model's catalog default.
 	Summary string
 
 	// Heartbeat is the SSE keepalive interval for streaming responses. Zero
@@ -156,8 +159,8 @@ type Leg struct {
 	onCatalog      func([]cschema.CatalogModel)
 	onUnknown      func(map[string]int)
 	est            tokens.RequestEstimator
-	emitReasoning  string
-	onTruncate     string
+	emitReasoning  stream.ReasoningMode
+	truncateMode   stream.TruncateMode
 	summary        string
 	heartbeat      time.Duration
 	upstreamIdle   time.Duration
@@ -171,6 +174,12 @@ func New(opts Options) (*Leg, error) {
 	if opts.Client == nil {
 		return nil, errors.New("utraque/codex/leg: nil responses client")
 	}
+	if opts.EmitReasoning != "" && !opts.EmitReasoning.Valid() {
+		return nil, fmt.Errorf("utraque/codex/leg: unknown EmitReasoning mode %q", opts.EmitReasoning)
+	}
+	if opts.TruncateMode != "" && !opts.TruncateMode.Valid() {
+		return nil, fmt.Errorf("utraque/codex/leg: unknown TruncateMode %q", opts.TruncateMode)
+	}
 	l := &Leg{
 		client:         opts.Client,
 		creds:          opts.Credentials,
@@ -180,7 +189,7 @@ func New(opts Options) (*Leg, error) {
 		onUnknown:      opts.OnUnknownEvents,
 		est:            opts.Estimator,
 		emitReasoning:  opts.EmitReasoning,
-		onTruncate:     opts.OnTruncate,
+		truncateMode:   opts.TruncateMode,
 		summary:        opts.Summary,
 		heartbeat:      opts.Heartbeat,
 		upstreamIdle:   opts.UpstreamIdleTimeout,
@@ -406,7 +415,7 @@ func (l *Leg) translatorOptions(ctx context.Context, rq *router.Request, seed *s
 		UpstreamModel:       upstreamModel(rq),
 		InputTokensFunc:     func() int { return seed.Value(ctx) },
 		EmitReasoning:       l.emitReasoning,
-		OnTruncate:          l.onTruncate,
+		TruncateMode:        l.truncateMode,
 		Heartbeat:           heartbeat,
 		UpstreamIdleTimeout: l.upstreamIdle,
 		Logger:              log,
@@ -568,7 +577,7 @@ func (l *Leg) logger(rq *router.Request) *slog.Logger {
 func (l *Leg) logResult(ctx context.Context, log *slog.Logger, rq *router.Request, res stream.Result, seed *seed) {
 	if sum := obs.SummaryFrom(ctx); sum != nil {
 		sum.SetStopReason(res.StopReason)
-		if res.Terminated && !res.Errored {
+		if res.Terminus == stream.TerminusClean {
 			sum.SetOutputTokens(res.OutputTokens)
 			sum.SetInputTokens(res.InputTokens, res.CachedInputTokens)
 		}
@@ -587,8 +596,8 @@ func (l *Leg) logResult(ctx context.Context, log *slog.Logger, rq *router.Reques
 	attrs := []slog.Attr{
 		slog.String("upstream_model", rq.Dec.UpstreamModel),
 		slog.Bool("started", res.Started),
-		slog.Bool("terminated", res.Terminated),
-		slog.Bool("errored", res.Errored),
+		slog.Bool("terminated", res.Terminated()),
+		slog.Bool("errored", res.Errored()),
 	}
 	if len(res.UnknownEvents) > 0 {
 		if l.onUnknown != nil {
@@ -614,7 +623,10 @@ func logTranslation(ctx context.Context, log *slog.Logger, rq *router.Request, m
 		slog.String("effort_requested", meta.Effort.Requested),
 		slog.String("effort_source", meta.Effort.Source),
 		slog.Bool("effort_clamped", meta.Effort.Clamped),
-		slog.Bool("parallel_tool_calls_disabled", meta.ParallelToolCallsDisabled),
+		// The reason is folded to the bool this key has always carried; the
+		// reason and trigger names get keys of their own in a later log-schema
+		// change.
+		slog.Bool("parallel_tool_calls_disabled", meta.ParallelDisableReason != request.ParallelDisableNone),
 	}
 	if meta.ReasoningReplayed > 0 || meta.ReasoningUnreplayable > 0 {
 		attrs = append(attrs,

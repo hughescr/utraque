@@ -186,7 +186,12 @@ func (a *Aggregator) Error(e aschema.ErrorBody) error {
 // Ping is a streaming keepalive and carries no content to fold.
 func (a *Aggregator) Ping() error { return nil }
 
-// Failed reports whether a mid-stream error terminated the fold.
+// Failed reports whether a mid-stream error terminated the fold. It is the
+// sink's view of the same fact Result.Errored reports from the Translator's
+// side: the two Aggregator flags stopped and failed mirror the two Sink termini
+// (MessageStop and Error), so after a Run into an Aggregator, Failed() equals
+// Result.Errored() and stopped is set exactly when the terminus was
+// TerminusClean.
 func (a *Aggregator) Failed() bool { return a.failed }
 
 // Message returns the folded Anthropic response.

@@ -227,7 +227,7 @@ func TestAggregatorErrorPathSurfacesError(t *testing.T) {
 			if runErr != nil {
 				t.Fatalf("run: %v", runErr)
 			}
-			if !res.Errored {
+			if !res.Errored() {
 				t.Fatalf("fixture %s should terminate in an error, got %+v", fixture, res)
 			}
 			if !agg.Failed() {

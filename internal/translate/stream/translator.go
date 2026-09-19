@@ -16,17 +16,53 @@ import (
 	"github.com/hughescr/utraque/internal/sse"
 )
 
-// emit_reasoning modes.
+// ReasoningMode is the emit_reasoning policy: what the translator does with the
+// upstream's reasoning items. It is a leg-level setting, not a per-request one,
+// and it is never written to the wire.
+type ReasoningMode string
+
+// The emit_reasoning modes. ReasoningThinking (the default) renders reasoning
+// as Anthropic thinking blocks; ReasoningDrop suppresses it.
 const (
-	emitReasoningThinking = "thinking"
-	emitReasoningDrop     = "drop"
+	ReasoningThinking ReasoningMode = "thinking"
+	ReasoningDrop     ReasoningMode = "drop"
 )
 
-// on_truncate modes.
+// Valid reports whether m is one of the known modes. The empty string is not
+// valid here: New reads it as the default, and a caller that wants to reject
+// bad configuration checks the value it was given, not the value New fills in.
+func (m ReasoningMode) Valid() bool {
+	switch m {
+	case ReasoningThinking, ReasoningDrop:
+		return true
+	default:
+		return false
+	}
+}
+
+// TruncateMode is the on_truncate policy: what a clean upstream EOF with no
+// terminus event becomes. It is a leg-level setting and is never written to the
+// wire.
+type TruncateMode string
+
+// The on_truncate modes. TruncateError (the default) treats the truncation as a
+// mid-stream failure; TruncateFinish synthesises a clean terminus over what
+// arrived (except over a partial tool call, see finalizeClean).
 const (
-	onTruncateError  = "error"
-	onTruncateFinish = "finish"
+	TruncateError  TruncateMode = "error"
+	TruncateFinish TruncateMode = "finish"
 )
+
+// Valid reports whether m is one of the known modes. As for ReasoningMode, the
+// empty string is New's default, not a valid mode.
+func (m TruncateMode) Valid() bool {
+	switch m {
+	case TruncateError, TruncateFinish:
+		return true
+	default:
+		return false
+	}
+}
 
 // Defaults for the pending-buffer bounds and the timers.
 const (
@@ -122,10 +158,16 @@ type Options struct {
 	// must return the same value however many times it is called.
 	InputTokens     int
 	InputTokensFunc func() int
-	// EmitReasoning is "thinking" (default) or "drop".
-	EmitReasoning string
-	// OnTruncate is "error" (default) or "finish".
-	OnTruncate string
+	// EmitReasoning is ReasoningThinking (the default for the zero value) or
+	// ReasoningDrop. New assumes a validated value: it defaults only the empty
+	// string, and any other unknown value behaves as ReasoningThinking, so a
+	// caller that takes the mode from configuration checks Valid first
+	// (internal/codex/leg does, in New).
+	EmitReasoning ReasoningMode
+	// TruncateMode is TruncateError (the default for the zero value) or
+	// TruncateFinish. As for EmitReasoning, New assumes a validated value; an
+	// unknown value behaves as TruncateError.
+	TruncateMode TruncateMode
 	// Heartbeat injects a ping after this much silence. Zero uses the default;
 	// negative disables it.
 	Heartbeat time.Duration
@@ -142,18 +184,34 @@ type Options struct {
 	Logger *slog.Logger
 }
 
-// Result summarises a Run: whether anything was emitted, whether a terminus was
-// reached, whether that terminus was an error frame, how the answer ended, and
-// the unknown-event counts (keyed by type) for /healthz.
+// Terminus is how a Run ended on the wire: not at all (the client interrupt,
+// failure mode 3, or a failure before message_start, mode 1), cleanly
+// (message_delta + message_stop), or with a mid-stream error frame (mode 2).
+// It is the one fact the two Result helpers and Aggregator.Failed all report.
+type Terminus string
+
+// The three termini. Only one can hold: an error frame and a clean stop are
+// never both written over one stream.
+const (
+	TerminusNone    Terminus = ""
+	TerminusClean   Terminus = "clean"
+	TerminusErrored Terminus = "errored"
+)
+
+// Result summarises a Run: whether anything was emitted, which terminus (if
+// any) was reached, how the answer ended, and the unknown-event counts (keyed
+// by type) for /healthz.
 //
 // StopReason and OutputTokens are reported for the SAME reason the two sinks
 // share one state machine: the caller's request log must say how the answer
 // ended without re-deriving it from the sink, which only the non-streaming
 // Aggregator could answer at all.
 type Result struct {
-	Started    bool
-	Terminated bool
-	Errored    bool
+	Started bool
+	// Terminus is TerminusNone when the stream ended with nothing terminal on
+	// the wire, TerminusClean after message_stop, and TerminusErrored after a
+	// mid-stream error frame. Terminated and Errored read it.
+	Terminus Terminus
 	// StopReason is the Anthropic stop_reason emitted on a clean terminus, and
 	// empty when the stream never reached one.
 	StopReason string
@@ -173,6 +231,13 @@ type Result struct {
 	UnknownEvents map[string]int
 }
 
+// Terminated reports whether any terminus, clean or errored, was written.
+func (r Result) Terminated() bool { return r.Terminus != TerminusNone }
+
+// Errored reports whether the terminus was a mid-stream error frame. It is the
+// same fact Aggregator.Failed reports from the sink's side.
+func (r Result) Errored() bool { return r.Terminus == TerminusErrored }
+
 // Translator maps a Codex Responses SSE stream onto an Anthropic Messages SSE
 // stream, one event at a time, through a Sink.
 //
@@ -190,10 +255,10 @@ type Result struct {
 //     truncated body, or the idle timeout): the active block is closed with a
 //     bare content_block_stop, an error event is emitted, and the stream STOPS —
 //     no message_delta / message_stop is faked over a broken stream. Run returns
-//     nil with Result.Terminated and Result.Errored true.
+//     nil with Result.Terminus TerminusErrored.
 //  3. Client interrupt (ctx cancelled): the upstream reader is closed, the sink
 //     is abandoned with no terminus, and the scan goroutine is joined so nothing
-//     leaks. Run returns ctx.Err() with Result.Terminated false.
+//     leaks. Run returns ctx.Err() with Result.Terminus TerminusNone.
 //
 // A Translator runs one stream at a time; construct one per request (Run resets
 // its state defensively but is not safe for concurrent Runs).
@@ -201,8 +266,8 @@ type Translator struct {
 	model           string
 	inputTokens     int
 	inputTokensFunc func() int
-	emitReasoning   string
-	onTruncate      string
+	emitReasoning   ReasoningMode
+	truncateMode    TruncateMode
 	heartbeat       time.Duration
 	upstreamIdle    time.Duration
 	maxPendingBytes int
@@ -212,8 +277,7 @@ type Translator struct {
 	// per-Run state
 	responseID          string
 	started             bool
-	terminated          bool
-	errored             bool
+	terminus            Terminus
 	nextIndex           int
 	active              *block
 	blocks              map[int]*block
@@ -231,14 +295,16 @@ type Translator struct {
 	finalCachedTokens   int
 }
 
-// New builds a Translator from opts, filling defaults.
+// New builds a Translator from opts, filling defaults. It does not validate the
+// two policy modes (see Options.EmitReasoning): it fills the default for an
+// empty one and otherwise takes the value as given.
 func New(opts Options) *Translator {
 	t := &Translator{
 		model:           opts.UpstreamModel,
 		inputTokens:     opts.InputTokens,
 		inputTokensFunc: opts.InputTokensFunc,
 		emitReasoning:   opts.EmitReasoning,
-		onTruncate:      opts.OnTruncate,
+		truncateMode:    opts.TruncateMode,
 		heartbeat:       opts.Heartbeat,
 		upstreamIdle:    opts.UpstreamIdleTimeout,
 		maxPendingBytes: opts.MaxPendingBytes,
@@ -246,10 +312,10 @@ func New(opts Options) *Translator {
 		log:             opts.Logger,
 	}
 	if t.emitReasoning == "" {
-		t.emitReasoning = emitReasoningThinking
+		t.emitReasoning = ReasoningThinking
 	}
-	if t.onTruncate == "" {
-		t.onTruncate = onTruncateError
+	if t.truncateMode == "" {
+		t.truncateMode = TruncateError
 	}
 	if t.heartbeat == 0 {
 		t.heartbeat = defaultHeartbeat
@@ -272,8 +338,7 @@ func New(opts Options) *Translator {
 func (t *Translator) reset() {
 	t.responseID = ""
 	t.started = false
-	t.terminated = false
-	t.errored = false
+	t.terminus = TerminusNone
 	t.nextIndex = 0
 	t.active = nil
 	t.blocks = make(map[int]*block)
@@ -294,8 +359,7 @@ func (t *Translator) reset() {
 func (t *Translator) result() Result {
 	return Result{
 		Started:           t.started,
-		Terminated:        t.terminated,
-		Errored:           t.errored,
+		Terminus:          t.terminus,
 		StopReason:        t.finalStop,
 		OutputTokens:      t.finalOutputTokens,
 		InputTokens:       t.finalInputTokens,
@@ -375,10 +439,10 @@ func (t *Translator) Run(ctx context.Context, r io.Reader, sink Sink) (Result, e
 			if err != nil {
 				return finish(err)
 			}
-			// done covers the explicit terminus paths; t.terminated additionally
+			// done covers the explicit terminus paths; t.terminus additionally
 			// catches a mid-stream error emitted from deep inside handling (a
 			// pending-buffer-bounds abort), which returns done=false.
-			if done || t.terminated {
+			if done || t.terminus != TerminusNone {
 				return finish(nil)
 			}
 
@@ -666,7 +730,7 @@ func (t *Translator) fail(sink Sink, msg string) (bool, error) {
 // handleEnd resolves the end of the upstream stream. cause is nil for a clean
 // EOF, or the read/idle error otherwise.
 func (t *Translator) handleEnd(sink Sink, cause error) error {
-	if t.terminated {
+	if t.terminus != TerminusNone {
 		return nil
 	}
 	if !t.started {
@@ -677,7 +741,7 @@ func (t *Translator) handleEnd(sink Sink, cause error) error {
 	}
 	// A clean EOF with on_truncate=finish synthesises a clean terminus; every
 	// other end after some output is a mid-stream failure.
-	if cause == nil && t.onTruncate == onTruncateFinish {
+	if cause == nil && t.truncateMode == TruncateFinish {
 		return t.finalizeClean(sink)
 	}
 	return t.emitMidStreamError(sink, endMessage(cause))
@@ -722,8 +786,7 @@ func (t *Translator) emitMidStreamError(sink Sink, message string) error {
 		b.stopped = true
 		t.active = nil
 	}
-	t.terminated = true
-	t.errored = true
+	t.terminus = TerminusErrored
 	return sink.Error(aschema.ErrorBody{Type: string(apierr.TypeAPI), Message: message})
 }
 
@@ -753,7 +816,7 @@ func (t *Translator) finalizeClean(sink Sink) error {
 	if err := sink.MessageStop(); err != nil {
 		return err
 	}
-	t.terminated = true
+	t.terminus = TerminusClean
 	return nil
 }
 

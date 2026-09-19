@@ -41,8 +41,8 @@ func goldenOptions() stream.Options {
 	return stream.Options{
 		UpstreamModel:       "gpt-5.6-sol",
 		InputTokens:         7,
-		EmitReasoning:       "thinking",
-		OnTruncate:          "error",
+		EmitReasoning:       stream.ReasoningThinking,
+		TruncateMode:        stream.TruncateError,
 		Heartbeat:           -1,
 		UpstreamIdleTimeout: -1,
 	}
@@ -144,7 +144,7 @@ func TestGrammarInvariantAllCases(t *testing.T) {
 // cut mid-tool-arguments in finish mode must resolve to an error terminus, not a
 // fabricated tool_use the client cannot parse.
 func TestPrefixTruncation(t *testing.T) {
-	modes := []string{"error", "finish"}
+	modes := []stream.TruncateMode{stream.TruncateError, stream.TruncateFinish}
 	for _, in := range fixtureInputs(t) {
 		name := caseName(in)
 		t.Run(name, func(t *testing.T) {
@@ -154,7 +154,7 @@ func TestPrefixTruncation(t *testing.T) {
 			}
 			for _, mode := range modes {
 				opts := goldenOptions()
-				opts.OnTruncate = mode
+				opts.TruncateMode = mode
 				for k := 0; k <= len(raw); k++ {
 					got, _, _ := runToBytes(t, raw[:k], opts)
 					if err := grammarError(got); err != nil {
@@ -204,7 +204,7 @@ func TestClientInterruptNoLeak(t *testing.T) {
 		if !errors.Is(got.err, context.Canceled) {
 			t.Errorf("Run err = %v, want context.Canceled", got.err)
 		}
-		if got.res.Terminated {
+		if got.res.Terminated() {
 			t.Error("interrupted stream must not report a terminus")
 		}
 	case <-time.After(2 * time.Second):
@@ -230,7 +230,7 @@ func TestNothingEmittedSignalsMode1(t *testing.T) {
 	if res.Started {
 		t.Error("Started should be false when nothing was emitted")
 	}
-	if res.Terminated {
+	if res.Terminated() {
 		t.Error("Terminated should be false when nothing was emitted")
 	}
 }
@@ -243,7 +243,7 @@ func TestReasoningDropMode(t *testing.T) {
 		t.Fatalf("read: %v", err)
 	}
 	opts := goldenOptions()
-	opts.EmitReasoning = "drop"
+	opts.EmitReasoning = stream.ReasoningDrop
 	got, _, err := runToBytes(t, raw, opts)
 	if err != nil {
 		t.Fatalf("run: %v", err)
@@ -265,7 +265,7 @@ func TestOnTruncateFinish(t *testing.T) {
 		t.Fatalf("read: %v", err)
 	}
 	opts := goldenOptions()
-	opts.OnTruncate = "finish"
+	opts.TruncateMode = stream.TruncateFinish
 	got, _, err := runToBytes(t, raw, opts)
 	if err != nil {
 		t.Fatalf("run: %v", err)
@@ -370,7 +370,7 @@ func TestFinishModePartialToolErrors(t *testing.T) {
 		sseFrame("response.output_item.added", `{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_0","call_id":"call_0","name":"get_weather"}}`) +
 		sseFrame("response.function_call_arguments.delta", `{"type":"response.function_call_arguments.delta","output_index":0,"delta":"{\"loc"}`)
 	opts := goldenOptions()
-	opts.OnTruncate = "finish"
+	opts.TruncateMode = stream.TruncateFinish
 	got, res, err := runToBytes(t, []byte(input), opts)
 	if err != nil {
 		t.Fatalf("run: %v", err)
@@ -383,7 +383,7 @@ func TestFinishModePartialToolErrors(t *testing.T) {
 	if !strings.Contains(s, "event: error") {
 		t.Errorf("finish mode over a partial tool call should emit an error terminus:\n%s", s)
 	}
-	if !res.Errored {
+	if !res.Errored() {
 		t.Errorf("Result.Errored should be true, got %+v", res)
 	}
 }
@@ -417,7 +417,7 @@ func TestPendingBoundsAbort(t *testing.T) {
 	if strings.Contains(s, "message_stop") {
 		t.Errorf("bounds overflow produced a clean terminus:\n%s", s)
 	}
-	if !strings.Contains(s, "event: error") || !res.Errored {
+	if !strings.Contains(s, "event: error") || !res.Errored() {
 		t.Errorf("bounds overflow should abort with an error terminus, got %+v:\n%s", res, s)
 	}
 }
@@ -456,7 +456,7 @@ func TestPendingBytesBoundAbort(t *testing.T) {
 	if strings.Contains(s, "message_stop") {
 		t.Errorf("byte-bound overflow produced a clean terminus:\n%s", s)
 	}
-	if !strings.Contains(s, "event: error") || !res.Errored {
+	if !strings.Contains(s, "event: error") || !res.Errored() {
 		t.Errorf("byte-bound overflow should abort with an error terminus, got %+v:\n%s", res, s)
 	}
 	if !strings.Contains(s, "pending-buffer bounds") {
@@ -477,7 +477,7 @@ func TestPendingBytesBoundAbort(t *testing.T) {
 		t.Fatalf("control run: %v", err)
 	}
 	checkGrammar(t, got2)
-	if res2.Errored || !strings.Contains(string(got2), "message_stop") {
+	if res2.Errored() || !strings.Contains(string(got2), "message_stop") {
 		t.Errorf("control run should complete cleanly, got %+v:\n%s", res2, got2)
 	}
 }
@@ -1072,7 +1072,7 @@ func TestMidStreamErrorSignsAnOpenThinkingBlock(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if !res.Errored {
+	if !res.Errored() {
 		t.Fatalf("fixture should terminate in an error, got %+v", res)
 	}
 	checkGrammar(t, got)

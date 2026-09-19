@@ -35,7 +35,7 @@ func TestReasoningSurvivesTheRoundTrip(t *testing.T) {
 	var buf bytes.Buffer
 	w := stream.NewSSEWriter(&buf)
 	tr := stream.New(stream.Options{
-		UpstreamModel: "gpt-5.6-sol", EmitReasoning: "thinking", OnTruncate: "error",
+		UpstreamModel: "gpt-5.6-sol", EmitReasoning: stream.ReasoningThinking, TruncateMode: stream.TruncateError,
 		Heartbeat: -1, UpstreamIdleTimeout: -1,
 	})
 	if _, err := tr.Run(context.Background(), bytes.NewReader(raw), w); err != nil {
