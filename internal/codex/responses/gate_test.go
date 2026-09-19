@@ -74,7 +74,7 @@ func TestNonGateFailuresLeaveTheTransportAlone(t *testing.T) {
 		{"429 plan quota", http.StatusTooManyRequests, "application/json",
 			`{"error":{"message":"rate limited"}}`, ClassRateLimit},
 		{"500 backend fault", http.StatusInternalServerError, "application/json",
-			`{"error":{"message":"oops"}}`, ClassUpstream},
+			`{"error":{"message":"oops"}}`, ClassServerError},
 		{"400 bad request", http.StatusBadRequest, "application/json",
 			`{"error":{"message":"unknown model"}}`, ClassTerminal},
 		// A real API error served from behind Cloudflare is the trap: the

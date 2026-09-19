@@ -307,7 +307,6 @@ func newApp(cfg config.Config, log *slog.Logger, activity server.ActivityTracker
 	if cfg.DeepSeek.Configured() {
 		deepSeekLeg, err = deepseek.New(cfg.DeepSeek.BaseURL, cfg.DeepSeek.APIKey, tr,
 			deepseek.WithLogger(log),
-			deepseek.WithMaxBodyBytes(cfg.Limits.MaxBodyBytes),
 			deepseek.WithUpstreamIdleTimeout(cfg.Limits.UpstreamIdleTimeout),
 		)
 		if err != nil {
@@ -335,7 +334,7 @@ func newApp(cfg config.Config, log *slog.Logger, activity server.ActivityTracker
 		}
 	}
 
-	// The catalog client is always built; an empty CachePath just makes it
+	// The catalog client is always built; an empty CacheFile just makes it
 	// memory-only. It performs no network or disk I/O until first used, and
 	// /healthz only ever reads its held snapshot (never triggering a fetch).
 	//
@@ -348,7 +347,7 @@ func newApp(cfg config.Config, log *slog.Logger, activity server.ActivityTracker
 	// no-redirect policy and its own fetch timeout.
 	cat := catalog.New(catalog.Options{
 		BaseURL:       cfg.Codex.BaseURL,
-		CachePath:     cfg.Codex.CachePath,
+		CacheFile:     cfg.Codex.CacheFile,
 		ClientVersion: cfg.Codex.ClientVersion,
 		HTTPClient:    codexTr.Client(),
 		Logger:        log,
@@ -398,12 +397,12 @@ func newApp(cfg config.Config, log *slog.Logger, activity server.ActivityTracker
 			// failure. Without this hook they were only ever seen on a failure.
 			OnRateLimits: obsv.observeRateLimits,
 		}),
-		Catalog:         cat,
-		OnCatalog:       loadAliases,
-		OnUnknownEvents: obsv.observeUnknownEvents,
-		Estimator:       tokens.Codex(),
-		UpstreamIdle:    cfg.Limits.UpstreamIdleTimeout,
-		Logger:          log,
+		Catalog:             cat,
+		OnCatalog:           loadAliases,
+		OnUnknownEvents:     obsv.observeUnknownEvents,
+		Estimator:           tokens.Codex(),
+		UpstreamIdleTimeout: cfg.Limits.UpstreamIdleTimeout,
+		Logger:              log,
 	}
 	if credSource != nil {
 		legOpts.Credentials = credSource
@@ -1146,7 +1145,7 @@ func (d *dispatcher) dispatch(w http.ResponseWriter, r *http.Request, call legCa
 		slog.Bool("stream", p.Stream),
 	)
 
-	rq := &router.Request{Raw: raw, Model: p.Model, Stream: p.Stream, Dec: dec, Log: log}
+	rq := &router.Request{Raw: raw, Stream: p.Stream, Dec: dec, Log: log}
 
 	switch dec.Backend {
 	case router.BackendAnthropic:

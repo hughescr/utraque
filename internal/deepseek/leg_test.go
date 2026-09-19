@@ -43,7 +43,7 @@ func callLeg(t *testing.T, l *Leg, model, body string, stream, count bool, heade
 		req.Header = headers.Clone()
 	}
 	rec := httptest.NewRecorder()
-	rq := &router.Request{Raw: []byte(body), Model: model, Stream: stream, Dec: dec}
+	rq := &router.Request{Raw: []byte(body), Stream: stream, Dec: dec}
 	if count {
 		err = l.CountTokens(rec, req, rq)
 	} else {

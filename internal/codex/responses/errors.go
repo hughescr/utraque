@@ -28,8 +28,10 @@ const (
 	// ClassRateLimit is an upstream 429: plan rate limit or quota exhausted.
 	// Retry-After and the usage-window headers are carried on RateLimits.
 	ClassRateLimit Class = "rate_limit"
-	// ClassUpstream is an upstream 5xx: transient on the backend's side.
-	ClassUpstream Class = "upstream"
+	// ClassServerError is an upstream 5xx: transient on the backend's side.
+	// The value "upstream" is logged as `class`, so it is kept for log
+	// compatibility even though the identifier names the 5xx subset.
+	ClassServerError Class = "upstream"
 	// ClassTerminal is a 4xx (other than 401/429) or an otherwise unusable
 	// response: the request itself will never succeed as sent.
 	ClassTerminal Class = "terminal"
@@ -139,7 +141,7 @@ func (e *UpstreamError) Retryable() bool {
 		return false
 	}
 	switch e.Class {
-	case ClassRateLimit, ClassUpstream, ClassNetwork, ClassTimeout:
+	case ClassRateLimit, ClassServerError, ClassNetwork, ClassTimeout:
 		return true
 	default:
 		return false
@@ -221,18 +223,18 @@ func classifyResponse(status int, h http.Header, rl RateLimits, raw []byte) *Ups
 		e.api = apierr.WithStatus(http.StatusTooManyRequests, apierr.TypeRateLimit, "%s", withDetail(base, msg))
 
 	case status >= 500:
-		e.Class = ClassUpstream
+		e.Class = ClassServerError
 		e.api = apierr.WithStatus(status, apierr.TypeForStatus(status), "%s",
 			withDetail(fmt.Sprintf("codex upstream error (HTTP %d)", status), msg))
 
 	case status >= 400:
 		e.Class = ClassTerminal
-		kind := apierr.TypeForStatus(status)
-		if kind == apierr.TypeAPI {
+		errType := apierr.TypeForStatus(status)
+		if errType == apierr.TypeAPI {
 			// An unmapped 4xx is the caller's fault, not ours.
-			kind = apierr.TypeInvalidRequest
+			errType = apierr.TypeInvalidRequest
 		}
-		e.api = apierr.WithStatus(status, kind, "%s",
+		e.api = apierr.WithStatus(status, errType, "%s",
 			withDetail(fmt.Sprintf("codex rejected the request (HTTP %d)", status), msg))
 
 	case status >= 300:

@@ -98,8 +98,8 @@ func TestPickerRoutesTakePrecedenceInResolve(t *testing.T) {
 	reg.SetPickerRoutes(map[string]router.PickerRoute{
 		// An id that "looks Anthropic" but was advertised as a Codex row.
 		"claude-compat.sol": {Backend: router.BackendCodex, UpstreamModel: "gpt-5.6-sol", Effort: "high"},
-		// A decorated Anthropic id standing for an undecorated model.
-		"claude-sonnet-5[1m]": {Backend: router.BackendAnthropic, UpstreamModel: "claude-sonnet-5"},
+		// An Anthropic-backed picker id. Such routes carry no UpstreamModel.
+		"claude-sonnet-5[1m]": {Backend: router.BackendAnthropic},
 	})
 
 	dec, err := router.Resolve("Claude-Compat.Sol", "")
@@ -126,8 +126,8 @@ func TestPickerRoutesTakePrecedenceInResolve(t *testing.T) {
 	if dec.Backend != router.BackendAnthropic {
 		t.Errorf("Backend = %q, want anthropic", dec.Backend)
 	}
-	if dec.ClientModel != "claude-sonnet-5" {
-		t.Errorf("ClientModel = %q, want the undecorated id the route names", dec.ClientModel)
+	if dec.ClientModel != "claude-sonnet-5[1m]" {
+		t.Errorf("ClientModel = %q, want the caller's spelling", dec.ClientModel)
 	}
 	if dec.UpstreamModel != "" {
 		t.Errorf("UpstreamModel = %q, want empty for the anthropic backend", dec.UpstreamModel)

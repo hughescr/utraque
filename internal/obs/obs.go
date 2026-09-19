@@ -5,7 +5,7 @@
 // credentials are never logged in any form.
 //
 // obs imports nothing outside the standard library. That is why Hash below
-// duplicates config.Redact's few lines rather than importing config: obs sits
+// duplicates config.Fingerprint's few lines rather than importing config: obs sits
 // under every other package and must stay dependency-free.
 package obs
 
@@ -200,15 +200,11 @@ func (r *Redactor) Header(h http.Header) slog.Value {
 		names = append(names, name)
 	}
 	slices.Sort(names)
+	allowed, withheld := r.partitionHeaders(names)
 
 	attrs := make([]slog.Attr, 0, len(h)+1)
-	withheld := make([]string, 0, len(h))
-	for _, name := range names {
+	for _, name := range allowed {
 		lower := strings.ToLower(name)
-		if !r.Allowed(lower) {
-			withheld = append(withheld, lower)
-			continue
-		}
 		vals := h.Values(name)
 		switch len(vals) {
 		case 0:
@@ -226,6 +222,27 @@ func (r *Redactor) Header(h http.Header) slog.Value {
 		attrs = append(attrs, slog.Any("redacted", withheld))
 	}
 	return slog.GroupValue(attrs...)
+}
+
+// partitionHeaders splits header names, in the order given, into those whose
+// values may be logged (as spelled, so they still index the http.Header) and
+// those that are withheld (lower-cased, as they are reported). Redactor.Header's
+// "redacted" list and Trace.SetRequest's headers_withheld list are both decided
+// here, so the log and the trace always name the same withheld headers; each
+// caller keeps its own ordering (Header passes sorted names, SetRequest passes
+// them in http.Header iteration order).
+func (r *Redactor) partitionHeaders(names []string) (allowed, withheld []string) {
+	allowed = make([]string, 0, len(names))
+	withheld = make([]string, 0, len(names))
+	for _, name := range names {
+		lower := strings.ToLower(name)
+		if !r.Allowed(lower) {
+			withheld = append(withheld, lower)
+			continue
+		}
+		allowed = append(allowed, name)
+	}
+	return allowed, withheld
 }
 
 // Attrs is Header as a flat slice, for callers assembling their own group.

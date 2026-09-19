@@ -67,9 +67,8 @@ func TestMessagesWithoutCredentialsIs503(t *testing.T) {
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
 	rq := &router.Request{
-		Raw:   []byte(`{"model":"sol","max_tokens":8,"messages":[]}`),
-		Model: "sol",
-		Dec:   router.Decision{Backend: router.BackendCodex, ClientModel: "sol", UpstreamModel: "gpt-5.6-sol"},
+		Raw: []byte(`{"model":"sol","max_tokens":8,"messages":[]}`),
+		Dec: router.Decision{Backend: router.BackendCodex, ClientModel: "sol", UpstreamModel: "gpt-5.6-sol"},
 	}
 
 	legErr := l.Messages(w, r, rq)
@@ -100,7 +99,7 @@ func TestMessagesRejectsUnparseableBody(t *testing.T) {
 	}
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
-	rq := &router.Request{Raw: []byte(`{"model":`), Model: "sol"}
+	rq := &router.Request{Raw: []byte(`{"model":`), Dec: router.Decision{ClientModel: "sol"}}
 
 	legErr := l.Messages(w, r, rq)
 	if legErr == nil {
@@ -116,10 +115,10 @@ func TestMessagesRejectsUnparseableBody(t *testing.T) {
 // is a gateway problem the caller may retry, not an internal 500.
 func TestClassifyStreamFailure(t *testing.T) {
 	cases := []struct {
-		name   string
-		err    error
-		status int
-		kind   apierr.Type
+		name    string
+		err     error
+		status  int
+		errType apierr.ErrorType
 	}{
 		{"no data", stream.ErrNoData, http.StatusBadGateway, apierr.TypeAPI},
 		{"idle timeout", stream.ErrIdleTimeout, http.StatusGatewayTimeout, apierr.TypeTimeout},
@@ -135,8 +134,8 @@ func TestClassifyStreamFailure(t *testing.T) {
 			if got := ae.HTTPStatus(); got != tc.status {
 				t.Errorf("status = %d, want %d", got, tc.status)
 			}
-			if ae.Kind != tc.kind {
-				t.Errorf("kind = %q, want %q", ae.Kind, tc.kind)
+			if ae.Type != tc.errType {
+				t.Errorf("errType = %q, want %q", ae.Type, tc.errType)
 			}
 		})
 	}
@@ -207,9 +206,8 @@ func TestCountTokensAnswersLocally(t *testing.T) {
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest(http.MethodPost, "/v1/messages/count_tokens", nil)
 	rq := &router.Request{
-		Raw:   []byte(`{"model":"sol","messages":[{"role":"user","content":"count me"}]}`),
-		Model: "sol",
-		Dec:   router.Decision{Backend: router.BackendCodex, ClientModel: "sol", UpstreamModel: "gpt-5.6-sol"},
+		Raw: []byte(`{"model":"sol","messages":[{"role":"user","content":"count me"}]}`),
+		Dec: router.Decision{Backend: router.BackendCodex, ClientModel: "sol", UpstreamModel: "gpt-5.6-sol"},
 	}
 	if err := l.CountTokens(w, r, rq); err != nil {
 		t.Fatalf("CountTokens: %v", err)
@@ -239,7 +237,6 @@ func TestUpstreamModelEchoesTheResolvedSlug(t *testing.T) {
 		{
 			name: "resolved slug wins over the alias the caller wrote",
 			rq: &router.Request{
-				Model: "sol-high",
 				Dec: router.Decision{
 					Backend:       router.BackendCodex,
 					ClientModel:   "sol-high",
@@ -250,7 +247,7 @@ func TestUpstreamModelEchoesTheResolvedSlug(t *testing.T) {
 		},
 		{
 			name: "a decision with no slug falls back to the caller's string",
-			rq:   &router.Request{Model: "sol-high"},
+			rq:   &router.Request{Dec: router.Decision{ClientModel: "sol-high"}},
 			want: "sol-high",
 		},
 	}
@@ -317,7 +314,7 @@ func TestSeedDoesNotDelayTheUpstreamRequest(t *testing.T) {
 		t.Run(map[bool]string{true: "stream", false: "aggregate"}[streaming], func(t *testing.T) {
 			st := &signalStreamer{stubStreamer: stubStreamer{body: textOnlyFixture(t)}, sent: make(chan struct{})}
 			est := &gatedEstimator{release: make(chan struct{}), n: 4242}
-			l, err := New(Options{Client: st, Credentials: stubCreds{}, Estimator: est, Heartbeat: -1, UpstreamIdle: -1})
+			l, err := New(Options{Client: st, Credentials: stubCreds{}, Estimator: est, Heartbeat: -1, UpstreamIdleTimeout: -1})
 			if err != nil {
 				t.Fatalf("New: %v", err)
 			}
@@ -328,7 +325,6 @@ func TestSeedDoesNotDelayTheUpstreamRequest(t *testing.T) {
 			r = r.WithContext(obs.WithSummary(r.Context(), sum))
 			rq := &router.Request{
 				Raw:    []byte(`{"model":"sol","max_tokens":8,"stream":` + strconv.FormatBool(streaming) + `,"messages":[{"role":"user","content":"hello"}]}`),
-				Model:  "sol",
 				Stream: streaming,
 				Dec:    router.Decision{Backend: router.BackendCodex, ClientModel: "sol", UpstreamModel: "gpt-5.6-sol"},
 			}
@@ -396,7 +392,7 @@ func TestSeedDoesNotDelayTheUpstreamRequest(t *testing.T) {
 func TestSeedWaitEndsWithTheRequest(t *testing.T) {
 	st := &signalStreamer{stubStreamer: stubStreamer{body: textOnlyFixture(t)}, sent: make(chan struct{})}
 	est := &gatedEstimator{release: make(chan struct{}), n: 4242}
-	l, err := New(Options{Client: st, Credentials: stubCreds{}, Estimator: est, Heartbeat: -1, UpstreamIdle: -1})
+	l, err := New(Options{Client: st, Credentials: stubCreds{}, Estimator: est, Heartbeat: -1, UpstreamIdleTimeout: -1})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -406,7 +402,6 @@ func TestSeedWaitEndsWithTheRequest(t *testing.T) {
 	r := httptest.NewRequest(http.MethodPost, "/v1/messages", nil).WithContext(ctx)
 	rq := &router.Request{
 		Raw:    []byte(`{"model":"sol","max_tokens":8,"stream":true,"messages":[{"role":"user","content":"hello"}]}`),
-		Model:  "sol",
 		Stream: true,
 		Dec:    router.Decision{Backend: router.BackendCodex, ClientModel: "sol", UpstreamModel: "gpt-5.6-sol"},
 	}
@@ -454,7 +449,7 @@ func TestCountTokensCountsTheTranslatedRequest(t *testing.T) {
 		t.Helper()
 		w := httptest.NewRecorder()
 		r := httptest.NewRequest(http.MethodPost, "/v1/messages/count_tokens", nil)
-		rq := &router.Request{Raw: []byte(raw), Model: "sol",
+		rq := &router.Request{Raw: []byte(raw),
 			Dec: router.Decision{Backend: router.BackendCodex, ClientModel: "sol", UpstreamModel: "gpt-5.6-sol"}}
 		if err := l.CountTokens(w, r, rq); err != nil {
 			t.Fatalf("CountTokens: %v", err)

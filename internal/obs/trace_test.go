@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -307,5 +308,56 @@ func TestTraceNonStreamingBody(t *testing.T) {
 	}
 	if !strings.Contains(string(b), `"msg_1"`) {
 		t.Errorf("non-streaming dump wrong: %s", b)
+	}
+}
+
+// The log's "redacted" list (Redactor.Header) and the manifest's
+// headers_withheld list (Trace.SetRequest) are decided by one helper, so the
+// two must name the same withheld headers. Only the log list is sorted; the
+// manifest keeps http.Header iteration order, so membership is compared
+// order-insensitively.
+func TestTraceWithheldMatchesLogRedacted(t *testing.T) {
+	dir := t.TempDir()
+	tr, err := obs.NewTracer(dir, slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := http.Header{}
+	h.Set("X-Api-Key", "sk-ant-api03-ABCDEFGHIJKLMNOP")
+	h.Set("Content-Type", "application/json")
+	h.Set("Cookie", "session=1")
+	h.Set("Authorization", "Bearer "+fakeJWT)
+	h.Set("X-Custom-Thing", "v")
+
+	var fromLog []string
+	for _, a := range obs.DefaultRedactor().Header(h).Group() {
+		if a.Key == "redacted" {
+			fromLog = a.Value.Any().([]string)
+		}
+	}
+	if len(fromLog) == 0 {
+		t.Fatal("the log group names no withheld headers")
+	}
+
+	trace := tr.Begin("req-withheld")
+	trace.SetRequest("POST", "/v1/messages", h)
+	trace.Close()
+	b, err := os.ReadFile(filepath.Join(dir, "req-withheld"+obs.SuffixRequest))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var meta struct {
+		Withheld []string `json:"headers_withheld"`
+	}
+	if err := json.Unmarshal(b, &meta); err != nil {
+		t.Fatalf("manifest is not JSON: %v\n%s", err, b)
+	}
+	if !slices.IsSorted(fromLog) {
+		t.Errorf("log redacted list is not sorted: %v", fromLog)
+	}
+	gotTrace := slices.Clone(meta.Withheld)
+	slices.Sort(gotTrace)
+	if !slices.Equal(gotTrace, fromLog) {
+		t.Errorf("headers_withheld = %v, log redacted = %v; want the same members", meta.Withheld, fromLog)
 	}
 }

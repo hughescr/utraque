@@ -425,9 +425,10 @@ func tierRank(t AliasTier) int {
 // reach. Without this a user could pick a row utraque itself served and get a
 // 404 back.
 //
-// For BackendCodex, UpstreamModel is the catalog slug to request. For
-// BackendAnthropic it is the undecorated Anthropic model id the decorated
-// picker id stands for (e.g. "claude-sonnet-5" behind "claude-sonnet-5[1m]").
+// For BackendCodex (and BackendDeepSeek), UpstreamModel is the upstream model
+// to request. Anthropic picker routes carry no UpstreamModel: the Anthropic leg
+// forwards the request body untouched, and Resolve leaves
+// Decision.UpstreamModel empty for that backend whatever the route holds.
 type PickerRoute struct {
 	Backend       Backend
 	UpstreamModel string

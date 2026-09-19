@@ -76,7 +76,7 @@ the credential lives entirely in the client and passes through untouched.
 
 A response body is relayed exactly as upstream encoded it, compression
 included. So when a stream dies part-way — a dropped link, an upstream that
-goes silent past the idle timeout — `utraque` drops the connection rather than
+goes silent past the upstream idle timeout — `utraque` drops the connection rather than
 closing the response tidily. A tidy close would tell the client it had received
 the whole body, and a client that then failed to decompress the truncated
 remains would report a corrupt response instead of the network fault it was. A

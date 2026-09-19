@@ -75,22 +75,22 @@ const (
 	// package's Mode* constants, which config deliberately does not import —
 	// this enum is validated here the same way log.level and log.format are.
 	//
-	// TransportStd is the standard library, the stack the whole proxy was built
-	// and live-verified against. TransportUTLS presents a Chrome-shaped TLS
+	// TransportModeStd is the standard library, the stack the whole proxy was built
+	// and live-verified against. TransportModeUTLS presents a Chrome-shaped TLS
 	// ClientHello instead, for the day Cloudflare fingerprint-gates a plain Go
 	// client. Only the handshake differs — no forged browser headers — and a
 	// hand-rolled TLS stack is a strictly larger attack surface, so it is never
 	// the default.
-	TransportStd  = "std"
-	TransportUTLS = "utls"
-	// TransportAuto starts on std and switches to uTLS, once and permanently,
+	TransportModeStd  = "std"
+	TransportModeUTLS = "utls"
+	// TransportModeAuto starts on std and switches to uTLS, once and permanently,
 	// the first time the upstream answers with a bot/TLS gate.
-	TransportAuto = "auto"
+	TransportModeAuto = "auto"
 
 	// DefaultCodexTransport is auto: no cost while no gate exists, no outage if
 	// one appears. It is deliberately not utls — as of the live end-to-end
 	// verification no gate has ever been observed on chatgpt.com.
-	DefaultCodexTransport = TransportAuto
+	DefaultCodexTransport = TransportModeAuto
 
 	// CodexDirName / CodexAuthFileName build the default {~/.codex}/auth.json
 	// path. CODEX_HOME (the Codex CLI's own variable, unprefixed) overrides the
@@ -206,12 +206,12 @@ type Codex struct {
 	// resolved from UTRAQUE_CODEX_AUTH_FILE, else CODEX_HOME/auth.json, else
 	// ~/.codex/auth.json. Empty on a bare Default(); LoadFrom always fills it.
 	AuthFile string
-	// CachePath is utraque's OWN catalog cache file (never the Codex CLI's
+	// CacheFile is utraque's OWN catalog cache file (never the Codex CLI's
 	// models_cache.json). Resolved from UTRAQUE_CODEX_CACHE_FILE, else a file
 	// under the user cache directory. Empty disables the on-disk cache (the
 	// catalog runs memory-only). Empty on a bare Default(); LoadFrom fills it
 	// when a user cache directory is available.
-	CachePath string
+	CacheFile string
 	// TokenURL is the OAuth token endpoint used to exchange a refresh token.
 	TokenURL string
 	// ClientID is the public OAuth client id presented on refresh.
@@ -223,7 +223,7 @@ type Codex struct {
 	// advisory file lock before giving up.
 	LockTimeout time.Duration
 	// Transport selects the TLS stack the leg dials the Codex backend with:
-	// TransportAuto (default), TransportStd, or TransportUTLS.
+	// TransportModeAuto (default), TransportModeStd, or TransportModeUTLS.
 	// UTRAQUE_CODEX_TRANSPORT.
 	Transport string
 	// ClientVersion is sent as the client_version query parameter on every
@@ -390,7 +390,7 @@ func LoadFrom(getenv func(string) string) (Config, error) {
 	setString(EnvClaudePlan, &c.Reporting.ClaudePlan)
 
 	c.Codex.AuthFile = resolveCodexAuthFile(getenv)
-	c.Codex.CachePath = resolveCodexCacheFile(getenv)
+	c.Codex.CacheFile = resolveCodexCacheFile(getenv)
 	if v, ok := lookup(getenv, EnvDeepSeekAPIKeyFile); ok {
 		c.DeepSeek.APIKeyFile = expandHome(strings.TrimSpace(v), getenv)
 		key, err := os.ReadFile(c.DeepSeek.APIKeyFile)
@@ -706,10 +706,10 @@ func (c Config) Validate() error {
 	// not ask for: "utsl" quietly meaning "std" would look identical to a
 	// working uTLS switch right up until the gate it was set for.
 	switch c.Codex.Transport {
-	case TransportAuto, TransportStd, TransportUTLS:
+	case TransportModeAuto, TransportModeStd, TransportModeUTLS:
 	default:
 		return fmt.Errorf("config: %s %q: want %s|%s|%s",
-			EnvCodexTransport, c.Codex.Transport, TransportAuto, TransportStd, TransportUTLS)
+			EnvCodexTransport, c.Codex.Transport, TransportModeAuto, TransportModeStd, TransportModeUTLS)
 	}
 
 	switch c.Log.Level {
@@ -792,7 +792,7 @@ func (c Config) String() string {
 	fmt.Fprintf(&b, " deepseek.api_key_file=%s", c.DeepSeek.APIKeyFile)
 	fmt.Fprintf(&b, " codex.base_url=%s", RedactURL(c.Codex.BaseURL))
 	fmt.Fprintf(&b, " codex.auth_file=%s", c.Codex.AuthFile)
-	fmt.Fprintf(&b, " codex.cache_file=%s", c.Codex.CachePath)
+	fmt.Fprintf(&b, " codex.cache_file=%s", c.Codex.CacheFile)
 	fmt.Fprintf(&b, " codex.token_url=%s", RedactURL(c.Codex.TokenURL))
 	fmt.Fprintf(&b, " codex.client_id=%s", c.Codex.ClientID)
 	fmt.Fprintf(&b, " codex.refresh_skew=%s", c.Codex.RefreshSkew)
@@ -826,7 +826,7 @@ func (c Config) LogValue() slog.Value {
 		slog.String("deepseek.api_key_file", c.DeepSeek.APIKeyFile),
 		slog.String("codex.base_url", RedactURL(c.Codex.BaseURL)),
 		slog.String("codex.auth_file", c.Codex.AuthFile),
-		slog.String("codex.cache_file", c.Codex.CachePath),
+		slog.String("codex.cache_file", c.Codex.CacheFile),
 		slog.String("codex.token_url", RedactURL(c.Codex.TokenURL)),
 		slog.String("codex.client_id", c.Codex.ClientID),
 		slog.Duration("codex.refresh_skew", c.Codex.RefreshSkew),
@@ -870,12 +870,12 @@ func tokenField(tok string) string {
 	if tok == "" {
 		return "none"
 	}
-	return Redact(tok)
+	return Fingerprint(tok)
 }
 
-// Redact turns a secret into a stable, non-reversible fingerprint. The empty
+// Fingerprint turns a secret into a stable, non-reversible fingerprint. The empty
 // string maps to the empty string.
-func Redact(s string) string {
+func Fingerprint(s string) string {
 	if s == "" {
 		return ""
 	}

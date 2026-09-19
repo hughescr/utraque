@@ -387,8 +387,8 @@ func (c *CatalogClient) fetch(ctx context.Context, cred Credential) ([]CatalogMo
 		return nil, fmt.Errorf("%w (HTTP %d)", ErrRedirected, resp.StatusCode)
 	}
 	if resp.StatusCode != http.StatusOK {
-		kind := apierr.TypeForStatus(resp.StatusCode)
-		return nil, apierr.WithStatus(resp.StatusCode, kind,
+		errType := apierr.TypeForStatus(resp.StatusCode)
+		return nil, apierr.WithStatus(resp.StatusCode, errType,
 			"anthropic catalog request failed (HTTP %d)", resp.StatusCode)
 	}
 

@@ -92,6 +92,6 @@ type ErrorEvent struct {
 }
 
 // NewErrorEvent builds an error envelope.
-func NewErrorEvent(kind, message string) ErrorEvent {
-	return ErrorEvent{Type: EventError, Error: ErrorBody{Type: kind, Message: message}}
+func NewErrorEvent(errType, message string) ErrorEvent {
+	return ErrorEvent{Type: EventError, Error: ErrorBody{Type: errType, Message: message}}
 }

@@ -12,27 +12,27 @@ import (
 	"github.com/hughescr/utraque/internal/anthropic/schema"
 )
 
-// Type is an Anthropic error type string.
-type Type string
+// ErrorType is an Anthropic error type string.
+type ErrorType string
 
 // The Anthropic error taxonomy.
 const (
-	TypeInvalidRequest  Type = "invalid_request_error"
-	TypeAuthentication  Type = "authentication_error"
-	TypePermission      Type = "permission_error"
-	TypeNotFound        Type = "not_found_error"
-	TypeRequestTooLarge Type = "request_too_large"
-	TypeRateLimit       Type = "rate_limit_error"
-	TypeAPI             Type = "api_error"
-	TypeOverloaded      Type = "overloaded_error"
-	TypeTimeout         Type = "timeout_error"
+	TypeInvalidRequest  ErrorType = "invalid_request_error"
+	TypeAuthentication  ErrorType = "authentication_error"
+	TypePermission      ErrorType = "permission_error"
+	TypeNotFound        ErrorType = "not_found_error"
+	TypeRequestTooLarge ErrorType = "request_too_large"
+	TypeRateLimit       ErrorType = "rate_limit_error"
+	TypeAPI             ErrorType = "api_error"
+	TypeOverloaded      ErrorType = "overloaded_error"
+	TypeTimeout         ErrorType = "timeout_error"
 )
 
 // Error is a client-renderable failure.
 type Error struct {
-	Kind    Type
+	Type    ErrorType
 	Message string
-	Status  int   // 0 means "derive from Kind"
+	Status  int   // 0 means "derive from Type"
 	Err     error // cause; never serialized
 }
 
@@ -43,9 +43,9 @@ func (e *Error) Error() string {
 		return "<nil>"
 	}
 	if e.Err != nil {
-		return fmt.Sprintf("%s: %s: %v", e.Kind, e.Message, e.Err)
+		return fmt.Sprintf("%s: %s: %v", e.Type, e.Message, e.Err)
 	}
-	return fmt.Sprintf("%s: %s", e.Kind, e.Message)
+	return fmt.Sprintf("%s: %s", e.Type, e.Message)
 }
 
 // Unwrap exposes the cause.
@@ -64,7 +64,7 @@ func (e *Error) HTTPStatus() int {
 	if e.Status > 0 {
 		return e.Status
 	}
-	return StatusFor(e.Kind)
+	return StatusFor(e.Type)
 }
 
 // Envelope renders the Anthropic error envelope.
@@ -72,14 +72,14 @@ func (e *Error) Envelope() aschema.ErrorEvent {
 	if e == nil {
 		return aschema.NewErrorEvent(string(TypeAPI), "internal error")
 	}
-	kind := e.Kind
-	if kind == "" {
-		kind = TypeAPI
+	errType := e.Type
+	if errType == "" {
+		errType = TypeAPI
 	}
-	return aschema.NewErrorEvent(string(kind), e.Message)
+	return aschema.NewErrorEvent(string(errType), e.Message)
 }
 
-// Render writes the envelope. A status <= 0 derives one from Kind.
+// Render writes the envelope. A status <= 0 derives one from Type.
 func (e *Error) Render(w http.ResponseWriter, status int) error {
 	if status <= 0 {
 		status = e.HTTPStatus()
@@ -97,18 +97,18 @@ func (e *Error) Render(w http.ResponseWriter, status int) error {
 }
 
 // New builds an Error.
-func New(kind Type, format string, args ...any) *Error {
-	return &Error{Kind: kind, Message: fmt.Sprintf(format, args...)}
+func New(errType ErrorType, format string, args ...any) *Error {
+	return &Error{Type: errType, Message: fmt.Sprintf(format, args...)}
 }
 
 // Wrap builds an Error carrying a cause.
-func Wrap(err error, kind Type, format string, args ...any) *Error {
-	return &Error{Kind: kind, Message: fmt.Sprintf(format, args...), Err: err}
+func Wrap(err error, errType ErrorType, format string, args ...any) *Error {
+	return &Error{Type: errType, Message: fmt.Sprintf(format, args...), Err: err}
 }
 
 // WithStatus builds an Error pinned to an explicit HTTP status.
-func WithStatus(status int, kind Type, format string, args ...any) *Error {
-	return &Error{Kind: kind, Message: fmt.Sprintf(format, args...), Status: status}
+func WithStatus(status int, errType ErrorType, format string, args ...any) *Error {
+	return &Error{Type: errType, Message: fmt.Sprintf(format, args...), Status: status}
 }
 
 // InvalidRequest builds a 400.
@@ -157,8 +157,8 @@ func Timeout(format string, args ...any) *Error {
 }
 
 // StatusFor maps an error type onto its HTTP status.
-func StatusFor(kind Type) int {
-	switch kind {
+func StatusFor(errType ErrorType) int {
+	switch errType {
 	case TypeInvalidRequest:
 		return http.StatusBadRequest
 	case TypeAuthentication:
@@ -183,7 +183,7 @@ func StatusFor(kind Type) int {
 }
 
 // TypeForStatus maps an HTTP status back onto an error type.
-func TypeForStatus(status int) Type {
+func TypeForStatus(status int) ErrorType {
 	switch status {
 	case http.StatusBadRequest:
 		return TypeInvalidRequest

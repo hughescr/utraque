@@ -134,9 +134,12 @@ type Options struct {
 	// disabled for a non-streaming request, where a keepalive means nothing.
 	Heartbeat time.Duration
 
-	// UpstreamIdle aborts a stream after this much upstream silence. Zero uses
-	// the Translator's default; negative disables it.
-	UpstreamIdle time.Duration
+	// UpstreamIdleTimeout aborts a stream after this much upstream silence.
+	// Zero uses the Translator's default; negative disables it. Note the
+	// Anthropic and DeepSeek legs (WithUpstreamIdleTimeout) read zero as
+	// "disabled" instead, because their transports have no default of their
+	// own to fall back to; the Codex leg's stream timer does.
+	UpstreamIdleTimeout time.Duration
 
 	// Logger receives operational logs. Nil discards.
 	Logger *slog.Logger
@@ -179,7 +182,7 @@ func New(opts Options) (*Leg, error) {
 		onTruncate:     opts.OnTruncate,
 		summary:        opts.Summary,
 		heartbeat:      opts.Heartbeat,
-		upstreamIdle:   opts.UpstreamIdle,
+		upstreamIdle:   opts.UpstreamIdleTimeout,
 		log:            opts.Logger,
 	}
 	if l.catalogTimeout <= 0 {
@@ -399,25 +402,26 @@ func (l *Leg) translatorOptions(ctx context.Context, rq *router.Request, seed *s
 		// has to price. The reasoning effort is deliberately left off: it is not
 		// part of the model's identity, and the client does not record it for
 		// Anthropic models either.
-		UpstreamModel:   upstreamModel(rq),
-		InputTokensFunc: func() int { return seed.Value(ctx) },
-		EmitReasoning:   l.emitReasoning,
-		OnTruncate:      l.onTruncate,
-		Heartbeat:       heartbeat,
-		UpstreamIdle:    l.upstreamIdle,
-		Logger:          log,
+		UpstreamModel:       upstreamModel(rq),
+		InputTokensFunc:     func() int { return seed.Value(ctx) },
+		EmitReasoning:       l.emitReasoning,
+		OnTruncate:          l.onTruncate,
+		Heartbeat:           heartbeat,
+		UpstreamIdleTimeout: l.upstreamIdle,
+		Logger:              log,
 	}
 }
 
 // upstreamModel is the model name echoed back to the caller: the slug the leg
-// actually asked Codex for. It falls back to the caller's own string when the
-// decision carries no slug — which the Codex leg should never see, since routing
-// here always resolves one, but a zero Decision must not echo an empty model.
+// actually asked Codex for. It falls back to the caller's own (trimmed) string
+// when the decision carries no slug — which the Codex leg should never see,
+// since routing here always resolves one, but a zero Decision must not echo an
+// empty model.
 func upstreamModel(rq *router.Request) string {
 	if rq.Dec.UpstreamModel != "" {
 		return rq.Dec.UpstreamModel
 	}
-	return rq.Model
+	return rq.Dec.ClientModel
 }
 
 // renderUpstreamFailure answers a failure that happened before the upstream

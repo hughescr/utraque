@@ -441,8 +441,8 @@ func TestRefreshSurvivesPersistFailure(t *testing.T) {
 // failure that would tell the client to stop retrying.
 func TestRefreshTransientStatusesAreRetryable(t *testing.T) {
 	cases := []struct {
-		status int
-		kind   apierr.Type
+		status  int
+		errType apierr.ErrorType
 	}{
 		{http.StatusTooManyRequests, apierr.TypeRateLimit},
 		{http.StatusServiceUnavailable, apierr.TypeOverloaded},
@@ -465,10 +465,10 @@ func TestRefreshTransientStatusesAreRetryable(t *testing.T) {
 		if !errors.As(err, &ae) {
 			t.Fatalf("status %d: error is not *apierr.Error: %v", tc.status, err)
 		}
-		if ae.Kind != tc.kind {
-			t.Errorf("status %d: Kind = %s, want %s", tc.status, ae.Kind, tc.kind)
+		if ae.Type != tc.errType {
+			t.Errorf("status %d: Type = %s, want %s", tc.status, ae.Type, tc.errType)
 		}
-		if ae.Kind == apierr.TypeAuthentication || strings.Contains(err.Error(), "codex login") {
+		if ae.Type == apierr.TypeAuthentication || strings.Contains(err.Error(), "codex login") {
 			t.Errorf("status %d wrongly classified as terminal auth: %v", tc.status, err)
 		}
 	}
@@ -718,8 +718,8 @@ func TestMissingAccountIDIsActionable(t *testing.T) {
 	if !errors.As(err, &ae) {
 		t.Fatalf("error is not an *apierr.Error: %v", err)
 	}
-	if ae.Kind != apierr.TypeAuthentication {
-		t.Errorf("Kind = %s, want authentication_error", ae.Kind)
+	if ae.Type != apierr.TypeAuthentication {
+		t.Errorf("Type = %s, want authentication_error", ae.Type)
 	}
 	msg := err.Error()
 	if !strings.Contains(msg, "account_id") || !strings.Contains(msg, "codex login") {

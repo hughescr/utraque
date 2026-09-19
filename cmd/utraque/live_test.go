@@ -197,7 +197,7 @@ func newLiveEnv(t *testing.T) *liveEnv {
 	}
 	// The one deviation: keep utraque's own catalog cache out of the user's
 	// cache directory, so a live run leaves nothing behind.
-	cfg.Codex.CachePath = filepath.Join(t.TempDir(), "models_cache.json")
+	cfg.Codex.CacheFile = filepath.Join(t.TempDir(), "models_cache.json")
 
 	traceDir := t.TempDir()
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))

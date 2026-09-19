@@ -290,7 +290,7 @@ func newCodexEnvOpts(t *testing.T, mutate func(*config.Config), opts codexEnvOpt
 	cfg.Codex.BaseURL = env.codex.baseURL()
 	cfg.Codex.TokenURL = tokenSrv.URL
 	cfg.Codex.AuthFile = env.authPath
-	// CachePath stays empty: the catalog runs memory-only, so no test ever
+	// CacheFile stays empty: the catalog runs memory-only, so no test ever
 	// writes into the user's cache directory.
 	if mutate != nil {
 		mutate(&cfg)

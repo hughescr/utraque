@@ -30,10 +30,10 @@ const (
 
 // Defaults for the pending-buffer bounds and the timers.
 const (
-	defaultMaxPendingBytes = 1 << 20 // 1 MiB per buffered item
-	defaultMaxPendingItems = 16
-	defaultHeartbeat       = 15 * time.Second
-	defaultUpstreamIdle    = 120 * time.Second
+	defaultMaxPendingBytes     = 1 << 20 // 1 MiB per buffered item
+	defaultMaxPendingItems     = 16
+	defaultHeartbeat           = 15 * time.Second
+	defaultUpstreamIdleTimeout = 120 * time.Second
 )
 
 // handledEventTypes is the translator's mapping table: exactly the Codex
@@ -129,9 +129,11 @@ type Options struct {
 	// Heartbeat injects a ping after this much silence. Zero uses the default;
 	// negative disables it.
 	Heartbeat time.Duration
-	// UpstreamIdle aborts the stream after this much upstream silence. Zero uses
-	// the default; negative disables it.
-	UpstreamIdle time.Duration
+	// UpstreamIdleTimeout aborts the stream after this much upstream silence.
+	// Zero uses the default (defaultUpstreamIdleTimeout); negative disables
+	// it. This differs from the Anthropic and DeepSeek legs, where zero means
+	// "disabled".
+	UpstreamIdleTimeout time.Duration
 	// MaxPendingBytes bounds one buffered item; zero uses the default.
 	MaxPendingBytes int
 	// MaxPendingItems bounds the number of buffered items; zero uses the default.
@@ -238,7 +240,7 @@ func New(opts Options) *Translator {
 		emitReasoning:   opts.EmitReasoning,
 		onTruncate:      opts.OnTruncate,
 		heartbeat:       opts.Heartbeat,
-		upstreamIdle:    opts.UpstreamIdle,
+		upstreamIdle:    opts.UpstreamIdleTimeout,
 		maxPendingBytes: opts.MaxPendingBytes,
 		maxPendingItems: opts.MaxPendingItems,
 		log:             opts.Logger,
@@ -253,7 +255,7 @@ func New(opts Options) *Translator {
 		t.heartbeat = defaultHeartbeat
 	}
 	if t.upstreamIdle == 0 {
-		t.upstreamIdle = defaultUpstreamIdle
+		t.upstreamIdle = defaultUpstreamIdleTimeout
 	}
 	if t.maxPendingBytes <= 0 {
 		t.maxPendingBytes = defaultMaxPendingBytes

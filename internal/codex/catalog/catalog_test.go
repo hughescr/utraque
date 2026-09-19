@@ -370,7 +370,7 @@ func TestFetchWritesInteroperableDiskCache(t *testing.T) {
 	clk := newClock()
 	c := catalog.New(catalog.Options{
 		BaseURL: srv.URL, HTTPClient: srv.Client(), Now: clk.now,
-		CachePath: cachePath, ClientVersion: "utraque-test",
+		CacheFile: cachePath, ClientVersion: "utraque-test",
 	})
 
 	if _, err := c.Models(context.Background(), fakeCred()); err != nil {
@@ -426,7 +426,7 @@ func TestFreshDiskCacheServedWithoutNetwork(t *testing.T) {
 	// is served without any network call.
 	c := catalog.New(catalog.Options{
 		BaseURL:   "http://catalog.invalid",
-		CachePath: cachePath,
+		CacheFile: cachePath,
 		TTL:       300 * time.Second,
 		Now:       clk.now,
 		HTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
@@ -505,62 +505,6 @@ func TestPopulateRegistryPriorityBreaksSameVersionTie(t *testing.T) {
 	}
 }
 
-func TestRefreshRegistryFromLiveCatalog(t *testing.T) {
-	fake := newFakeCatalog(t, []cschema.CatalogModel{solModel(), terraModel(),
-		{Slug: "gpt-5.9-ghost", Visibility: "hide"}}, `W/"v1"`)
-	srv := httptest.NewServer(fake)
-	t.Cleanup(srv.Close)
-
-	c := catalog.New(catalog.Options{BaseURL: srv.URL, HTTPClient: srv.Client(), Now: newClock().now})
-	reg := router.NewRegistry()
-
-	if err := c.RefreshRegistry(context.Background(), fakeCred(), reg); err != nil {
-		t.Fatalf("RefreshRegistry: %v", err)
-	}
-	if u, ok := reg.Resolve("sol"); !ok || u != "gpt-5.6-sol" {
-		t.Errorf(`Resolve("sol") = (%q, %v), want gpt-5.6-sol`, u, ok)
-	}
-	if u, ok := reg.Resolve("terra"); !ok || u != "gpt-5.6-terra" {
-		t.Errorf(`Resolve("terra") = (%q, %v), want gpt-5.6-terra`, u, ok)
-	}
-	if _, ok := reg.Resolve("ghost"); ok {
-		t.Error("hidden model should not be advertised after RefreshRegistry")
-	}
-}
-
-// TestRefreshRegistryBlocksForCurrentCatalogWhenStale proves RefreshRegistry
-// installs the CURRENT catalog even when the held snapshot is stale — it must
-// block on a real revalidation rather than publish the stale snapshot (which
-// Models would serve immediately while revalidating in the background) and call
-// that success.
-func TestRefreshRegistryBlocksForCurrentCatalogWhenStale(t *testing.T) {
-	fake := newFakeCatalog(t, []cschema.CatalogModel{solModel()}, `W/"v1"`)
-	srv := httptest.NewServer(fake)
-	t.Cleanup(srv.Close)
-
-	clk := newClock()
-	c := catalog.New(catalog.Options{BaseURL: srv.URL, HTTPClient: srv.Client(), TTL: 60 * time.Second, Now: clk.now})
-
-	// Warm the cache with v1 (sol only).
-	if _, err := c.Models(context.Background(), fakeCred()); err != nil {
-		t.Fatalf("warm Models: %v", err)
-	}
-
-	// Go stale and change what the server advertises to sol+terra.
-	clk.advance(120 * time.Second)
-	fake.set([]cschema.CatalogModel{solModel(), terraModel()}, `W/"v2"`, false)
-
-	reg := router.NewRegistry()
-	if err := c.RefreshRegistry(context.Background(), fakeCred(), reg); err != nil {
-		t.Fatalf("RefreshRegistry: %v", err)
-	}
-	// terra is only in the CURRENT catalog; if RefreshRegistry had published the
-	// stale v1 snapshot it would be absent.
-	if _, ok := reg.Resolve("terra"); !ok {
-		t.Error("RefreshRegistry installed a stale catalog: terra missing after a blocking refresh")
-	}
-}
-
 // TestMissingETagOn200ClearsValidator proves a 200 without an ETag clears the
 // held validator instead of retaining the previous one — otherwise a later 304
 // for the old validator could wrongly mark the new body fresh.
@@ -623,7 +567,7 @@ func TestDiskCacheIgnoredOnClientVersionMismatch(t *testing.T) {
 
 	c := catalog.New(catalog.Options{
 		BaseURL: srv.URL, HTTPClient: srv.Client(), Now: clk.now,
-		CachePath: cachePath, ClientVersion: "new", TTL: 300 * time.Second,
+		CacheFile: cachePath, ClientVersion: "new", TTL: 300 * time.Second,
 	})
 
 	models, err := c.Models(context.Background(), fakeCred())
@@ -658,7 +602,7 @@ func TestDiskCacheIgnoredWhenFetchedAtInFuture(t *testing.T) {
 
 	c := catalog.New(catalog.Options{
 		BaseURL: srv.URL, HTTPClient: srv.Client(), Now: clk.now,
-		CachePath: cachePath, TTL: 300 * time.Second,
+		CacheFile: cachePath, TTL: 300 * time.Second,
 	})
 
 	models, err := c.Models(context.Background(), fakeCred())

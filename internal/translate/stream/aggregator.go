@@ -260,16 +260,16 @@ func (a *Aggregator) MessageJSON() ([]byte, error) {
 // conditions under which a complete message may be claimed at all.
 func (a *Aggregator) finishedBlocks() ([]aschema.ContentBlock, error) {
 	if a.failed {
-		kind := apierr.Type(a.errBody.Type)
-		if kind == "" {
-			kind = apierr.TypeAPI
+		errType := apierr.ErrorType(a.errBody.Type)
+		if errType == "" {
+			errType = apierr.TypeAPI
 		}
 		msg := a.errBody.Message
 		if msg == "" {
 			msg = "the upstream stream failed"
 		}
-		e := apierr.New(kind, "%s", msg)
-		if kind == apierr.TypeAPI {
+		e := apierr.New(errType, "%s", msg)
+		if errType == apierr.TypeAPI {
 			// The generic type means "the upstream failed and said no more", which
 			// is a gateway failure (502), not an internal one (500). Its siblings
 			// ErrNoData / ErrTruncated / ErrIncomplete are pinned to 502 for the

@@ -81,16 +81,13 @@ const (
 
 // Decision is the routing verdict for one client-supplied model string.
 //
-// ClientModel is ordinarily the caller's model string, whitespace-trimmed,
-// case preserved: ResolveWith trims on every path before deriving a
-// Decision, so this is not a byte-exact copy of what the caller sent. The
-// byte-exact spelling, when something needs it, is Request.Raw — the
-// Anthropic leg forwards that untouched. The one exception is an
-// Anthropic-backed picker route: resolvePicker substitutes the route's
-// UpstreamModel into ClientModel there (see resolvePicker), so on that path
-// ClientModel can differ from the caller's string by more than trimming.
-// UpstreamModel is the slug the Codex leg should ask for, and is empty for
-// the Anthropic backend, which does not rewrite the model.
+// ClientModel is the caller's model string, whitespace-trimmed, case
+// preserved, on every path: ResolveWith trims before deriving a Decision, so
+// this is not a byte-exact copy of what the caller sent. The byte-exact
+// spelling, when something needs it, is Request.Raw — the Anthropic leg
+// forwards that untouched. It is the single copy of the caller's model string
+// on a Request. UpstreamModel is the slug the Codex leg should ask for, and is
+// empty for the Anthropic backend, which does not rewrite the model.
 type Decision struct {
 	Backend       Backend
 	UpstreamModel string
@@ -100,11 +97,11 @@ type Decision struct {
 }
 
 // Request is one dispatched call: the raw body already read by the front
-// door, the fields peeked out of it, the routing Decision, and the
-// request-scoped logger.
+// door, the stream flag peeked out of it, the routing Decision, and the
+// request-scoped logger. The caller's model string lives only in
+// Dec.ClientModel (trimmed); its exact bytes are in Raw.
 type Request struct {
 	Raw    []byte
-	Model  string
 	Stream bool
 	Dec    Decision
 	Log    *slog.Logger

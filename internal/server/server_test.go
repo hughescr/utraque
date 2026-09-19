@@ -823,22 +823,6 @@ func TestSignalContext(t *testing.T) {
 	}
 }
 
-func TestDeadline(t *testing.T) {
-	s, _ := newServer(t, func(o *server.Options) { o.Config.Limits.UpstreamIdleTimeout = 30 * time.Second })
-	ctx, cancel := s.Deadline(context.Background())
-	defer cancel()
-	if _, ok := ctx.Deadline(); !ok {
-		t.Error("Deadline must set a deadline when the timeout is positive")
-	}
-
-	s2, _ := newServer(t, func(o *server.Options) { o.Config.Limits.UpstreamIdleTimeout = 0 })
-	ctx2, cancel2 := s2.Deadline(context.Background())
-	defer cancel2()
-	if _, ok := ctx2.Deadline(); ok {
-		t.Error("Deadline must not set one when the timeout is 0")
-	}
-}
-
 func TestUptimeAndAccessors(t *testing.T) {
 	clock := time.Unix(100, 0)
 	s, _ := newServer(t, func(o *server.Options) { o.Now = func() time.Time { return clock } })

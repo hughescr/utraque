@@ -227,7 +227,7 @@ func TestStreamErrorClassification(t *testing.T) {
 		body        string
 		wantClass   Class
 		wantStatus  int // rendered HTTP status
-		wantKind    apierr.Type
+		wantType    apierr.ErrorType
 		wantMsgPart string
 		wantRetry   bool
 		wantRefresh bool
@@ -235,67 +235,67 @@ func TestStreamErrorClassification(t *testing.T) {
 		{
 			name: "400 invalid request", status: 400, contentType: "application/json",
 			body:      `{"error":{"message":"unknown parameter: foo","type":"invalid_request_error","code":"bad_param"}}`,
-			wantClass: ClassTerminal, wantStatus: 400, wantKind: apierr.TypeInvalidRequest,
+			wantClass: ClassTerminal, wantStatus: 400, wantType: apierr.TypeInvalidRequest,
 			wantMsgPart: "unknown parameter: foo",
 		},
 		{
 			name: "401 auth", status: 401, contentType: "application/json",
 			body:      `{"error":{"message":"token expired"}}`,
-			wantClass: ClassAuth, wantStatus: 401, wantKind: apierr.TypeAuthentication,
+			wantClass: ClassAuth, wantStatus: 401, wantType: apierr.TypeAuthentication,
 			wantMsgPart: "token expired", wantRefresh: true,
 		},
 		{
 			name: "403 permission with json body is not a gate", status: 403, contentType: "application/json",
 			body:      `{"detail":"your plan does not include codex"}`,
-			wantClass: ClassTerminal, wantStatus: 403, wantKind: apierr.TypePermission,
+			wantClass: ClassTerminal, wantStatus: 403, wantType: apierr.TypePermission,
 			wantMsgPart: "your plan does not include codex",
 		},
 		{
 			name: "404 not found", status: 404, contentType: "application/json",
 			body:      `{"error":{"message":"no such model"}}`,
-			wantClass: ClassTerminal, wantStatus: 404, wantKind: apierr.TypeNotFound,
+			wantClass: ClassTerminal, wantStatus: 404, wantType: apierr.TypeNotFound,
 			wantMsgPart: "no such model",
 		},
 		{
 			name: "413 too large", status: 413, contentType: "application/json",
 			body:      `{"error":{"message":"request too large"}}`,
-			wantClass: ClassTerminal, wantStatus: 413, wantKind: apierr.TypeRequestTooLarge,
+			wantClass: ClassTerminal, wantStatus: 413, wantType: apierr.TypeRequestTooLarge,
 			wantMsgPart: "request too large",
 		},
 		{
 			name: "422 unmapped 4xx renders as invalid_request", status: 422, contentType: "application/json",
 			body:      `{"detail":{"message":"input.0.content is malformed"}}`,
-			wantClass: ClassTerminal, wantStatus: 422, wantKind: apierr.TypeInvalidRequest,
+			wantClass: ClassTerminal, wantStatus: 422, wantType: apierr.TypeInvalidRequest,
 			wantMsgPart: "input.0.content is malformed",
 		},
 		{
 			name: "500 upstream", status: 500, contentType: "application/json",
 			body:      `{"error":{"message":"internal error"}}`,
-			wantClass: ClassUpstream, wantStatus: 500, wantKind: apierr.TypeAPI,
+			wantClass: ClassServerError, wantStatus: 500, wantType: apierr.TypeAPI,
 			wantMsgPart: "internal error", wantRetry: true,
 		},
 		{
 			name: "502 upstream", status: 502, contentType: "text/plain",
 			body:      "upstream connect error",
-			wantClass: ClassUpstream, wantStatus: 502, wantKind: apierr.TypeAPI,
+			wantClass: ClassServerError, wantStatus: 502, wantType: apierr.TypeAPI,
 			wantMsgPart: "upstream connect error", wantRetry: true,
 		},
 		{
 			name: "503 upstream renders as overloaded", status: 503, contentType: "application/json",
 			body:      `{"error":{"message":"server overloaded"}}`,
-			wantClass: ClassUpstream, wantStatus: 503, wantKind: apierr.TypeOverloaded,
+			wantClass: ClassServerError, wantStatus: 503, wantType: apierr.TypeOverloaded,
 			wantMsgPart: "server overloaded", wantRetry: true,
 		},
 		{
 			name: "504 upstream renders as timeout", status: 504, contentType: "application/json",
 			body:      `{"error":{"message":"gateway timeout"}}`,
-			wantClass: ClassUpstream, wantStatus: 504, wantKind: apierr.TypeTimeout,
+			wantClass: ClassServerError, wantStatus: 504, wantType: apierr.TypeTimeout,
 			wantMsgPart: "gateway timeout", wantRetry: true,
 		},
 		{
 			name: "204 is not a stream", status: 204, contentType: "",
 			body:      "",
-			wantClass: ClassTerminal, wantStatus: 502, wantKind: apierr.TypeAPI,
+			wantClass: ClassTerminal, wantStatus: 502, wantType: apierr.TypeAPI,
 			wantMsgPart: "unexpected response",
 		},
 	}
@@ -349,8 +349,8 @@ func TestStreamErrorClassification(t *testing.T) {
 			if ae.HTTPStatus() != tc.wantStatus {
 				t.Errorf("rendered status = %d, want %d", ae.HTTPStatus(), tc.wantStatus)
 			}
-			if ae.Kind != tc.wantKind {
-				t.Errorf("error kind = %q, want %q", ae.Kind, tc.wantKind)
+			if ae.Type != tc.wantType {
+				t.Errorf("error type = %q, want %q", ae.Type, tc.wantType)
 			}
 			if ue.HTTPStatus() != tc.wantStatus {
 				t.Errorf("UpstreamError.HTTPStatus() = %d, want %d", ue.HTTPStatus(), tc.wantStatus)
@@ -359,8 +359,8 @@ func TestStreamErrorClassification(t *testing.T) {
 				t.Errorf("message %q does not contain %q", ae.Message, tc.wantMsgPart)
 			}
 			env := ae.Envelope()
-			if env.Error.Type != string(tc.wantKind) {
-				t.Errorf("envelope type = %q, want %q", env.Error.Type, tc.wantKind)
+			if env.Error.Type != string(tc.wantType) {
+				t.Errorf("envelope type = %q, want %q", env.Error.Type, tc.wantType)
 			}
 			if strings.Contains(err.Error(), fakeToken) {
 				t.Error("error text leaked the access token")
@@ -432,8 +432,8 @@ func TestStream429ForwardsRetryAfterAndQuotaHeaders(t *testing.T) {
 	if ue.HTTPStatus() != http.StatusTooManyRequests {
 		t.Errorf("status = %d, want 429", ue.HTTPStatus())
 	}
-	if apierr.From(err).Kind != apierr.TypeRateLimit {
-		t.Errorf("kind = %q, want rate_limit_error", apierr.From(err).Kind)
+	if apierr.From(err).Type != apierr.TypeRateLimit {
+		t.Errorf("kind = %q, want rate_limit_error", apierr.From(err).Type)
 	}
 	d, ok := ue.RetryAfterDelay()
 	if !ok || d != 42*time.Second {
@@ -794,8 +794,8 @@ func TestStreamRejectsUnusableInput(t *testing.T) {
 	for _, cred := range []auth.Credential{{}, {AccessToken: fakeToken}, {AccountID: fakeAccount}} {
 		if _, err := c.Stream(context.Background(), cred, testRequest()); err == nil {
 			t.Errorf("credential %+v: want an error", cred)
-		} else if apierr.From(err).Kind != apierr.TypeAuthentication {
-			t.Errorf("credential %+v: kind = %q, want authentication_error", cred, apierr.From(err).Kind)
+		} else if apierr.From(err).Type != apierr.TypeAuthentication {
+			t.Errorf("credential %+v: kind = %q, want authentication_error", cred, apierr.From(err).Type)
 		}
 	}
 }
@@ -929,7 +929,7 @@ func TestStreamWithRefreshDoesNotRetryOtherFailures(t *testing.T) {
 
 	src := &fakeSource{tokens: []string{"tok-a", "tok-b"}}
 	_, err := newClient(t, srv.URL).StreamWithRefresh(context.Background(), src, testRequest())
-	if ClassOf(err) != ClassUpstream {
+	if ClassOf(err) != ClassServerError {
 		t.Errorf("Class = %q, want upstream", ClassOf(err))
 	}
 	mu.Lock()
@@ -966,8 +966,8 @@ func TestStreamWithRefreshSurfacesRefreshFailure(t *testing.T) {
 	if !strings.Contains(err.Error(), "codex login") {
 		t.Errorf("want the actionable refresh error, got %v", err)
 	}
-	if apierr.From(err).Kind != apierr.TypeAuthentication {
-		t.Errorf("kind = %q, want authentication_error", apierr.From(err).Kind)
+	if apierr.From(err).Type != apierr.TypeAuthentication {
+		t.Errorf("kind = %q, want authentication_error", apierr.From(err).Type)
 	}
 }
 
@@ -1015,7 +1015,7 @@ func TestHTMLErrorBodyIsNotEchoed(t *testing.T) {
 	if !ok {
 		t.Fatalf("not an *UpstreamError: %v", err)
 	}
-	if ue.Class != ClassUpstream {
+	if ue.Class != ClassServerError {
 		t.Errorf("Class = %q, want upstream (plain HTML 500 is not a bot gate)", ue.Class)
 	}
 	if strings.Contains(apierr.From(err).Message, "<") {
@@ -1034,7 +1034,7 @@ func TestErrorBodyReadIsBounded(t *testing.T) {
 
 	c := newClient(t, srv.URL, func(o *Options) { o.MaxErrorBody = 1024 })
 	_, err := c.Stream(context.Background(), testCred(), testRequest())
-	if ClassOf(err) != ClassUpstream {
+	if ClassOf(err) != ClassServerError {
 		t.Errorf("Class = %q, want upstream", ClassOf(err))
 	}
 	if n := len([]rune(apierr.From(err).Message)); n > maxErrorMessage+200 {

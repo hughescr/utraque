@@ -105,7 +105,7 @@ func (t *Tracer) Begin(id string) *Trace {
 	if name == "" {
 		return nil
 	}
-	return &Trace{tracer: t, id: name, meta: traceMeta{RequestID: id}}
+	return &Trace{tracer: t, fileStem: name, meta: traceMeta{RequestID: id}}
 }
 
 // safeFileID reduces a request id to something that can only ever name a file
@@ -172,7 +172,10 @@ type traceMeta struct {
 // different goroutines.
 type Trace struct {
 	tracer *Tracer
-	id     string // sanitised stem from safeFileID, not the caller's raw id
+	// fileStem names the trace files: the caller's raw id (meta.RequestID)
+	// sanitised by safeFileID, so it is a derivative of the id, not the id.
+	// Close's log lines still report it under the key "request_id".
+	fileStem string
 
 	mu       sync.Mutex
 	meta     traceMeta
@@ -208,19 +211,21 @@ func (t *Trace) SetRequest(method, path string, h http.Header) {
 	if t == nil {
 		return
 	}
+	// Names are taken in http.Header iteration order, as they always were:
+	// headers_withheld is not sorted (the log's "redacted" list is).
+	names := make([]string, 0, len(h))
+	for name := range h {
+		names = append(names, name)
+	}
+	allowed, withheld := t.tracer.red.partitionHeaders(names)
 	kept := map[string][]string{}
-	var withheld []string
-	for name, vals := range h {
-		lower := strings.ToLower(name)
-		if !t.tracer.red.Allowed(lower) {
-			withheld = append(withheld, lower)
-			continue
-		}
+	for _, name := range allowed {
+		vals := h[name]
 		cp := make([]string, len(vals))
 		for i, v := range vals {
 			cp[i] = Scrub(v)
 		}
-		kept[lower] = cp
+		kept[strings.ToLower(name)] = cp
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -341,7 +346,7 @@ func (t *Trace) Close() {
 	data, err := json.MarshalIndent(meta, "", "  ")
 	if err != nil {
 		t.tracer.log.Warn("trace: encoding the request manifest failed",
-			slog.String("request_id", t.id), slog.String("err", err.Error()))
+			slog.String("request_id", t.fileStem), slog.String("err", err.Error()))
 		return
 	}
 	// Scrub the ENCODED manifest, not merely the fields that were scrubbed on
@@ -354,10 +359,10 @@ func (t *Trace) Close() {
 	// parseable JSON, because a redaction replaces a JSON string value in place.
 	data = ScrubBytes(data)
 	data = append(data, '\n')
-	path := filepath.Join(t.tracer.dir, t.id+SuffixRequest)
+	path := filepath.Join(t.tracer.dir, t.fileStem+SuffixRequest)
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		t.tracer.log.Warn("trace: writing the request manifest failed",
-			slog.String("request_id", t.id), slog.String("err", err.Error()))
+			slog.String("request_id", t.fileStem), slog.String("err", err.Error()))
 	}
 }
 
@@ -383,7 +388,7 @@ func (t *Trace) open(suffix string) *os.File {
 	if t.closed {
 		return nil
 	}
-	path := filepath.Join(t.tracer.dir, t.id+suffix)
+	path := filepath.Join(t.tracer.dir, t.fileStem+suffix)
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		t.tracer.log.Warn("trace: opening a trace file failed",

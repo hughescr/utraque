@@ -14,8 +14,8 @@ func envOnly(kv map[string]string) func(string) string {
 }
 
 func TestCodexTransportDefaultsToAuto(t *testing.T) {
-	if got := config.Default().Codex.Transport; got != config.TransportAuto {
-		t.Errorf("Default().Codex.Transport = %q, want %q", got, config.TransportAuto)
+	if got := config.Default().Codex.Transport; got != config.TransportModeAuto {
+		t.Errorf("Default().Codex.Transport = %q, want %q", got, config.TransportModeAuto)
 	}
 	// The default must stay auto, not utls: the std transport is what the proxy
 	// was live-verified on, and uTLS is a strictly larger attack surface bought
@@ -24,21 +24,21 @@ func TestCodexTransportDefaultsToAuto(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadFrom: %v", err)
 	}
-	if cfg.Codex.Transport != config.TransportAuto {
-		t.Errorf("loaded Codex.Transport = %q, want %q", cfg.Codex.Transport, config.TransportAuto)
+	if cfg.Codex.Transport != config.TransportModeAuto {
+		t.Errorf("loaded Codex.Transport = %q, want %q", cfg.Codex.Transport, config.TransportModeAuto)
 	}
-	if config.TransportAuto == config.TransportUTLS {
+	if config.TransportModeAuto == config.TransportModeUTLS {
 		t.Fatal("auto and utls must be distinct modes")
 	}
 }
 
 func TestCodexTransportEnvOverride(t *testing.T) {
 	cases := map[string]string{
-		"std":    config.TransportStd,
-		"utls":   config.TransportUTLS,
-		"auto":   config.TransportAuto,
-		" UTLS ": config.TransportUTLS,
-		"Std":    config.TransportStd,
+		"std":    config.TransportModeStd,
+		"utls":   config.TransportModeUTLS,
+		"auto":   config.TransportModeAuto,
+		" UTLS ": config.TransportModeUTLS,
+		"Std":    config.TransportModeStd,
 	}
 	for raw, want := range cases {
 		t.Run(raw, func(t *testing.T) {
@@ -87,9 +87,9 @@ func TestCodexTransportIsReported(t *testing.T) {
 // vice versa), so both sides pin their strings to literals.
 func TestTransportConstantsMatchTheTransportPackage(t *testing.T) {
 	for got, want := range map[string]string{
-		config.TransportStd:  "std",
-		config.TransportUTLS: "utls",
-		config.TransportAuto: "auto",
+		config.TransportModeStd:  "std",
+		config.TransportModeUTLS: "utls",
+		config.TransportModeAuto: "auto",
 	} {
 		if got != want {
 			t.Errorf("transport constant = %q, want %q", got, want)

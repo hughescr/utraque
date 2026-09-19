@@ -30,10 +30,9 @@ import (
 )
 
 const (
-	DefaultBaseURL                = "https://api.deepseek.com/anthropic"
-	DefaultMaxBodyBytes     int64 = 64 << 20
-	defaultMaxResponseBytes       = 128 << 20
-	copyBufferSize                = 32 << 10
+	DefaultBaseURL          = "https://api.deepseek.com/anthropic"
+	defaultMaxResponseBytes = 128 << 20
+	copyBufferSize          = 32 << 10
 )
 
 // TokenCountMethodHeader identifies how CountTokens obtained its result.
@@ -47,15 +46,6 @@ func WithLogger(log *slog.Logger) Option {
 		if log != nil {
 			l.log = log
 		}
-	}
-}
-
-func WithMaxBodyBytes(n int64) Option {
-	return func(l *Leg) {
-		if n <= 0 {
-			n = DefaultMaxBodyBytes
-		}
-		l.maxBody = n
 	}
 }
 
@@ -76,7 +66,6 @@ type Leg struct {
 	tr           transport.Transport
 	client       *http.Client
 	log          *slog.Logger
-	maxBody      int64
 	upstreamIdle time.Duration
 	estimator    tokens.Estimator
 }
@@ -113,7 +102,6 @@ func New(baseURL, apiKey string, tr transport.Transport, opts ...Option) (*Leg, 
 		tr:        tr,
 		client:    &client,
 		log:       slog.New(slog.DiscardHandler),
-		maxBody:   DefaultMaxBodyBytes,
 		estimator: tokens.Default(),
 	}
 	for _, opt := range opts {
@@ -158,11 +146,9 @@ func (l *Leg) forward(w http.ResponseWriter, r *http.Request, rq *router.Request
 	if rq == nil || rq.Dec.Backend != router.BackendDeepSeek || rq.Dec.UpstreamModel == "" {
 		return apierr.InvalidRequest("deepseek request has no resolved model")
 	}
-	raw, err := l.requestBody(r, rq)
-	if err != nil {
-		return err
-	}
-	body, report, err := rewriteRequest(raw, rq.Dec.UpstreamModel)
+	// The dispatcher has already read and size-limited the body into rq.Raw
+	// (this leg has no catch-all ServeHTTP, so there is no other way in).
+	body, report, err := rewriteRequest(rq.Raw, rq.Dec.UpstreamModel)
 	if err != nil {
 		return err
 	}
@@ -241,27 +227,6 @@ func (l *Leg) logRewrite(ctx context.Context, rq *router.Request, report rewrite
 		attrs = append(attrs, slog.Any("dropped_patterns", report.DroppedPatterns))
 	}
 	l.log.LogAttrs(ctx, slog.LevelDebug, "rewrote tool schema patterns for the deepseek backend", attrs...)
-}
-
-func (l *Leg) requestBody(r *http.Request, rq *router.Request) ([]byte, error) {
-	if rq != nil && rq.Raw != nil {
-		return rq.Raw, nil
-	}
-	if r.Body == nil {
-		return nil, nil
-	}
-	b, err := io.ReadAll(&io.LimitedReader{R: r.Body, N: l.maxBody + 1})
-	if err != nil {
-		var mbe *http.MaxBytesError
-		if errors.As(err, &mbe) {
-			return nil, apierr.RequestTooLarge("request body exceeds the %d byte limit", mbe.Limit)
-		}
-		return nil, apierr.Wrap(err, apierr.TypeInvalidRequest, "read deepseek request body")
-	}
-	if int64(len(b)) > l.maxBody {
-		return nil, apierr.RequestTooLarge("request body exceeds %d bytes", l.maxBody)
-	}
-	return b, nil
 }
 
 func (l *Leg) jsonResponse(w http.ResponseWriter, r *http.Request, idle *idleGuard, resp *http.Response, canonical string, rewriteModel bool) error {

@@ -306,15 +306,6 @@ func (s *Server) Version() string { return s.version }
 // Uptime is how long the server has existed.
 func (s *Server) Uptime() time.Duration { return s.now().Sub(s.started) }
 
-// Deadline derives a context bounded by the configured upstream idle timeout.
-// Leg handlers use it so a hung upstream cannot pin a request forever.
-func (s *Server) Deadline(ctx context.Context) (context.Context, context.CancelFunc) {
-	if d := s.cfg.Limits.UpstreamIdleTimeout; d > 0 {
-		return context.WithTimeout(ctx, d)
-	}
-	return context.WithCancel(ctx)
-}
-
 func handleNotFound(w http.ResponseWriter, r *http.Request) {
 	_ = apierr.Write(w, apierr.NotFound("no route for %s %s", r.Method, obs.SafePath(r.URL)))
 }

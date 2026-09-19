@@ -418,6 +418,9 @@ func (ir *idleResetReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
+// requestBody is the routed request's already-read body (rq.Raw, which the
+// dispatcher always sets), or, on the catch-all ServeHTTP path where rq is nil,
+// the body read here under the leg's own size limit.
 func (l *Leg) requestBody(r *http.Request, rq *router.Request) ([]byte, error) {
 	if rq != nil && rq.Raw != nil {
 		return rq.Raw, nil

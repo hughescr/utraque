@@ -285,8 +285,8 @@ func TestSecretNeverRendered(t *testing.T) {
 	if strings.Contains(buf.String(), secret) {
 		t.Fatalf("LogValue leaked the token: %s", buf.String())
 	}
-	if !strings.Contains(buf.String(), config.Redact(secret)) {
-		t.Errorf("LogValue = %s, want fingerprint %s", buf.String(), config.Redact(secret))
+	if !strings.Contains(buf.String(), config.Fingerprint(secret)) {
+		t.Errorf("LogValue = %s, want fingerprint %s", buf.String(), config.Fingerprint(secret))
 	}
 }
 
@@ -308,22 +308,22 @@ func TestStringWithoutToken(t *testing.T) {
 	}
 }
 
-func TestRedact(t *testing.T) {
-	if config.Redact("") != "" {
-		t.Error(`Redact("") must be ""`)
+func TestFingerprint(t *testing.T) {
+	if config.Fingerprint("") != "" {
+		t.Error(`Fingerprint("") must be ""`)
 	}
-	got := config.Redact(secret)
+	got := config.Fingerprint(secret)
 	if !strings.HasPrefix(got, "sha256:") || len(got) != len("sha256:")+8 {
-		t.Fatalf("Redact = %q, want sha256: plus 8 hex", got)
+		t.Fatalf("Fingerprint = %q, want sha256: plus 8 hex", got)
 	}
-	if got != config.Redact(secret) {
-		t.Error("Redact is not stable")
+	if got != config.Fingerprint(secret) {
+		t.Error("Fingerprint is not stable")
 	}
-	if got == config.Redact(secret+"x") {
-		t.Error("Redact collides on distinct inputs")
+	if got == config.Fingerprint(secret+"x") {
+		t.Error("Fingerprint collides on distinct inputs")
 	}
 	if strings.Contains(got, secret) {
-		t.Error("Redact leaked its input")
+		t.Error("Fingerprint leaked its input")
 	}
 }
 

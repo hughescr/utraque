@@ -1,6 +1,8 @@
 // Package catalog fetches and caches the Codex model catalog
 // (GET {base}/models), the list utraque's router derives its short model
-// aliases from.
+// aliases from. Publishing that list into the router is the caller's call:
+// registry.go adapts a model list into router aliases (PopulateRegistry), and
+// cmd decides when each Models result is published.
 //
 // The catalog is cheap to hold and expensive to fetch, so this client layers
 // three staleness controls over one in-memory snapshot:
@@ -86,10 +88,10 @@ type Catalog interface {
 type Options struct {
 	// BaseURL is the Codex backend root. Defaults to DefaultBaseURL.
 	BaseURL string
-	// CachePath is utraque's own on-disk cache file. Empty disables disk
+	// CacheFile is utraque's own on-disk cache file. Empty disables disk
 	// caching (memory only). It MUST NOT be the Codex CLI's models_cache.json:
 	// utraque never overwrites the CLI's cache.
-	CachePath string
+	CacheFile string
 	// TTL is the fresh window. Defaults to DefaultTTL. A negative value is
 	// treated as the default.
 	TTL time.Duration
@@ -114,7 +116,7 @@ type Options struct {
 // Client is a caching catalog fetcher. It is safe for concurrent use.
 type Client struct {
 	baseURL       string
-	cachePath     string
+	cacheFile     string
 	ttl           time.Duration
 	clientVersion string
 	http          *http.Client
@@ -148,7 +150,7 @@ var _ Catalog = (*Client)(nil)
 func New(opts Options) *Client {
 	c := &Client{
 		baseURL:       opts.BaseURL,
-		cachePath:     opts.CachePath,
+		cacheFile:     opts.CacheFile,
 		ttl:           opts.TTL,
 		clientVersion: opts.ClientVersion,
 		http:          opts.HTTPClient,
@@ -385,8 +387,8 @@ func (c *Client) fetch(ctx context.Context, cred auth.Credential) (state, error)
 				"codex catalog returned an unexpected redirect (HTTP %d to %q); redirects are never followed",
 				resp.StatusCode, resp.Header.Get("Location"))
 		}
-		kind := apierr.TypeForStatus(resp.StatusCode)
-		return state{}, apierr.WithStatus(resp.StatusCode, kind,
+		errType := apierr.TypeForStatus(resp.StatusCode)
+		return state{}, apierr.WithStatus(resp.StatusCode, errType,
 			"codex catalog request failed (HTTP %d)", resp.StatusCode)
 	}
 }
@@ -410,10 +412,10 @@ func (c *Client) ensureDiskLoaded() {
 		return
 	}
 	c.diskTried = true
-	if c.cachePath == "" {
+	if c.cacheFile == "" {
 		return
 	}
-	b, err := os.ReadFile(c.cachePath)
+	b, err := os.ReadFile(c.cacheFile)
 	if err != nil {
 		return
 	}
@@ -453,11 +455,11 @@ func (c *Client) ensureDiskLoaded() {
 		slog.Time("fetched_at", cache.FetchedAt))
 }
 
-// writeDisk atomically writes the snapshot to CachePath, if configured. Failure
+// writeDisk atomically writes the snapshot to CacheFile, if configured. Failure
 // is logged and swallowed: the disk cache is an optimisation, not a
 // requirement, and a write error must never fail a live request.
 func (c *Client) writeDisk(ns state) {
-	if c.cachePath == "" {
+	if c.cacheFile == "" {
 		return
 	}
 	cache := cschema.Cache{
@@ -472,7 +474,7 @@ func (c *Client) writeDisk(ns state) {
 		return
 	}
 	data = append(data, '\n')
-	dir := filepath.Dir(c.cachePath)
+	dir := filepath.Dir(c.cacheFile)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		c.log.Warn("codex catalog: create cache dir", slog.String("err", err.Error()))
 		return
@@ -500,7 +502,7 @@ func (c *Client) writeDisk(ns state) {
 		c.log.Warn("codex catalog: close temp cache", slog.String("err", err.Error()))
 		return
 	}
-	if err := os.Rename(tmpName, c.cachePath); err != nil {
+	if err := os.Rename(tmpName, c.cacheFile); err != nil {
 		_ = os.Remove(tmpName)
 		c.log.Warn("codex catalog: rename cache into place", slog.String("err", err.Error()))
 		return
@@ -526,25 +528,4 @@ func cloneModels(in []cschema.CatalogModel) []cschema.CatalogModel {
 		}
 	}
 	return out
-}
-
-// currentModels returns a catalog current as of now: it serves the in-memory
-// snapshot only while it is within the fresh TTL, and otherwise BLOCKS on a
-// synchronous fetch. Unlike Models it never returns a stale snapshot with a
-// detached background refresh — a caller about to install the result into the
-// live router (see RefreshRegistry) must not publish a stale list and report
-// success. On fetch failure it returns the error and no models.
-func (c *Client) currentModels(ctx context.Context, cred auth.Credential) ([]cschema.CatalogModel, error) {
-	c.ensureDiskLoaded()
-	c.mu.RLock()
-	st := c.st
-	c.mu.RUnlock()
-	if st.loaded && c.now().Sub(st.fetchedAt) < c.ttl {
-		return cloneModels(st.models), nil
-	}
-	ns, err := c.fetchShared(ctx, cred)
-	if err != nil {
-		return nil, err
-	}
-	return cloneModels(ns.models), nil
 }

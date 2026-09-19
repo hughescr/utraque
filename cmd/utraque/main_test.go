@@ -666,7 +666,7 @@ func TestHealthzReportsCodexAuthAndCatalog(t *testing.T) {
 	cfg := config.Default()
 	cfg.Anthropic.BaseURL = upstream.URL
 	cfg.Codex.AuthFile = authPath
-	cfg.Codex.CachePath = cachePath
+	cfg.Codex.CacheFile = cachePath
 
 	srv, err := newServer(cfg, slog.New(slog.DiscardHandler), nil)
 	if err != nil {
@@ -727,7 +727,7 @@ func TestHealthzReportsMissingCodexAuthWithoutAuthFile(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	front := frontDoor(t, upstream.URL) // config.Default: AuthFile and CachePath empty
+	front := frontDoor(t, upstream.URL) // config.Default: AuthFile and CacheFile empty
 
 	resp, err := noRedirectClient().Get(front.URL + server.HealthPath)
 	if err != nil {

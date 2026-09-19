@@ -39,12 +39,12 @@ const streamsDir = "../../../testdata/streams"
 // pings), and the response id in every fixture is "resp_test".
 func goldenOptions() stream.Options {
 	return stream.Options{
-		UpstreamModel: "gpt-5.6-sol",
-		InputTokens:   7,
-		EmitReasoning: "thinking",
-		OnTruncate:    "error",
-		Heartbeat:     -1,
-		UpstreamIdle:  -1,
+		UpstreamModel:       "gpt-5.6-sol",
+		InputTokens:         7,
+		EmitReasoning:       "thinking",
+		OnTruncate:          "error",
+		Heartbeat:           -1,
+		UpstreamIdleTimeout: -1,
 	}
 }
 
