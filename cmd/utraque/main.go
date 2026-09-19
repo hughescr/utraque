@@ -1137,7 +1137,7 @@ func (d *dispatcher) dispatch(w http.ResponseWriter, r *http.Request, call legCa
 	sum := obs.SummaryFrom(ctx)
 	sum.SetRoute(dec.Backend.String())
 	sum.SetModels(dec.ClientModel, dec.UpstreamModel)
-	sum.SetEffort(dec.Effort)
+	sum.SetEffort(dec.Effort.String())
 	sum.SetStream(p.Stream)
 	// The dispatcher read the body, so it knows its real size — better than the
 	// declared Content-Length the middleware had to settle for.
@@ -1147,8 +1147,8 @@ func (d *dispatcher) dispatch(w http.ResponseWriter, r *http.Request, call legCa
 		slog.String("backend", dec.Backend.String()),
 		slog.String("client_model", dec.ClientModel),
 		slog.String("upstream_model", dec.UpstreamModel),
-		slog.String("effort", dec.Effort),
-		slog.String("effort_source", dec.EffortSource),
+		slog.String("effort", dec.Effort.String()),
+		slog.String("effort_source", dec.EffortSource.String()),
 		slog.Bool("stream", p.Stream),
 	)
 

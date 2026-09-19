@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/hughescr/utraque/internal/codex/schema"
+	"github.com/hughescr/utraque/internal/effort"
 	"github.com/hughescr/utraque/internal/router"
 )
 
@@ -98,8 +99,8 @@ func (h *Handler) codexRows(models []cschema.CatalogModel) []codexRow {
 			if strategy != AliasEffortVariants {
 				continue
 			}
-			for _, effort := range model.SupportedEfforts() {
-				if effort == "" {
+			for _, tok := range model.SupportedEfforts() {
+				if tok == "" {
 					continue
 				}
 				// Only efforts the router can split back off a model name. An
@@ -108,21 +109,25 @@ func (h *Handler) codexRows(models []cschema.CatalogModel) []codexRow {
 				// recorded it survives; after a restart — or after one picker
 				// open hits a catalog error and rebuilds the tier without it —
 				// the same id hard-404s. A row that dies like that is worse than
-				// a row we never offered.
-				if !router.KnownEffort(effort) {
+				// a row we never offered. The catalog token is raw; the router
+				// lowercases a model name before parsing it, so the gate asks
+				// about the lowered form.
+				if !effort.Known(effort.Level(strings.ToLower(tok))) {
 					continue
 				}
 				out = append(out, h.codexRow(idTmpl, displayTmpl,
-					name+"-"+effort, slug, display, effort))
+					name+"-"+tok, slug, display, tok))
 			}
 		}
 	}
 	return out
 }
 
-// codexRow renders one row and its route.
-func (h *Handler) codexRow(idTmpl, displayTmpl, alias, slug, display, effort string) codexRow {
-	vars := templateVars{Alias: alias, Slug: slug, Display: display, Effort: effort}
+// codexRow renders one row and its route. level is the raw catalog effort
+// token the row is decorated with ("" for a bare row); it is converted to an
+// effort.Level here, at the boundary, for the route.
+func (h *Handler) codexRow(idTmpl, displayTmpl, alias, slug, display, level string) codexRow {
+	vars := templateVars{Alias: alias, Slug: slug, Display: display, Effort: level}
 	return codexRow{
 		model: PickerRow{
 			ID:          render(idTmpl, vars),
@@ -132,7 +137,7 @@ func (h *Handler) codexRow(idTmpl, displayTmpl, alias, slug, display, effort str
 		route: router.PickerRoute{
 			Backend:       router.BackendCodex,
 			UpstreamModel: slug,
-			Effort:        effort,
+			Effort:        effort.Level(level),
 		},
 	}
 }

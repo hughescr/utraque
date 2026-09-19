@@ -1,4 +1,16 @@
-package anthropic
+// Package synthetic defines the thinking blocks utraque mints itself for a
+// Codex turn: the marker that tags them and the codec that lets a Codex
+// reasoning item ride inside one across a round trip through the client.
+//
+// The Codex translators mint these blocks and the Anthropic leg's sanitizer
+// strips them, so the identity belongs to neither. It lives here, working only
+// on strings, so both sides can share it without the translators depending on
+// the Anthropic passthrough leg. The sanitizer itself, which takes Anthropic
+// schema types, stays in internal/anthropic.
+//
+// Dependency contract: synthetic imports only the standard library, so any
+// package in the tree may import it without creating a cycle.
+package synthetic
 
 import (
 	"encoding/base64"
@@ -6,8 +18,21 @@ import (
 	"strings"
 )
 
-// This file defines how a Codex reasoning item survives a round trip through
-// the client.
+// Marker tags every thinking block utraque mints for a Codex turn. Anthropic
+// signs real thinking blocks and rejects a replayed block whose signature it
+// did not issue, so a marked block must be stripped before the history is sent
+// to the Anthropic leg. The marker is a fixed constant, never derived, so the
+// detection scan is a single substring search.
+//
+// The marker lives ONLY where utraque itself writes bytes: the "signature"
+// field of a thinking block, and the "data" field of a redacted_thinking
+// block. It is deliberately not looked for in "thinking" text — that text is
+// model prose, and a session reasoning about utraque's own source would
+// otherwise have its genuine, Anthropic-signed thinking blocks stripped.
+const Marker = "utraque-synthetic-v1:"
+
+// The rest of this file defines how a Codex reasoning item survives a round
+// trip through the client.
 //
 // The Responses backend caches a prompt prefix only while the replayed
 // conversation matches the token sequence the model actually saw, and that
@@ -18,11 +43,11 @@ import (
 //
 // utraque is stateless per request, so the blob has to come back from the
 // client. It rides in the signature of the synthetic thinking block utraque
-// already mints for every reasoning item (see SyntheticThinkingMarker): the
-// client replays that block in the next turn's history, and the request
-// translator turns it back into a reasoning input item. The Anthropic-leg
-// sanitizer strips these blocks before they can reach Anthropic, so the
-// fabricated signature is never presented to a backend that would reject it.
+// already mints for every reasoning item (see Marker): the client replays that
+// block in the next turn's history, and the request translator turns it back
+// into a reasoning input item. The Anthropic-leg sanitizer strips these blocks
+// before they can reach Anthropic, so the fabricated signature is never
+// presented to a backend that would reject it.
 //
 // A signature that does not carry a payload — one minted before this existed,
 // or one for a reasoning item whose stream broke before its encrypted content
@@ -61,7 +86,7 @@ func EncodeReasoningSignature(id, enc string) string {
 		// the caller on its payload-free path if it somehow does.
 		return ""
 	}
-	return SyntheticThinkingMarker + reasoningSigTag + base64.RawURLEncoding.EncodeToString(b)
+	return Marker + reasoningSigTag + base64.RawURLEncoding.EncodeToString(b)
 }
 
 // DecodeReasoningSignature recovers the reasoning item a signature carries. ok
@@ -70,7 +95,7 @@ func EncodeReasoningSignature(id, enc string) string {
 // error. A payload whose encrypted content is empty is also rejected: an empty
 // blob would serialise a reasoning item the backend cannot use.
 func DecodeReasoningSignature(sig string) (id, enc string, ok bool) {
-	rest, found := strings.CutPrefix(sig, SyntheticThinkingMarker)
+	rest, found := strings.CutPrefix(sig, Marker)
 	if !found {
 		return "", "", false
 	}

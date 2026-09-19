@@ -34,18 +34,6 @@ const (
 	PartOutputText = "output_text"
 )
 
-// Reasoning effort levels the backend accepts, lowest to highest. This mirrors
-// the catalog's supported_reasoning_levels ordering and is the canonical order
-// the request translator clamps against.
-const (
-	EffortLow    = "low"
-	EffortMedium = "medium"
-	EffortHigh   = "high"
-	EffortXHigh  = "xhigh"
-	EffortMax    = "max"
-	EffortUltra  = "ultra"
-)
-
 // Tool-choice string modes on a Responses request. Anthropic's auto/any/none
 // map onto auto/required/none; a specific {type:tool,name} maps onto the
 // FunctionToolChoice object form instead.
@@ -223,7 +211,9 @@ func FunctionChoice(n string) *ToolChoice { return &ToolChoice{Function: n} }
 
 // Reasoning is the Responses request reasoning block: the effort level and an
 // optional summary mode. Summary is omitted when empty (the backend then emits
-// no reasoning summary).
+// no reasoning summary). Effort is the raw wire token: the recognised levels
+// and their order live in internal/effort, and the request translator writes
+// string(level) here at the boundary, so this package stays stdlib-only.
 type Reasoning struct {
 	Effort  string `json:"effort,omitempty"`
 	Summary string `json:"summary,omitempty"`

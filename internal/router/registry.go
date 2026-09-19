@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	"github.com/hughescr/utraque/internal/effort"
 )
 
 // CatalogEntry is the minimal shape router needs from a live model-catalog
@@ -430,10 +432,12 @@ func tierRank(t AliasTier) int {
 // to request. Anthropic picker routes carry no UpstreamModel: the Anthropic leg
 // forwards the request body untouched, and Resolve leaves
 // Decision.UpstreamModel empty for that backend whatever the route holds.
+// Effort is the level an "<alias>-<effort>" row was advertised with, or empty
+// for a bare row; Resolve reports it at suffix precedence.
 type PickerRoute struct {
 	Backend       Backend
 	UpstreamModel string
-	Effort        string
+	Effort        effort.Level
 }
 
 // SetPickerRoutes replaces the whole picker-id tier with routes. Discovery

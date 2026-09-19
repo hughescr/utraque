@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net/http"
 
+	"github.com/hughescr/utraque/internal/effort"
 	"github.com/hughescr/utraque/internal/leg"
 )
 
@@ -63,14 +64,16 @@ const (
 )
 
 // Effort provenance, highest precedence first. A Decision records which of
-// these supplied its Effort so a later phase can apply the plan's precedence
-// order (suffix > anthropic-beta > config > catalog) without re-deriving it.
+// these supplied its Effort so the request translator can apply the
+// precedence order (suffix > anthropic-beta > config > catalog) without
+// re-deriving it. The values are effort.Source; these names are kept so
+// existing call sites read as before.
 const (
-	EffortSourceSuffix  = "suffix"
-	EffortSourceBeta    = "anthropic-beta"
-	EffortSourceConfig  = "config"
-	EffortSourceCatalog = "catalog"
-	EffortSourceNone    = ""
+	EffortSourceSuffix  = effort.SourceSuffix
+	EffortSourceBeta    = effort.SourceBeta
+	EffortSourceConfig  = effort.SourceConfig
+	EffortSourceCatalog = effort.SourceCatalog
+	EffortSourceNone    = effort.SourceNone
 )
 
 // Decision is the routing verdict for one client-supplied model string.
@@ -81,13 +84,15 @@ const (
 // spelling, when something needs it, is Request.Raw — the Anthropic leg
 // forwards that untouched. It is the single copy of the caller's model string
 // on a Request. UpstreamModel is the slug the Codex leg should ask for, and is
-// empty for the Anthropic backend, which does not rewrite the model.
+// empty for the Anthropic backend, which does not rewrite the model. Effort is
+// the reasoning-effort level a model-name suffix asked for, if any, and
+// EffortSource says where it came from.
 type Decision struct {
 	Backend       Backend
 	UpstreamModel string
 	ClientModel   string
-	Effort        string
-	EffortSource  string
+	Effort        effort.Level
+	EffortSource  effort.Source
 }
 
 // Request is one dispatched call: the raw body already read by the front

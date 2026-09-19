@@ -249,7 +249,7 @@ func (l *Leg) Messages(w http.ResponseWriter, r *http.Request, rq *router.Reques
 
 	// The resolved effort belongs on the request line: "why did this answer
 	// take so long" is usually answered by the effort, not the model.
-	obs.SummaryFrom(ctx).SetEffort(meta.Effort.Applied)
+	obs.SummaryFrom(ctx).SetEffort(meta.Effort.Applied.String())
 
 	// The request body as it was received. This is prompt text, which is why
 	// tracing is behind its own env var and prints a warning at startup.
@@ -619,9 +619,9 @@ func logTranslation(ctx context.Context, log *slog.Logger, rq *router.Request, m
 	}
 	attrs := []slog.Attr{
 		slog.String("upstream_model", rq.Dec.UpstreamModel),
-		slog.String("effort", meta.Effort.Applied),
-		slog.String("effort_requested", meta.Effort.Requested),
-		slog.String("effort_source", meta.Effort.Source),
+		slog.String("effort", meta.Effort.Applied.String()),
+		slog.String("effort_requested", meta.Effort.Requested.String()),
+		slog.String("effort_source", meta.Effort.Source.String()),
 		slog.Bool("effort_clamped", meta.Effort.Clamped),
 		// The reason is folded to the bool this key has always carried; the
 		// reason and trigger names get keys of their own in a later log-schema

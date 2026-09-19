@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/hughescr/utraque/internal/apierr"
+	"github.com/hughescr/utraque/internal/effort"
 	"github.com/hughescr/utraque/internal/router"
 )
 
@@ -235,7 +236,8 @@ func TestResolveCatalogSlugEndingInAnEffortWord(t *testing.T) {
 // hard-404s on a row utraque itself served.
 func TestCompatPrefixFallsThroughToTheRawSlug(t *testing.T) {
 	cases := []struct {
-		name, model, wantUpstream, wantEffort string
+		name, model, wantUpstream string
+		wantEffort                effort.Level
 	}{
 		{"unaliased raw slug", "anthropic-compat.gpt-5.9-nova", "gpt-5.9-nova", ""},
 		{"unaliased raw slug with effort", "anthropic-compat.gpt-5.9-nova-high", "gpt-5.9-nova", "high"},
@@ -311,7 +313,8 @@ func TestOverrideMakesAnIrregularSlugReachable(t *testing.T) {
 	reg.LoadCatalog([]router.CatalogEntry{{Slug: "gpt-5.7-codex-nova"}})
 
 	cases := []struct {
-		name, model, wantUpstream, wantEffort string
+		name, model, wantUpstream string
+		wantEffort                effort.Level
 	}{
 		{"bare codename", "nova", "gpt-5.7-codex-nova", ""},
 		{"pinned codename-version", "nova-5.7", "gpt-5.7-codex-nova", ""},

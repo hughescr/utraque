@@ -17,10 +17,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hughescr/utraque/internal/anthropic"
 	"github.com/hughescr/utraque/internal/anthropic/schema"
 	"github.com/hughescr/utraque/internal/apierr"
 	"github.com/hughescr/utraque/internal/sse"
+	"github.com/hughescr/utraque/internal/synthetic"
 	"github.com/hughescr/utraque/internal/translate/stream"
 )
 
@@ -565,9 +565,9 @@ func TestSyntheticSignatureMarker(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if !strings.Contains(string(got), anthropic.SyntheticThinkingMarker) {
+	if !strings.Contains(string(got), synthetic.Marker) {
 		t.Errorf("thinking close is missing the synthetic marker %q:\n%s",
-			anthropic.SyntheticThinkingMarker, got)
+			synthetic.Marker, got)
 	}
 }
 
@@ -1076,7 +1076,7 @@ func TestMidStreamErrorSignsAnOpenThinkingBlock(t *testing.T) {
 		t.Fatalf("fixture should terminate in an error, got %+v", res)
 	}
 	checkGrammar(t, got)
-	if !strings.Contains(string(got), anthropic.SyntheticThinkingMarker) {
+	if !strings.Contains(string(got), synthetic.Marker) {
 		t.Errorf("a thinking block closed by a mid-stream error carries no synthetic signature:\n%s", got)
 	}
 }

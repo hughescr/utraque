@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"strconv"
 
-	"github.com/hughescr/utraque/internal/anthropic"
 	"github.com/hughescr/utraque/internal/anthropic/schema"
+	"github.com/hughescr/utraque/internal/synthetic"
 )
 
 // Block kinds map one-to-one onto the Anthropic content block types utraque
@@ -296,10 +296,10 @@ func (t *Translator) enforceBounds(sink Sink) error {
 // response id and output index. That block is still marked as ours — which is
 // what stops it reaching Anthropic — it simply has nothing to replay.
 func (t *Translator) syntheticSignature(b *block) string {
-	if sig := anthropic.EncodeReasoningSignature(b.reasoningID, b.reasoningEnc); sig != "" {
+	if sig := synthetic.EncodeReasoningSignature(b.reasoningID, b.reasoningEnc); sig != "" {
 		return sig
 	}
-	return anthropic.SyntheticThinkingMarker + t.responseID + "-" + strconv.Itoa(b.outIdx)
+	return synthetic.Marker + t.responseID + "-" + strconv.Itoa(b.outIdx)
 }
 
 // deltaSize is the buffered byte cost of one delta.

@@ -10,8 +10,9 @@
 // discarded.
 //
 // This package holds behaviour, not wire types, so it may import the router
-// (for the routing Decision and its effort provenance) and both the aschema
-// and cschema packages. Those packages themselves stay stdlib-only.
+// (for the routing Decision), internal/effort (for the effort levels and
+// their provenance) and both the aschema and cschema packages. Those packages
+// themselves stay stdlib-only.
 package request
 
 import (
@@ -23,10 +24,11 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/hughescr/utraque/internal/anthropic"
 	"github.com/hughescr/utraque/internal/anthropic/schema"
 	"github.com/hughescr/utraque/internal/codex/schema"
+	"github.com/hughescr/utraque/internal/effort"
 	"github.com/hughescr/utraque/internal/router"
+	"github.com/hughescr/utraque/internal/synthetic"
 	"github.com/hughescr/utraque/internal/toolschema"
 )
 
@@ -42,18 +44,6 @@ var DefaultMutatingTools = map[string]bool{
 	"Bash":         true,
 	"BashOutput":   true,
 	"KillShell":    true,
-}
-
-// effortRank is the canonical ordering of reasoning-effort levels, lowest to
-// highest, used to clamp a requested effort DOWN to a model's highest supported
-// level. It matches the catalog's supported_reasoning_levels ordering.
-var effortRank = map[string]int{
-	cschema.EffortLow:    0,
-	cschema.EffortMedium: 1,
-	cschema.EffortHigh:   2,
-	cschema.EffortXHigh:  3,
-	cschema.EffortMax:    4,
-	cschema.EffortUltra:  5,
 }
 
 // SummaryNone is the catalog's sentinel for "request no reasoning summary". It
@@ -127,10 +117,10 @@ type Options struct {
 	// BetaEffort is an effort level extracted from the request's anthropic-beta
 	// header by the caller. It sits below a model-name suffix and above the
 	// per-model config override in the effort precedence.
-	BetaEffort string
+	BetaEffort effort.Level
 	// ConfigEffort is a per-model config override for the effort level. It sits
 	// below the anthropic-beta signal and above the catalog default.
-	ConfigEffort string
+	ConfigEffort effort.Level
 	// Summary overrides the reasoning summary mode. Empty falls back to the
 	// model's default_reasoning_summary. A value of SummaryNone (from either
 	// source) omits the summary field entirely.
@@ -150,11 +140,12 @@ func (o Options) mutatingSet() map[string]bool {
 // EffortResult records how the reasoning effort was resolved: the level chosen
 // by precedence (Requested), the level actually sent after clamping to the
 // model's supported set (Applied), which precedence source supplied it, and
-// whether clamping changed it.
+// whether clamping changed it. Applied may be a token effort does not
+// recognise when the catalog says the model supports it verbatim.
 type EffortResult struct {
-	Requested string
-	Applied   string
-	Source    string
+	Requested effort.Level
+	Applied   effort.Level
+	Source    effort.Source
 	Clamped   bool
 }
 
@@ -461,7 +452,7 @@ func translateMessages(messages []aschema.Message) (messagesResult, error) {
 				if blk.Type == aschema.BlockRedactedThinking {
 					sig = blk.Data
 				}
-				if id, enc, ok := anthropic.DecodeReasoningSignature(sig); ok {
+				if id, enc, ok := synthetic.DecodeReasoningSignature(sig); ok {
 					flush()
 					items = append(items, cschema.ReasoningItem(id, enc))
 					replayed++
@@ -669,78 +660,42 @@ func translateReasoning(dec router.Decision, model cschema.CatalogModel, opts Op
 	if applied == "" && emitSummary == "" {
 		return nil, res, emitSummary
 	}
-	return &cschema.Reasoning{Effort: applied, Summary: emitSummary}, res, emitSummary
+	return &cschema.Reasoning{Effort: string(applied), Summary: emitSummary}, res, emitSummary
 }
 
 // chooseEffort applies the effort precedence and returns the chosen level and
 // its provenance, before any clamping. A model-name suffix (already parsed by
 // the router into the Decision) wins; then the anthropic-beta signal; then the
-// per-model config override; then the catalog default.
-func chooseEffort(dec router.Decision, model cschema.CatalogModel, opts Options) (effort, source string) {
-	if dec.EffortSource == router.EffortSourceSuffix && dec.Effort != "" {
-		return dec.Effort, router.EffortSourceSuffix
+// per-model config override; then the catalog default. The catalog default is
+// a raw token converted here, at the boundary: it need not be a level effort
+// recognises, and clampEffort tolerates one that is not.
+func chooseEffort(dec router.Decision, model cschema.CatalogModel, opts Options) (effort.Level, effort.Source) {
+	if dec.EffortSource == effort.SourceSuffix && dec.Effort != "" {
+		return dec.Effort, effort.SourceSuffix
 	}
 	if opts.BetaEffort != "" {
-		return opts.BetaEffort, router.EffortSourceBeta
+		return opts.BetaEffort, effort.SourceBeta
 	}
 	if opts.ConfigEffort != "" {
-		return opts.ConfigEffort, router.EffortSourceConfig
+		return opts.ConfigEffort, effort.SourceConfig
 	}
 	if model.DefaultReasoningLevel != "" {
-		return model.DefaultReasoningLevel, router.EffortSourceCatalog
+		return effort.Level(model.DefaultReasoningLevel), effort.SourceCatalog
 	}
-	return "", router.EffortSourceNone
+	return "", effort.SourceNone
 }
 
-// clampEffort clamps a requested effort to the model's supported levels: if the
-// model supports it, it passes unchanged; otherwise it is clamped DOWN to the
-// highest supported level not exceeding the request (or, if the request sits
-// below every supported level, UP to the lowest supported one). A model that
-// declares no supported levels leaves the request unchanged (nothing to clamp
-// against). Returns the applied level and whether clamping changed it.
-func clampEffort(requested string, model cschema.CatalogModel) (applied string, clamped bool) {
-	if requested == "" {
-		return "", false
-	}
-	supported := model.SupportedEfforts()
-	if len(supported) == 0 {
-		return requested, false // no catalog data to validate against
-	}
-	if model.SupportsEffort(requested) {
-		return requested, false
-	}
-
-	reqRank, ok := effortRank[requested]
-	if !ok {
-		// An effort the canonical order doesn't know (e.g. a config or header
-		// typo like "hgh"), and the model doesn't support it verbatim. Treat it
-		// as below the floor so it clamps DOWN to the lowest supported level
-		// rather than escalating to the model's max — an unrecognised token
-		// must never silently buy the most expensive reasoning tier.
-		reqRank = -1
-	}
-
-	bestBelow, bestBelowRank := "", -1
-	lowest, lowestRank := "", len(effortRank)+1
-	for _, e := range supported {
-		r, known := effortRank[e]
-		if !known {
-			continue
-		}
-		if r < lowestRank {
-			lowest, lowestRank = e, r
-		}
-		if r <= reqRank && r > bestBelowRank {
-			bestBelow, bestBelowRank = e, r
-		}
-	}
-	if bestBelow != "" {
-		return bestBelow, true
-	}
-	if lowest != "" {
-		return lowest, true // request below all supported; clamp up to lowest
-	}
-	return requested, false // supported levels were all unknown tokens
+// clampEffort clamps a requested effort to the model's supported levels via
+// effort.Clamp: if the model supports it, it passes unchanged; otherwise it is
+// clamped DOWN to the highest supported level not exceeding the request (or,
+// if the request sits below every supported level, UP to the lowest supported
+// one). A model that declares no supported levels leaves the request unchanged
+// (nothing to clamp against). An effort the canonical order does not know
+// (e.g. a config or header typo like "hgh") that the model does not support
+// verbatim ranks below the floor, so it clamps DOWN rather than escalating to
+// the model's max. Returns the applied level and whether clamping changed it.
+func clampEffort(requested effort.Level, model cschema.CatalogModel) (applied effort.Level, clamped bool) {
+	return effort.Clamp(requested, model.SupportedEfforts())
 }
 
 // droppedParams lists the Anthropic sampling/limit params present in req that

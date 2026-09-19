@@ -11,6 +11,7 @@ import (
 
 	"github.com/hughescr/utraque/internal/anthropic/schema"
 	"github.com/hughescr/utraque/internal/codex/schema"
+	"github.com/hughescr/utraque/internal/effort"
 	"github.com/hughescr/utraque/internal/router"
 	"github.com/hughescr/utraque/internal/translate/request"
 )
@@ -28,39 +29,42 @@ const requestsDir = "../../../testdata/requests"
 func solModel() cschema.CatalogModel {
 	return cschema.CatalogModel{
 		Slug:                    "gpt-5.6-sol",
-		DefaultReasoningLevel:   cschema.EffortLow,
+		DefaultReasoningLevel:   string(effort.Low),
 		DefaultReasoningSummary: "none",
 		SupportedReasoningLevels: levels(
-			cschema.EffortLow, cschema.EffortMedium, cschema.EffortHigh,
-			cschema.EffortXHigh, cschema.EffortMax, cschema.EffortUltra),
+			effort.Low, effort.Medium, effort.High,
+			effort.XHigh, effort.Max, effort.Ultra),
 	}
 }
 
 func lunaModel() cschema.CatalogModel {
 	return cschema.CatalogModel{
 		Slug:                    "gpt-5.6-luna",
-		DefaultReasoningLevel:   cschema.EffortMedium,
+		DefaultReasoningLevel:   string(effort.Medium),
 		DefaultReasoningSummary: "none",
 		SupportedReasoningLevels: levels(
-			cschema.EffortLow, cschema.EffortMedium, cschema.EffortHigh,
-			cschema.EffortXHigh, cschema.EffortMax),
+			effort.Low, effort.Medium, effort.High,
+			effort.XHigh, effort.Max),
 	}
 }
 
 func gpt54Model() cschema.CatalogModel {
 	return cschema.CatalogModel{
 		Slug:                    "gpt-5.4",
-		DefaultReasoningLevel:   cschema.EffortMedium,
+		DefaultReasoningLevel:   string(effort.Medium),
 		DefaultReasoningSummary: "none",
 		SupportedReasoningLevels: levels(
-			cschema.EffortLow, cschema.EffortMedium, cschema.EffortHigh, cschema.EffortXHigh),
+			effort.Low, effort.Medium, effort.High, effort.XHigh),
 	}
 }
 
-func levels(efforts ...string) []cschema.ReasoningLevel {
+// levels builds the catalog's supported_reasoning_levels from recognised
+// levels. The catalog carries raw tokens, so the conversion happens here, at
+// the fixture boundary, exactly as it does for a real catalog document.
+func levels(efforts ...effort.Level) []cschema.ReasoningLevel {
 	out := make([]cschema.ReasoningLevel, len(efforts))
 	for i, e := range efforts {
-		out[i] = cschema.ReasoningLevel{Effort: e}
+		out[i] = cschema.ReasoningLevel{Effort: string(e)}
 	}
 	return out
 }
@@ -85,11 +89,11 @@ func defaultCase() caseCfg {
 // (without the .anthropic.json suffix).
 var caseConfigs = map[string]caseCfg{
 	"effort_suffix": {
-		dec:   router.Decision{Backend: router.BackendCodex, UpstreamModel: "gpt-5.6-sol", Effort: cschema.EffortHigh, EffortSource: router.EffortSourceSuffix},
+		dec:   router.Decision{Backend: router.BackendCodex, UpstreamModel: "gpt-5.6-sol", Effort: effort.High, EffortSource: router.EffortSourceSuffix},
 		model: solModel(),
 	},
 	"effort_clamp_down": {
-		dec:   router.Decision{Backend: router.BackendCodex, UpstreamModel: "gpt-5.4", Effort: cschema.EffortUltra, EffortSource: router.EffortSourceSuffix},
+		dec:   router.Decision{Backend: router.BackendCodex, UpstreamModel: "gpt-5.4", Effort: effort.Ultra, EffortSource: router.EffortSourceSuffix},
 		model: gpt54Model(),
 	},
 }
@@ -157,7 +161,7 @@ func TestGolden(t *testing.T) {
 // > config > catalog default) and the clamp behaviour, including an effort above
 // a model's max clamping down and a request below a model's floor clamping up.
 func TestEffortMatrix(t *testing.T) {
-	suffix := func(e string) router.Decision {
+	suffix := func(e effort.Level) router.Decision {
 		return router.Decision{UpstreamModel: "m", Effort: e, EffortSource: router.EffortSourceSuffix}
 	}
 	none := router.Decision{UpstreamModel: "m"}
@@ -167,44 +171,44 @@ func TestEffortMatrix(t *testing.T) {
 		dec         router.Decision
 		model       cschema.CatalogModel
 		opts        request.Options
-		wantApplied string
-		wantSource  string
+		wantApplied effort.Level
+		wantSource  effort.Source
 		wantClamped bool
 	}{
 		// Precedence: suffix beats everything below it.
-		{"suffix_wins", suffix(cschema.EffortHigh), solModel(),
-			request.Options{BetaEffort: cschema.EffortLow, ConfigEffort: cschema.EffortMedium},
-			cschema.EffortHigh, router.EffortSourceSuffix, false},
+		{"suffix_wins", suffix(effort.High), solModel(),
+			request.Options{BetaEffort: effort.Low, ConfigEffort: effort.Medium},
+			effort.High, router.EffortSourceSuffix, false},
 		// Precedence: beta beats config and catalog.
 		{"beta_wins", none, solModel(),
-			request.Options{BetaEffort: cschema.EffortMedium, ConfigEffort: cschema.EffortLow},
-			cschema.EffortMedium, router.EffortSourceBeta, false},
+			request.Options{BetaEffort: effort.Medium, ConfigEffort: effort.Low},
+			effort.Medium, router.EffortSourceBeta, false},
 		// Precedence: config beats catalog default.
 		{"config_wins", none, solModel(),
-			request.Options{ConfigEffort: cschema.EffortHigh},
-			cschema.EffortHigh, router.EffortSourceConfig, false},
+			request.Options{ConfigEffort: effort.High},
+			effort.High, router.EffortSourceConfig, false},
 		// Precedence: catalog default when nothing else is set.
 		{"catalog_default", none, solModel(), request.Options{},
-			cschema.EffortLow, router.EffortSourceCatalog, false},
+			effort.Low, router.EffortSourceCatalog, false},
 		// Clamp DOWN: ultra requested on a model topping out at xhigh.
-		{"clamp_down_to_xhigh", suffix(cschema.EffortUltra), gpt54Model(), request.Options{},
-			cschema.EffortXHigh, router.EffortSourceSuffix, true},
+		{"clamp_down_to_xhigh", suffix(effort.Ultra), gpt54Model(), request.Options{},
+			effort.XHigh, router.EffortSourceSuffix, true},
 		// Clamp DOWN: ultra requested on luna (tops out at max).
-		{"clamp_down_to_max", suffix(cschema.EffortUltra), lunaModel(), request.Options{},
-			cschema.EffortMax, router.EffortSourceSuffix, true},
+		{"clamp_down_to_max", suffix(effort.Ultra), lunaModel(), request.Options{},
+			effort.Max, router.EffortSourceSuffix, true},
 		// No clamp: max is supported by sol.
-		{"no_clamp_supported", suffix(cschema.EffortMax), solModel(), request.Options{},
-			cschema.EffortMax, router.EffortSourceSuffix, false},
+		{"no_clamp_supported", suffix(effort.Max), solModel(), request.Options{},
+			effort.Max, router.EffortSourceSuffix, false},
 		// Clamp UP: a model whose floor is medium, request low.
-		{"clamp_up_to_floor", suffix(cschema.EffortLow),
-			cschema.CatalogModel{DefaultReasoningLevel: cschema.EffortMedium,
-				SupportedReasoningLevels: levels(cschema.EffortMedium, cschema.EffortHigh)},
+		{"clamp_up_to_floor", suffix(effort.Low),
+			cschema.CatalogModel{DefaultReasoningLevel: string(effort.Medium),
+				SupportedReasoningLevels: levels(effort.Medium, effort.High)},
 			request.Options{},
-			cschema.EffortMedium, router.EffortSourceSuffix, true},
+			effort.Medium, router.EffortSourceSuffix, true},
 		// No catalog levels: request passes through unclamped.
-		{"no_catalog_levels", suffix(cschema.EffortUltra),
+		{"no_catalog_levels", suffix(effort.Ultra),
 			cschema.CatalogModel{}, request.Options{},
-			cschema.EffortUltra, router.EffortSourceSuffix, false},
+			effort.Ultra, router.EffortSourceSuffix, false},
 	}
 
 	req := &aschema.MessagesRequest{
@@ -230,7 +234,7 @@ func TestEffortMatrix(t *testing.T) {
 			if out.Reasoning == nil {
 				t.Fatalf("reasoning block is nil")
 			}
-			if out.Reasoning.Effort != tc.wantApplied {
+			if out.Reasoning.Effort != string(tc.wantApplied) {
 				t.Errorf("wire reasoning.effort = %q, want %q", out.Reasoning.Effort, tc.wantApplied)
 			}
 		})
@@ -604,8 +608,8 @@ func TestUnknownEffortClampsToFloor(t *testing.T) {
 	if err != nil {
 		t.Fatalf("translate: %v", err)
 	}
-	if meta.Effort.Applied != cschema.EffortLow {
-		t.Errorf("applied = %q, want %q (floor, not max)", meta.Effort.Applied, cschema.EffortLow)
+	if meta.Effort.Applied != effort.Low {
+		t.Errorf("applied = %q, want %q (floor, not max)", meta.Effort.Applied, effort.Low)
 	}
 	if !meta.Effort.Clamped {
 		t.Error("expected clamped=true for an unknown effort token")

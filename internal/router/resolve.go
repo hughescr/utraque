@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/hughescr/utraque/internal/apierr"
+	"github.com/hughescr/utraque/internal/effort"
 )
 
 // anthropicPrefixes are non-"claude"/"anthropic"-prefixed shorthands that
@@ -66,50 +67,24 @@ func resolveDeepSeek(lower, clientModel string) (Decision, bool) {
 	}, true
 }
 
-// effortLevels are the suffix tokens ParseEffortSuffix recognises as
-// reasoning-effort levels, drawn from the levels named across the plan
-// (sol up to ultra, luna up to max, gpt-5.4 up to xhigh).
-//
-// Whether a *specific* resolved model actually supports a given level is
-// NOT checked here.
-//
-// TODO(phase 3/4): once the catalog carries per-model
-// supported_reasoning_levels, validate/clamp the parsed level against the
-// resolved model's supported set instead of accepting any of these
-// unconditionally for any model.
-var effortLevels = map[string]bool{
-	"low":    true,
-	"medium": true,
-	"high":   true,
-	"max":    true,
-	"ultra":  true,
-	"xhigh":  true,
-}
-
-// KnownEffort reports whether level is a reasoning-effort token
-// ParseEffortSuffix can split back off a model name.
-//
-// internal/discovery consults it before emitting an "<alias>-<effort>" picker
-// row: a row whose effort token cannot be parsed back is only routable while the
-// in-memory picker tier that recorded it survives, so it must not be advertised
-// at all. Advertising a row that dies at the next restart is worse than not
-// offering it.
-func KnownEffort(level string) bool { return effortLevels[strings.ToLower(level)] }
-
 // ParseEffortSuffix splits a trailing "-<level>" reasoning-effort suffix
 // off name, e.g. "sol-high" -> ("sol", "high", true) and
 // "sol-5.6-high" -> ("sol-5.6", "high", true). name is expected to already
 // be lowercased. Returns ok=false (base=name) when there's no hyphen or the
-// trailing token isn't a recognised effort level — this is what keeps
+// trailing token isn't a level effort.Known recognises — this is what keeps
 // "gpt-5.4-mini" from being misparsed as base "gpt-5.4" + bogus effort
 // "mini".
-func ParseEffortSuffix(name string) (base string, effort string, ok bool) {
+//
+// Whether a *specific* resolved model actually supports the level is NOT
+// checked here; the request translator clamps it against the resolved
+// model's catalog entry.
+func ParseEffortSuffix(name string) (base string, level effort.Level, ok bool) {
 	idx := strings.LastIndex(name, "-")
 	if idx < 0 {
 		return name, "", false
 	}
-	suffix := name[idx+1:]
-	if !effortLevels[suffix] {
+	suffix := effort.Level(name[idx+1:])
+	if !effort.Known(suffix) {
 		return name, "", false
 	}
 	return name[:idx], suffix, true
@@ -218,14 +193,14 @@ func resolveGPTSlug(lower, clientModel string) (Decision, bool) {
 	if !strings.HasPrefix(lower, "gpt-") {
 		return Decision{}, false
 	}
-	base, effort, hasEffort := ParseEffortSuffix(lower)
+	base, level, hasEffort := ParseEffortSuffix(lower)
 	dec := Decision{
 		Backend:       BackendCodex,
 		UpstreamModel: base,
 		ClientModel:   clientModel,
 	}
 	if hasEffort {
-		dec.Effort = effort
+		dec.Effort = level
 		dec.EffortSource = EffortSourceSuffix
 	}
 	return dec, true
@@ -274,7 +249,7 @@ func resolveCodex(reg *Registry, lower string, clientModel string) (Decision, bo
 		}, true
 	}
 
-	base, effort, hasEffort := ParseEffortSuffix(lower)
+	base, level, hasEffort := ParseEffortSuffix(lower)
 	if !hasEffort {
 		// base == lower, which the lookup above already rejected.
 		return Decision{}, false
@@ -289,7 +264,7 @@ func resolveCodex(reg *Registry, lower string, clientModel string) (Decision, bo
 		Backend:       BackendCodex,
 		UpstreamModel: upstream,
 		ClientModel:   clientModel,
-		Effort:        effort,
+		Effort:        level,
 		EffortSource:  EffortSourceSuffix,
 	}, true
 }

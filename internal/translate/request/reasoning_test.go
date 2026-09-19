@@ -9,10 +9,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/hughescr/utraque/internal/anthropic"
 	"github.com/hughescr/utraque/internal/anthropic/schema"
 	"github.com/hughescr/utraque/internal/codex/schema"
 	"github.com/hughescr/utraque/internal/router"
+	"github.com/hughescr/utraque/internal/synthetic"
 	"github.com/hughescr/utraque/internal/translate/request"
 	"github.com/hughescr/utraque/internal/translate/stream"
 )
@@ -152,7 +152,7 @@ func TestUnreplayableThinkingIsDroppedAndCounted(t *testing.T) {
 		{Role: aschema.RoleUser, Content: contentOf(aschema.TextBlock("Hello."))},
 		{Role: aschema.RoleAssistant, Content: contentOf(
 			aschema.ThinkingBlock("genuine Claude thinking", "ErUBCkYIBRgCKkDdT8v0aGVudGhpbmc="),
-			aschema.ThinkingBlock("ours, from before encrypted content", anthropic.SyntheticThinkingMarker+"resp_9-0"),
+			aschema.ThinkingBlock("ours, from before encrypted content", synthetic.Marker+"resp_9-0"),
 			aschema.TextBlock("Hi."),
 		)},
 	}

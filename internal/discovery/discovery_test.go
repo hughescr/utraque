@@ -15,6 +15,7 @@ import (
 	"github.com/hughescr/utraque/internal/anthropic"
 	"github.com/hughescr/utraque/internal/codex/schema"
 	"github.com/hughescr/utraque/internal/discovery"
+	"github.com/hughescr/utraque/internal/effort"
 	"github.com/hughescr/utraque/internal/router"
 	"github.com/hughescr/utraque/internal/transport"
 )
@@ -345,7 +346,7 @@ func TestEmittedCodexIDsCarryTheRightUpstreamSlug(t *testing.T) {
 	for _, tc := range []struct {
 		id       string
 		upstream string
-		effort   string
+		effort   effort.Level
 	}{
 		{"anthropic-compat.sol", "gpt-5.6-sol", ""},
 		{"anthropic-compat.sol-5.6", "gpt-5.6-sol", ""},

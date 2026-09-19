@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/hughescr/utraque/internal/anthropic/schema"
+	"github.com/hughescr/utraque/internal/synthetic"
 	"github.com/hughescr/utraque/internal/transport"
 )
 
@@ -39,7 +40,7 @@ func TestSanitizeStripsMarkedThinkingBlocks(t *testing.T) {
 	body := []byte(`{"model":"claude-opus-5","messages":[` +
 		`{"role":"user","content":"hi"},` +
 		`{"role":"assistant","content":[` +
-		`{"type":"thinking","thinking":"gpt reasoning","signature":"` + SyntheticThinkingMarker + `abc"},` +
+		`{"type":"thinking","thinking":"gpt reasoning","signature":"` + synthetic.Marker + `abc"},` +
 		`{"type":"text","text":"hello"}]}],"max_tokens":1024}`)
 
 	got, changed, err := Sanitize(body)
@@ -77,7 +78,7 @@ func TestSanitizeStripsRedactedThinkingAndDropsEmptiedMessage(t *testing.T) {
 	body := []byte(`{"messages":[` +
 		`{"role":"user","content":"hi"},` +
 		`{"role":"assistant","content":[` +
-		`{"type":"redacted_thinking","data":"` + SyntheticThinkingMarker + `xyz"}]},` +
+		`{"type":"redacted_thinking","data":"` + synthetic.Marker + `xyz"}]},` +
 		`{"role":"user","content":"again"}]}`)
 
 	got, changed, err := Sanitize(body)
@@ -105,7 +106,7 @@ func TestSanitizePreservesUnknownTopLevelFieldsAndKeyOrder(t *testing.T) {
 	body := []byte(`{"model":"claude-opus-5",` +
 		`"future_field":{"nested":[1,2,3]},` +
 		`"messages":[{"role":"assistant","content":[` +
-		`{"type":"thinking","thinking":"x","signature":"` + SyntheticThinkingMarker + `s"},` +
+		`{"type":"thinking","thinking":"x","signature":"` + synthetic.Marker + `s"},` +
 		`{"type":"text","text":"kept"}]}],` +
 		`"metadata":{"user_id":"u1"}}`)
 
@@ -136,7 +137,7 @@ func TestSanitizeMarkerHitButNoSyntheticBlock(t *testing.T) {
 	// The marker appears in prose, not in a thinking block. Nothing to strip,
 	// so the body must come back untouched.
 	body := []byte(`{"messages":[{"role":"user","content":"what does ` +
-		SyntheticThinkingMarker + ` mean?"}]}`)
+		synthetic.Marker + ` mean?"}]}`)
 	got, changed, err := Sanitize(body)
 	if err != nil {
 		t.Fatalf("Sanitize: %v", err)
@@ -150,7 +151,7 @@ func TestSanitizeMarkerHitButNoSyntheticBlock(t *testing.T) {
 }
 
 func TestSanitizeFailsOpenOnNonObject(t *testing.T) {
-	body := []byte(`["` + SyntheticThinkingMarker + `"]`)
+	body := []byte(`["` + synthetic.Marker + `"]`)
 	got, changed, err := Sanitize(body)
 	if err == nil {
 		t.Error("err = nil, want an error for a non-object body")
@@ -164,7 +165,7 @@ func TestSanitizeFailsOpenOnNonObject(t *testing.T) {
 }
 
 func TestSanitizeNoMessagesKey(t *testing.T) {
-	body := []byte(`{"note":"` + SyntheticThinkingMarker + `x"}`)
+	body := []byte(`{"note":"` + synthetic.Marker + `x"}`)
 	got, changed, err := Sanitize(body)
 	if err != nil {
 		t.Fatalf("Sanitize: %v", err)
@@ -178,7 +179,7 @@ func TestSanitizeMessagesDoesNotMutateInput(t *testing.T) {
 	in := []aschema.Message{{
 		Role: aschema.RoleAssistant,
 		Content: aschema.BlockContent(
-			aschema.ThinkingBlock("x", SyntheticThinkingMarker+"s"),
+			aschema.ThinkingBlock("x", synthetic.Marker+"s"),
 			aschema.TextBlock("kept"),
 		),
 	}}
@@ -211,7 +212,7 @@ func TestSanitizerRunsOnThePassthroughPath(t *testing.T) {
 	defer proxy.Close()
 
 	marked := `{"model":"claude-opus-5","messages":[{"role":"assistant","content":[` +
-		`{"type":"thinking","thinking":"gpt","signature":"` + SyntheticThinkingMarker + `s"},` +
+		`{"type":"thinking","thinking":"gpt","signature":"` + synthetic.Marker + `s"},` +
 		`{"type":"text","text":"hi"}]}]}`
 	resp, err := noRedirectClient().Post(proxy.URL+"/v1/messages", "application/json", strings.NewReader(marked))
 	if err != nil {
@@ -250,7 +251,7 @@ func TestWithSanitizerOffForwardsMarkedBodyVerbatim(t *testing.T) {
 	defer proxy.Close()
 
 	marked := `{"messages":[{"role":"assistant","content":[` +
-		`{"type":"thinking","thinking":"x","signature":"` + SyntheticThinkingMarker + `s"}]}]}`
+		`{"type":"thinking","thinking":"x","signature":"` + synthetic.Marker + `s"}]}]}`
 	resp, err := noRedirectClient().Post(proxy.URL+"/v1/messages", "application/json", strings.NewReader(marked))
 	if err != nil {
 		t.Fatalf("post: %v", err)
@@ -269,7 +270,7 @@ func TestWithSanitizerOffForwardsMarkedBodyVerbatim(t *testing.T) {
 // that text would silently strip real signed blocks from replayed history.
 func TestSanitizeKeepsSignedBlockThatQuotesTheMarker(t *testing.T) {
 	body := []byte(`{"messages":[{"role":"assistant","content":[` +
-		`{"type":"thinking","thinking":"the constant is ` + SyntheticThinkingMarker +
+		`{"type":"thinking","thinking":"the constant is ` + synthetic.Marker +
 		` and it tags minted blocks","signature":"ErUBCkYIBBgCKk"},` +
 		`{"type":"text","text":"hello"}]}]}`)
 
@@ -294,7 +295,7 @@ func TestSanitizePreservesUnmodelledBlockFields(t *testing.T) {
 	const searchResult = `{"type":"web_search_tool_result","tool_use_id":"srvtoolu_1","content":[{"type":"web_search_result","url":"https://example.com","title":"T","page_age":"1 day","encrypted_content":"ZZZ"}]}`
 
 	body := []byte(`{"messages":[{"role":"assistant","content":[` +
-		`{"type":"thinking","thinking":"x","signature":"` + SyntheticThinkingMarker + `s"},` +
+		`{"type":"thinking","thinking":"x","signature":"` + synthetic.Marker + `s"},` +
 		cited + `,` + searchResult + `]}]}`)
 
 	got, changed, err := Sanitize(body)
@@ -322,7 +323,7 @@ func TestSanitizePreservesMessageKeyOrderAndUntouchedMessages(t *testing.T) {
 	const untouched = `{  "role" : "user" ,  "content" : [ {"type":"text","text":"spaced out"} ] }`
 	body := []byte(`{"messages":[` + untouched + `,` +
 		`{"role":"assistant","cache_hint":"keep","content":[` +
-		`{"type":"thinking","thinking":"x","signature":"` + SyntheticThinkingMarker + `s"},` +
+		`{"type":"thinking","thinking":"x","signature":"` + synthetic.Marker + `s"},` +
 		`{"type":"text","text":"kept"}]}]}`)
 
 	got, changed, err := Sanitize(body)
@@ -352,7 +353,7 @@ func TestSanitizePreservesMessageKeyOrderAndUntouchedMessages(t *testing.T) {
 // it is the likely cause of an otherwise baffling 400 from Anthropic.
 func TestSanitizeReportsHeadlessToolUse(t *testing.T) {
 	body := []byte(`{"thinking":{"type":"enabled"},"messages":[{"role":"assistant","content":[` +
-		`{"type":"thinking","thinking":"x","signature":"` + SyntheticThinkingMarker + `s"},` +
+		`{"type":"thinking","thinking":"x","signature":"` + synthetic.Marker + `s"},` +
 		`{"type":"tool_use","id":"tu1","name":"Bash","input":{"command":"ls"}}]}]}`)
 
 	_, rep, err := SanitizeWithReport(body)
@@ -371,7 +372,7 @@ func TestSanitizeReportsHeadlessToolUse(t *testing.T) {
 // meaningful: a turn with no tool_use is not at risk.
 func TestSanitizeDoesNotReportHeadlessToolUseForTextOnlyTurns(t *testing.T) {
 	body := []byte(`{"messages":[{"role":"assistant","content":[` +
-		`{"type":"thinking","thinking":"x","signature":"` + SyntheticThinkingMarker + `s"},` +
+		`{"type":"thinking","thinking":"x","signature":"` + synthetic.Marker + `s"},` +
 		`{"type":"text","text":"kept"}]}]}`)
 
 	_, rep, err := SanitizeWithReport(body)

@@ -8,22 +8,14 @@ import (
 	"strings"
 
 	"github.com/hughescr/utraque/internal/anthropic/schema"
+	"github.com/hughescr/utraque/internal/synthetic"
 )
 
-// SyntheticThinkingMarker tags every thinking block utraque mints for a Codex
-// turn. Anthropic signs real thinking blocks and rejects a replayed block whose
-// signature it did not issue, so a marked block must be stripped before the
-// history is sent to the Anthropic leg. The marker is a fixed constant, never
-// derived, so the detection scan is a single substring search.
-//
-// The marker lives ONLY where utraque itself writes bytes: the "signature"
-// field of a thinking block, and the "data" field of a redacted_thinking
-// block. It is deliberately not looked for in "thinking" text — that text is
-// model prose, and a session reasoning about utraque's own source would
-// otherwise have its genuine, Anthropic-signed thinking blocks stripped.
-const SyntheticThinkingMarker = "utraque-synthetic-v1:"
-
-var syntheticMarker = []byte(SyntheticThinkingMarker)
+// syntheticMarker is synthetic.Marker as bytes, for the allocation-free gate
+// HasSyntheticThinking runs on every Anthropic-leg body. The marker itself is
+// owned by internal/synthetic: the Codex translators mint it and this file
+// strips it, so neither side defines it.
+var syntheticMarker = []byte(synthetic.Marker)
 
 var errNotJSONObject = errors.New("utraque/anthropic: body is not a JSON object")
 
@@ -40,8 +32,8 @@ func IsSyntheticBlock(b aschema.ContentBlock) bool {
 	default:
 		return false
 	}
-	return strings.Contains(b.Signature, SyntheticThinkingMarker) ||
-		strings.Contains(b.Data, SyntheticThinkingMarker)
+	return strings.Contains(b.Signature, synthetic.Marker) ||
+		strings.Contains(b.Data, synthetic.Marker)
 }
 
 // SanitizeMessages returns in with synthetic thinking blocks removed, plus
@@ -222,11 +214,11 @@ func sanitizeRawMessage(rawMsg []byte, rep *Report) (out []byte, changed bool, d
 	dropped := 0
 	toolUse := false
 	for _, b := range blocks {
-		kind, synthetic, err := classifyRawBlock(b)
+		kind, ours, err := classifyRawBlock(b)
 		if err != nil {
 			return nil, false, false, err
 		}
-		if synthetic {
+		if ours {
 			dropped++
 			continue
 		}
@@ -261,17 +253,17 @@ type blockMarks struct {
 	Data      string `json:"data"`
 }
 
-func classifyRawBlock(raw []byte) (kind string, synthetic bool, err error) {
+func classifyRawBlock(raw []byte) (kind string, ours bool, err error) {
 	var m blockMarks
 	if err := json.Unmarshal(raw, &m); err != nil {
 		return "", false, fmt.Errorf("utraque/anthropic: decode content block: %w", err)
 	}
 	switch m.Type {
 	case aschema.BlockThinking, aschema.BlockRedactedThinking:
-		synthetic = strings.Contains(m.Signature, SyntheticThinkingMarker) ||
-			strings.Contains(m.Data, SyntheticThinkingMarker)
+		ours = strings.Contains(m.Signature, synthetic.Marker) ||
+			strings.Contains(m.Data, synthetic.Marker)
 	}
-	return m.Type, synthetic, nil
+	return m.Type, ours, nil
 }
 
 // orderedObject is a JSON object whose keys keep their source order and whose
