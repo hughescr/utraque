@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -18,6 +19,7 @@ import (
 	"time"
 
 	"github.com/hughescr/utraque/internal/apierr"
+	"github.com/hughescr/utraque/internal/codex/schema"
 	"github.com/hughescr/utraque/internal/config"
 	"github.com/hughescr/utraque/internal/obs"
 	"github.com/hughescr/utraque/internal/proxyhdr"
@@ -1135,6 +1137,36 @@ func restoreRegistry(t *testing.T) {
 	t.Cleanup(router.DefaultRegistry.LoadStatic)
 }
 
+// TestAliasRepublishLogNamesTheBareAliases pins the republish line's list key
+// to bare_aliases (it was "families", a word the router no longer uses for
+// anything), so an operator grepping for the aliases in force finds them.
+func TestAliasRepublishLogNamesTheBareAliases(t *testing.T) {
+	var buf bytes.Buffer
+	log := slog.New(slog.NewJSONHandler(&buf, nil))
+	reg := router.NewRegistry()
+	load := newAliasLoader(reg, log)
+	load([]cschema.CatalogModel{{Slug: "gpt-5.6-sol", Visibility: "list"}})
+
+	var rec struct {
+		Msg         string   `json:"msg"`
+		Models      int      `json:"models"`
+		BareAliases []string `json:"bare_aliases"`
+		Families    []string `json:"families"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &rec); err != nil {
+		t.Fatalf("decode republish log %q: %v", buf.String(), err)
+	}
+	if rec.Msg != "router aliases republished from the live codex catalog" || rec.Models != 1 {
+		t.Errorf("republish record = %+v", rec)
+	}
+	if rec.Families != nil {
+		t.Errorf("republish record still carries families: %s", buf.String())
+	}
+	if len(rec.BareAliases) == 0 || !slices.Contains(rec.BareAliases, "sol") {
+		t.Errorf("bare_aliases = %v, want it to contain sol", rec.BareAliases)
+	}
+}
+
 // TestLiveCatalogRepublishesTheRouterAliases is the wiring the alias contract
 // rests on. Without it the registry stays on the compiled-in static seed for
 // the life of the process: a retired slug keeps resolving to a model the
@@ -1291,7 +1323,7 @@ data: {"type":"response.completed","response":{"id":"resp_drift","status":"compl
 			UnknownEventTypes map[string]int `json:"unknown_event_types"`
 		} `json:"codex_stream"`
 		CodexRouting struct {
-			Families []string `json:"families"`
+			BareAliases []string `json:"bare_aliases"`
 		} `json:"codex_routing"`
 	}
 	if err := json.NewDecoder(hresp.Body).Decode(&health); err != nil {
@@ -1313,7 +1345,7 @@ data: {"type":"response.completed","response":{"id":"resp_drift","status":"compl
 	if n := health.CodexStream.UnknownEventTypes["response.something_new"]; n != 1 {
 		t.Errorf("unknown_event_types[response.something_new] = %d, want 1", n)
 	}
-	if len(health.CodexRouting.Families) == 0 {
-		t.Error("codex_routing.families is empty; the router advertises no route families")
+	if len(health.CodexRouting.BareAliases) == 0 {
+		t.Error("codex_routing.bare_aliases is empty; the router advertises no bare aliases")
 	}
 }

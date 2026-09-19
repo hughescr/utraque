@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -194,5 +197,43 @@ func TestRunDiscoversCodexVersionBeforeCatalogWarm(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("run did not stop after cancellation")
+	}
+}
+
+// TestWarnDeprecatedEnvNamesOldAndNew captures the startup warning for a
+// deprecated provider-report variable and asserts it names both the variable
+// that was read and its replacement, and that nothing is logged when only the
+// new names, or nothing, is set.
+//
+// deprecated: remove in the next release, with warnDeprecatedEnv.
+func TestWarnDeprecatedEnvNamesOldAndNew(t *testing.T) {
+	var buf bytes.Buffer
+	log := slog.New(slog.NewJSONHandler(&buf, nil))
+
+	warnDeprecatedEnv(log, func(key string) string {
+		return map[string]string{config.EnvProviderCacheTTL: "45s"}[key]
+	})
+	var rec struct {
+		Level       string `json:"level"`
+		Msg         string `json:"msg"`
+		Deprecated  string `json:"deprecated"`
+		Replacement string `json:"replacement"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &rec); err != nil {
+		t.Fatalf("decode warning %q: %v", buf.String(), err)
+	}
+	if rec.Level != "WARN" || rec.Deprecated != config.EnvProviderCacheTTL || rec.Replacement != config.EnvProviderReportCacheTTL {
+		t.Errorf("warning = %+v, want WARN naming %s and %s", rec, config.EnvProviderCacheTTL, config.EnvProviderReportCacheTTL)
+	}
+	if !strings.Contains(rec.Msg, "deprecated") {
+		t.Errorf("msg = %q, want it to say the variable is deprecated", rec.Msg)
+	}
+
+	buf.Reset()
+	warnDeprecatedEnv(log, func(key string) string {
+		return map[string]string{config.EnvProviderReportCacheTTL: "45s", config.EnvProviderReportTimeout: "80s"}[key]
+	})
+	if buf.Len() != 0 {
+		t.Errorf("the new names alone produced a warning: %s", buf.String())
 	}
 }

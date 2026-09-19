@@ -134,7 +134,7 @@ func TestUnknownModelMessage(t *testing.T) {
 		t.Fatalf("ResolveWith unknown model error = %v, want *apierr.Error", err)
 	}
 
-	const want = `model "banana" not recognised; known route families: claude-*, anthropic-*, deepseek-flash, deepseek-v4-pro, gpt-*`
+	const want = `model "banana" not recognised; accepted model names: claude-*, anthropic-*, deepseek-flash, deepseek-v4-pro, gpt-*`
 	if apiErr.Message != want {
 		t.Errorf("404 message = %q, want %q", apiErr.Message, want)
 	}

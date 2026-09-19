@@ -523,7 +523,7 @@ func TestHealthzReportsTheFullOperationalPicture(t *testing.T) {
 		t.Fatalf("decode healthz: %v", err)
 	}
 
-	for _, key := range []string{"codex_auth", "codex_catalog", "codex_stream", "codex_quota", "codex_routing", "transport", "trace"} {
+	for _, key := range []string{"codex_auth", "codex_catalog", "codex_stream", "codex_quota", "codex_routing", "deepseek", "transport", "trace"} {
 		if _, ok := health[key]; !ok {
 			t.Errorf("/healthz is missing %q: %v", key, health)
 		}
@@ -691,7 +691,7 @@ func TestHealthReporterEmptyJSONIsUnchanged(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal health: %v", err)
 	}
-	const want = `{"codex_auth":{"status":"missing"},"codex_catalog":{"loaded":false,"models":0,"state":"cold"},"codex_routing":{"families":["5.4","5.4-mini","5.5","luna","sol","terra"]},"trace":{"enabled":false}}`
+	const want = `{"codex_auth":{"state":"missing"},"codex_catalog":{"loaded":false,"models":0,"state":"cold"},"codex_routing":{"bare_aliases":["5.4","5.4-mini","5.5","luna","sol","terra"]},"deepseek":{"configured":false},"trace":{"enabled":false}}`
 	if string(got) != want {
 		t.Errorf("health JSON = %s, want %s", got, want)
 	}

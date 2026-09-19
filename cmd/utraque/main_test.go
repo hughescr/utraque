@@ -20,6 +20,7 @@ import (
 
 	"github.com/hughescr/utraque/internal/anthropic/schema"
 	"github.com/hughescr/utraque/internal/apierr"
+	"github.com/hughescr/utraque/internal/codex/auth"
 	"github.com/hughescr/utraque/internal/config"
 	"github.com/hughescr/utraque/internal/obs"
 	"github.com/hughescr/utraque/internal/proxyhdr"
@@ -690,8 +691,9 @@ func TestHealthzReportsCodexAuthAndCatalog(t *testing.T) {
 	var health struct {
 		Status    string `json:"status"`
 		CodexAuth struct {
-			Status    string `json:"status"`
-			ExpiresIn int64  `json:"expires_in_s"`
+			State     string  `json:"state"`
+			Reason    *string `json:"reason"`
+			ExpiresIn int64   `json:"expires_in_s"`
 		} `json:"codex_auth"`
 		CodexCatalog struct {
 			Models int      `json:"models"`
@@ -705,8 +707,11 @@ func TestHealthzReportsCodexAuthAndCatalog(t *testing.T) {
 	if health.Status != server.StatusOK {
 		t.Errorf("status = %q, want %q", health.Status, server.StatusOK)
 	}
-	if health.CodexAuth.Status != "ok" {
-		t.Errorf("codex_auth.status = %q, want ok", health.CodexAuth.Status)
+	if health.CodexAuth.State != "ok" {
+		t.Errorf("codex_auth.state = %q, want ok", health.CodexAuth.State)
+	}
+	if health.CodexAuth.Reason != nil {
+		t.Errorf("codex_auth.reason = %q, want omitted for a fresh credential", *health.CodexAuth.Reason)
 	}
 	if health.CodexAuth.ExpiresIn <= 0 {
 		t.Errorf("codex_auth.expires_in_s = %d, want a positive whole number", health.CodexAuth.ExpiresIn)
@@ -716,6 +721,177 @@ func TestHealthzReportsCodexAuthAndCatalog(t *testing.T) {
 	}
 	if health.CodexCatalog.AgeS == nil || *health.CodexCatalog.AgeS < 0 {
 		t.Errorf("codex_catalog.age_s = %v, want a non-negative age", health.CodexCatalog.AgeS)
+	}
+}
+
+// TestHealthzReportsCodexAuthReasonWhenStale asserts a credential at or past
+// expiry reports codex_auth.state "stale" together with the reason for it
+// ("expiring"), so an operator can tell a token that merely aged out from one
+// upstream rejected — the two paths Peek folds into one state.
+func TestHealthzReportsCodexAuthReasonWhenStale(t *testing.T) {
+	dir := t.TempDir()
+	authPath := filepath.Join(dir, "auth.json")
+	authBody := fmt.Sprintf(`{"tokens":{"account_id":"acct-123","access_token":%q,"refresh_token":"r"}}`,
+		jwtWithExp(time.Now().Add(-time.Hour)))
+	if err := os.WriteFile(authPath, []byte(authBody), 0o600); err != nil {
+		t.Fatalf("write auth.json: %v", err)
+	}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("upstream must not be contacted for /healthz")
+	}))
+	defer upstream.Close()
+
+	cfg := config.Default()
+	cfg.Anthropic.BaseURL = upstream.URL
+	cfg.Codex.AuthFile = authPath
+	cfg.Codex.CacheFile = filepath.Join(dir, "utraque", "models_cache.json")
+	srv, err := newServer(cfg, slog.New(slog.DiscardHandler), nil)
+	if err != nil {
+		t.Fatalf("newServer: %v", err)
+	}
+	front := httptest.NewServer(srv)
+	defer front.Close()
+
+	resp, err := noRedirectClient().Get(front.URL + server.HealthPath)
+	if err != nil {
+		t.Fatalf("get healthz: %v", err)
+	}
+	defer resp.Body.Close()
+	var health struct {
+		CodexAuth struct {
+			State  string `json:"state"`
+			Reason string `json:"reason"`
+		} `json:"codex_auth"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&health); err != nil {
+		t.Fatalf("decode health: %v", err)
+	}
+	if health.CodexAuth.State != "stale" || health.CodexAuth.Reason != "expiring" {
+		t.Errorf("codex_auth = %+v, want state stale with reason expiring", health.CodexAuth)
+	}
+}
+
+// TestHealthzReportsCodexAuthReasonWhenInvalidated asserts the other stale
+// path: a credential comfortably before expiry that the backend has rejected
+// (what the Codex leg's Invalidate records after a 401) reports
+// codex_auth.state "stale" with reason "invalidated" — not "expiring", and not
+// "ok", which is what the expiry alone would say. /healthz still contacts no
+// upstream; the invalidation is applied through the production source
+// directly, as the leg would after a rejection.
+func TestHealthzReportsCodexAuthReasonWhenInvalidated(t *testing.T) {
+	dir := t.TempDir()
+	authPath := filepath.Join(dir, "auth.json")
+	accessToken := jwtWithExp(time.Now().Add(2 * time.Hour))
+	authBody := fmt.Sprintf(`{"tokens":{"account_id":"acct-123","access_token":%q,"refresh_token":"r"}}`,
+		accessToken)
+	if err := os.WriteFile(authPath, []byte(authBody), 0o600); err != nil {
+		t.Fatalf("write auth.json: %v", err)
+	}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("upstream must not be contacted for /healthz")
+	}))
+	defer upstream.Close()
+
+	cfg := config.Default()
+	cfg.Anthropic.BaseURL = upstream.URL
+	cfg.Codex.AuthFile = authPath
+	cfg.Codex.CacheFile = filepath.Join(dir, "utraque", "models_cache.json")
+	a, err := newApp(cfg, slog.New(slog.DiscardHandler), nil, nil)
+	if err != nil {
+		t.Fatalf("newApp: %v", err)
+	}
+	if a.auth == nil {
+		t.Fatal("newApp built no credential source for a configured auth file")
+	}
+	front := httptest.NewServer(a.srv)
+	defer front.Close()
+
+	var health struct {
+		CodexAuth struct {
+			State     string  `json:"state"`
+			Reason    *string `json:"reason"`
+			ExpiresIn int64   `json:"expires_in_s"`
+		} `json:"codex_auth"`
+	}
+	get := func() {
+		t.Helper()
+		resp, err := noRedirectClient().Get(front.URL + server.HealthPath)
+		if err != nil {
+			t.Fatalf("get healthz: %v", err)
+		}
+		defer resp.Body.Close()
+		health.CodexAuth.Reason = nil
+		if err := json.NewDecoder(resp.Body).Decode(&health); err != nil {
+			t.Fatalf("decode health: %v", err)
+		}
+	}
+
+	// Before the rejection the same credential is plainly ok: the assertion
+	// below is then about the invalidation, not about the token.
+	get()
+	if health.CodexAuth.State != "ok" || health.CodexAuth.Reason != nil {
+		t.Fatalf("codex_auth before invalidation = %+v, want state ok with no reason", health.CodexAuth)
+	}
+
+	a.auth.Invalidate(auth.Credential{AccountID: "acct-123", AccessToken: accessToken})
+	get()
+	if health.CodexAuth.State != "stale" {
+		t.Errorf("codex_auth.state = %q, want stale", health.CodexAuth.State)
+	}
+	if health.CodexAuth.Reason == nil || *health.CodexAuth.Reason != "invalidated" {
+		t.Errorf("codex_auth.reason = %v, want invalidated", health.CodexAuth.Reason)
+	}
+	if health.CodexAuth.ExpiresIn <= 0 {
+		t.Errorf("codex_auth.expires_in_s = %d, want positive: the token itself has not expired", health.CodexAuth.ExpiresIn)
+	}
+}
+
+// TestHealthzReportsWhetherDeepSeekIsConfigured asserts the deepseek block
+// says whether the leg exists: true exactly when a DeepSeek API key is
+// configured (the only condition under which newApp builds the leg), false on
+// a bare config. It is the state the 503 "deepseek leg is not configured"
+// answer reveals one request too late.
+func TestHealthzReportsWhetherDeepSeekIsConfigured(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("upstream must not be contacted for /healthz")
+	}))
+	defer upstream.Close()
+
+	for name, configured := range map[string]bool{"configured": true, "unconfigured": false} {
+		t.Run(name, func(t *testing.T) {
+			cfg := config.Default()
+			cfg.Anthropic.BaseURL = upstream.URL
+			if configured {
+				cfg.DeepSeek.BaseURL = upstream.URL
+				cfg.DeepSeek.APIKey = "deepseek-test-key"
+			}
+			srv, err := newServer(cfg, slog.New(slog.DiscardHandler), nil)
+			if err != nil {
+				t.Fatalf("newServer: %v", err)
+			}
+			front := httptest.NewServer(srv)
+			defer front.Close()
+
+			resp, err := noRedirectClient().Get(front.URL + server.HealthPath)
+			if err != nil {
+				t.Fatalf("get healthz: %v", err)
+			}
+			defer resp.Body.Close()
+			var health struct {
+				DeepSeek *struct {
+					Configured bool `json:"configured"`
+				} `json:"deepseek"`
+			}
+			if err := json.NewDecoder(resp.Body).Decode(&health); err != nil {
+				t.Fatalf("decode health: %v", err)
+			}
+			if health.DeepSeek == nil {
+				t.Fatal("/healthz has no deepseek block")
+			}
+			if health.DeepSeek.Configured != configured {
+				t.Errorf("deepseek.configured = %v, want %v", health.DeepSeek.Configured, configured)
+			}
+		})
 	}
 }
 
@@ -738,7 +914,7 @@ func TestHealthzReportsMissingCodexAuthWithoutAuthFile(t *testing.T) {
 
 	var health struct {
 		CodexAuth struct {
-			Status    string `json:"status"`
+			State     string `json:"state"`
 			ExpiresIn *int64 `json:"expires_in_s"`
 		} `json:"codex_auth"`
 		CodexCatalog struct {
@@ -748,8 +924,8 @@ func TestHealthzReportsMissingCodexAuthWithoutAuthFile(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&health); err != nil {
 		t.Fatalf("decode health: %v", err)
 	}
-	if health.CodexAuth.Status != "missing" {
-		t.Errorf("codex_auth.status = %q, want missing", health.CodexAuth.Status)
+	if health.CodexAuth.State != "missing" {
+		t.Errorf("codex_auth.state = %q, want missing", health.CodexAuth.State)
 	}
 	if health.CodexAuth.ExpiresIn != nil {
 		t.Errorf("codex_auth.expires_in_s = %v, want omitted when missing", *health.CodexAuth.ExpiresIn)

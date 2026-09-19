@@ -132,23 +132,23 @@ func TestReportingExecutablePathsAreNotRendered(t *testing.T) {
 func TestEnvOverrides(t *testing.T) {
 	multiplier := 4.5
 	c, err := config.LoadFrom(envFrom(map[string]string{
-		config.EnvListen:               "127.0.0.1:9999",
-		config.EnvLocalToken:           secret,
-		config.EnvMaxBodyBytes:         "1024",
-		config.EnvUpstreamIdleTimeout:  "45s",
-		config.EnvAnthropicBaseURL:     "https://example.test/api/",
-		config.EnvIdleTimeout:          "15m",
-		config.EnvLogLevel:             "DEBUG",
-		config.EnvLogFormat:            " Text ",
-		config.EnvTraceDir:             " /var/tmp/utraque-traces ",
-		config.EnvCCUsageRunner:        "custom-bunx",
-		config.EnvCCUsageExecutable:    "/opt/homebrew/bin/ccusage",
-		config.EnvCCUsageVersion:       "20.0.20",
-		config.EnvCodexExecutable:      "custom-codex",
-		config.EnvProviderCacheTTL:     "45s",
-		config.EnvProviderTimeout:      "80s",
-		config.EnvClaudePlan:           "Max",
-		config.EnvClaudePlanMultiplier: strconv.FormatFloat(multiplier, 'f', -1, 64),
+		config.EnvListen:                 "127.0.0.1:9999",
+		config.EnvLocalToken:             secret,
+		config.EnvMaxBodyBytes:           "1024",
+		config.EnvUpstreamIdleTimeout:    "45s",
+		config.EnvAnthropicBaseURL:       "https://example.test/api/",
+		config.EnvIdleTimeout:            "15m",
+		config.EnvLogLevel:               "DEBUG",
+		config.EnvLogFormat:              " Text ",
+		config.EnvTraceDir:               " /var/tmp/utraque-traces ",
+		config.EnvCCUsageRunner:          "custom-bunx",
+		config.EnvCCUsageExecutable:      "/opt/homebrew/bin/ccusage",
+		config.EnvCCUsageVersion:         "20.0.20",
+		config.EnvCodexExecutable:        "custom-codex",
+		config.EnvProviderReportCacheTTL: "45s",
+		config.EnvProviderReportTimeout:  "80s",
+		config.EnvClaudePlan:             "Max",
+		config.EnvClaudePlanMultiplier:   strconv.FormatFloat(multiplier, 'f', -1, 64),
 	}))
 	if err != nil {
 		t.Fatalf("LoadFrom: %v", err)
@@ -188,6 +188,90 @@ func TestEnvOverrides(t *testing.T) {
 	}
 }
 
+// TestProviderReportEnvAliases covers the one-release compatibility window
+// for the renamed provider-report variables: the old UTRAQUE_PROVIDER_* names
+// still apply when the new ones are unset, the new name wins when both are
+// set, and DeprecatedEnv reports exactly the old names that were actually
+// read so main can warn about them and nothing else.
+//
+// deprecated: remove in the next release, with the aliases.
+func TestProviderReportEnvAliases(t *testing.T) {
+	cases := map[string]struct {
+		env      map[string]string
+		cacheTTL time.Duration
+		timeout  time.Duration
+		warn     []config.EnvAlias
+	}{
+		"new names": {
+			env:      map[string]string{config.EnvProviderReportCacheTTL: "45s", config.EnvProviderReportTimeout: "80s"},
+			cacheTTL: 45 * time.Second, timeout: 80 * time.Second,
+		},
+		"old names": {
+			env:      map[string]string{config.EnvProviderCacheTTL: "46s", config.EnvProviderTimeout: "81s"},
+			cacheTTL: 46 * time.Second, timeout: 81 * time.Second,
+			warn: []config.EnvAlias{
+				{Old: config.EnvProviderCacheTTL, New: config.EnvProviderReportCacheTTL},
+				{Old: config.EnvProviderTimeout, New: config.EnvProviderReportTimeout},
+			},
+		},
+		"both set, new wins": {
+			env: map[string]string{
+				config.EnvProviderReportCacheTTL: "45s", config.EnvProviderCacheTTL: "46s",
+				config.EnvProviderReportTimeout: "80s", config.EnvProviderTimeout: "81s",
+			},
+			cacheTTL: 45 * time.Second, timeout: 80 * time.Second,
+		},
+		"one of each": {
+			env:      map[string]string{config.EnvProviderReportCacheTTL: "45s", config.EnvProviderTimeout: "81s"},
+			cacheTTL: 45 * time.Second, timeout: 81 * time.Second,
+			warn: []config.EnvAlias{{Old: config.EnvProviderTimeout, New: config.EnvProviderReportTimeout}},
+		},
+		"neither": {
+			cacheTTL: config.Default().ProviderReport.CacheTTL, timeout: config.Default().ProviderReport.Timeout,
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			c, err := config.LoadFrom(envFrom(tc.env))
+			if err != nil {
+				t.Fatalf("LoadFrom: %v", err)
+			}
+			if c.ProviderReport.CacheTTL != tc.cacheTTL || c.ProviderReport.Timeout != tc.timeout {
+				t.Errorf("cache_ttl/timeout = %s/%s, want %s/%s", c.ProviderReport.CacheTTL, c.ProviderReport.Timeout, tc.cacheTTL, tc.timeout)
+			}
+			if got := config.DeprecatedEnv(envFrom(tc.env)); !reflect.DeepEqual(got, tc.warn) {
+				t.Errorf("DeprecatedEnv = %v, want %v", got, tc.warn)
+			}
+		})
+	}
+	if got := config.DeprecatedEnv(nil); got != nil {
+		t.Errorf("DeprecatedEnv(nil) = %v, want nil", got)
+	}
+}
+
+// TestProviderReportLogKeys pins the config line's provider-report timing keys
+// to provider_report.* (they were reporting.*), matching the Go field, the
+// package and the environment variables that feed them.
+func TestProviderReportLogKeys(t *testing.T) {
+	c := config.Default()
+	c.ProviderReport.CacheTTL = 31 * time.Second
+	c.ProviderReport.Timeout = 91 * time.Second
+	var buf bytes.Buffer
+	slog.New(slog.NewTextHandler(&buf, nil)).Info("config", "cfg", c)
+	for _, rendered := range []string{c.String(), buf.String()} {
+		for _, want := range []string{"provider_report.cache_ttl=31s", "provider_report.timeout=1m31s"} {
+			if !strings.Contains(rendered, want) {
+				t.Errorf("rendered config lacks %q:\n%s", want, rendered)
+			}
+		}
+		for _, stale := range []string{"reporting.cache_ttl", "reporting.timeout"} {
+			if strings.Contains(rendered, stale) {
+				t.Errorf("rendered config still carries %q:\n%s", stale, rendered)
+			}
+		}
+	}
+}
+
 func TestLoadFromParseErrors(t *testing.T) {
 	cases := map[string]map[string]string{
 		"bad max body":        {config.EnvMaxBodyBytes: "lots"},
@@ -195,13 +279,89 @@ func TestLoadFromParseErrors(t *testing.T) {
 		"bad idle":            {config.EnvIdleTimeout: "1 hour"},
 		"bad listen":          {config.EnvListen: "not-a-hostport"},
 		"bad base url":        {config.EnvAnthropicBaseURL: "https://u:p@api.anthropic.com"},
-		"bad provider ttl":    {config.EnvProviderCacheTTL: "forever"},
+		"bad provider ttl":    {config.EnvProviderReportCacheTTL: "forever"},
+		"bad deprecated ttl":  {config.EnvProviderCacheTTL: "forever"},
 		"bad plan multiplier": {config.EnvClaudePlanMultiplier: "NaN"},
 	}
 	for name, env := range cases {
 		t.Run(name, func(t *testing.T) {
 			if _, err := config.LoadFrom(envFrom(env)); err == nil {
 				t.Fatal("want error, got nil")
+			}
+		})
+	}
+}
+
+// TestProviderReportErrorsNameTheVariable pins which variable name each
+// provider-report error carries, because the two kinds differ on purpose. A
+// PARSE error names the variable that was actually read — the deprecated
+// alias when that is what supplied the bad value — so the operator can find
+// the line to fix. A VALIDATION error (a duration that parsed but is not
+// positive) names the canonical UTRAQUE_PROVIDER_REPORT_* variable even when
+// the alias supplied the value: validation runs on the loaded Config, which
+// no longer knows where a value came from, and the canonical name is the one
+// the operator should be setting anyway.
+//
+// The alias cases are deprecated: remove in the next release, with the aliases.
+func TestProviderReportErrorsNameTheVariable(t *testing.T) {
+	cases := map[string]struct {
+		env  map[string]string
+		want string
+	}{
+		"zero ttl": {
+			env:  map[string]string{config.EnvProviderReportCacheTTL: "0s"},
+			want: "config: " + config.EnvProviderReportCacheTTL + " must be positive",
+		},
+		"negative ttl": {
+			env:  map[string]string{config.EnvProviderReportCacheTTL: "-30s"},
+			want: "config: " + config.EnvProviderReportCacheTTL + " must be positive",
+		},
+		"zero timeout": {
+			env:  map[string]string{config.EnvProviderReportTimeout: "0"},
+			want: "config: " + config.EnvProviderReportTimeout + " must be positive",
+		},
+		"negative timeout": {
+			env:  map[string]string{config.EnvProviderReportTimeout: "-1m"},
+			want: "config: " + config.EnvProviderReportTimeout + " must be positive",
+		},
+		"zero ttl via alias": {
+			env:  map[string]string{config.EnvProviderCacheTTL: "0s"},
+			want: "config: " + config.EnvProviderReportCacheTTL + " must be positive",
+		},
+		"negative timeout via alias": {
+			env:  map[string]string{config.EnvProviderTimeout: "-90s"},
+			want: "config: " + config.EnvProviderReportTimeout + " must be positive",
+		},
+		"unparsable ttl": {
+			env:  map[string]string{config.EnvProviderReportCacheTTL: "forever"},
+			want: "config: " + config.EnvProviderReportCacheTTL + ": time: invalid duration \"forever\"",
+		},
+		"unparsable timeout": {
+			env:  map[string]string{config.EnvProviderReportTimeout: "soon"},
+			want: "config: " + config.EnvProviderReportTimeout + ": time: invalid duration \"soon\"",
+		},
+		"unparsable ttl via alias": {
+			env:  map[string]string{config.EnvProviderCacheTTL: "forever"},
+			want: "config: " + config.EnvProviderCacheTTL + ": time: invalid duration \"forever\"",
+		},
+		"unparsable timeout via alias": {
+			env:  map[string]string{config.EnvProviderTimeout: "soon"},
+			want: "config: " + config.EnvProviderTimeout + ": time: invalid duration \"soon\"",
+		},
+		"unparsable alias ignored when the new name is set": {
+			// The replacement wins outright: the alias is not even parsed.
+			env:  map[string]string{config.EnvProviderReportCacheTTL: "0s", config.EnvProviderCacheTTL: "forever"},
+			want: "config: " + config.EnvProviderReportCacheTTL + " must be positive",
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, err := config.LoadFrom(envFrom(tc.env))
+			if err == nil {
+				t.Fatalf("LoadFrom = nil error, want %q", tc.want)
+			}
+			if err.Error() != tc.want {
+				t.Errorf("LoadFrom error = %q, want %q", err.Error(), tc.want)
 			}
 		})
 	}
@@ -248,6 +408,9 @@ func TestValidateRejects(t *testing.T) {
 		"empty codex executable":   func(c *config.Config) { c.Codex.Executable = "" },
 		"padded codex executable":  func(c *config.Config) { c.Codex.Executable = " codex" },
 		"zero report ttl":          func(c *config.Config) { c.ProviderReport.CacheTTL = 0 },
+		"negative report ttl":      func(c *config.Config) { c.ProviderReport.CacheTTL = -time.Second },
+		"zero report timeout":      func(c *config.Config) { c.ProviderReport.Timeout = 0 },
+		"negative report timeout":  func(c *config.Config) { c.ProviderReport.Timeout = -time.Second },
 		"negative plan multiplier": func(c *config.Config) { n := -1.0; c.ProviderReport.ClaudePlanMultiplier = &n },
 	}
 	for name, mutate := range cases {

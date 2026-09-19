@@ -15,12 +15,21 @@ import (
 // ErrorType is an Anthropic error type string.
 type ErrorType string
 
-// The Anthropic error taxonomy.
+// The Anthropic error taxonomy, as published at
+// https://platform.claude.com/docs/en/api/errors: 400 invalid_request_error,
+// 401 authentication_error, 402 billing_error, 403 permission_error, 404
+// not_found_error, 409 conflict_error, 413 request_too_large, 429
+// rate_limit_error, 500 api_error, 504 timeout_error and 529
+// overloaded_error. Every value here is one of theirs — timeout_error included,
+// which is the official 504 type and not a utraque extension — so a client that
+// switches on the type sees nothing it would not see from api.anthropic.com.
 const (
 	TypeInvalidRequest  ErrorType = "invalid_request_error"
 	TypeAuthentication  ErrorType = "authentication_error"
+	TypeBilling         ErrorType = "billing_error"
 	TypePermission      ErrorType = "permission_error"
 	TypeNotFound        ErrorType = "not_found_error"
+	TypeConflict        ErrorType = "conflict_error"
 	TypeRequestTooLarge ErrorType = "request_too_large"
 	TypeRateLimit       ErrorType = "rate_limit_error"
 	TypeAPI             ErrorType = "api_error"
@@ -163,10 +172,14 @@ func StatusFor(errType ErrorType) int {
 		return http.StatusBadRequest
 	case TypeAuthentication:
 		return http.StatusUnauthorized
+	case TypeBilling:
+		return http.StatusPaymentRequired
 	case TypePermission:
 		return http.StatusForbidden
 	case TypeNotFound:
 		return http.StatusNotFound
+	case TypeConflict:
+		return http.StatusConflict
 	case TypeRequestTooLarge:
 		return http.StatusRequestEntityTooLarge
 	case TypeRateLimit:
@@ -189,10 +202,14 @@ func TypeForStatus(status int) ErrorType {
 		return TypeInvalidRequest
 	case http.StatusUnauthorized:
 		return TypeAuthentication
+	case http.StatusPaymentRequired:
+		return TypeBilling
 	case http.StatusForbidden:
 		return TypePermission
 	case http.StatusNotFound:
 		return TypeNotFound
+	case http.StatusConflict:
+		return TypeConflict
 	case http.StatusRequestEntityTooLarge:
 		return TypeRequestTooLarge
 	case http.StatusTooManyRequests:

@@ -157,6 +157,7 @@ func run(ctx context.Context, getenv func(string) string, stderr io.Writer) erro
 		return err
 	}
 	slog.SetDefault(log)
+	warnDeprecatedEnv(log, getenv)
 
 	// Two cancellation sources feed one context: SIGINT/SIGTERM from the
 	// operator or launchd, and the idle timer's self-exit. Either one starts
@@ -211,6 +212,20 @@ func run(ctx context.Context, getenv func(string) string, stderr io.Writer) erro
 	return a.srv.ServeAll(ctx, lns...)
 }
 
+// warnDeprecatedEnv logs one WARN line for every deprecated environment
+// variable the configuration was read from, naming it and its replacement.
+// It runs once the logger exists, which is after config.LoadFrom, so config
+// reports the substitutions instead of logging them itself.
+//
+// deprecated: remove in the next release, with config.DeprecatedEnv.
+func warnDeprecatedEnv(log *slog.Logger, getenv func(string) string) {
+	for _, a := range config.DeprecatedEnv(getenv) {
+		log.Warn("deprecated environment variable in use; it will be removed in the next release",
+			slog.String("deprecated", a.Old),
+			slog.String("replacement", a.New))
+	}
+}
+
 // idlePolicy decides the effective idle timeout from the configured one and how
 // we got our socket.
 //
@@ -237,6 +252,11 @@ func idlePolicy(in config.Idle, src launchd.Source) config.Idle {
 type app struct {
 	srv  *server.Server
 	warm func(context.Context)
+	// auth is the Codex credential source the handler graph shares, or nil
+	// when no credential file is configured. It is here so a test can put the
+	// source into a state only an upstream rejection reaches (Invalidate) and
+	// then read that state back through /healthz, without any upstream.
+	auth *auth.Source
 }
 
 // warmCatalog kicks off the startup catalog fetch. It returns immediately.
@@ -424,6 +444,7 @@ func newApp(cfg config.Config, log *slog.Logger, activity server.ActivityTracker
 	hr := &healthReporter{
 		cat: cat, catState: catState, obs: obsv,
 		anthTransport: tr, codexTransport: codexTr, tracer: tracer,
+		deepseekConfigured: deepSeekLeg != nil,
 	}
 	reportHandler, err := newProviderReport(cfg, credSource, nil)
 	if err != nil {
@@ -460,6 +481,7 @@ func newApp(cfg config.Config, log *slog.Logger, activity server.ActivityTracker
 	return &app{
 		srv:  srv,
 		warm: newCatalogWarmer(cat, credSource, loadAliases, catState, log),
+		auth: credSource,
 	}, nil
 }
 
@@ -743,7 +765,7 @@ func newAliasLoader(reg *router.Registry, log *slog.Logger) func([]cschema.Catal
 		last = fp
 		log.Info("router aliases republished from the live codex catalog",
 			slog.Int("models", len(models)),
-			slog.Any("families", reg.BareAliases()))
+			slog.Any("bare_aliases", reg.BareAliases()))
 	}
 }
 
@@ -954,28 +976,43 @@ func (s *catalogState) read() (state catalogStateValue, err string, age time.Dur
 }
 
 // healthReporter contributes the codex auth, catalog, quota, drift, transport
-// and tracing fields to /healthz. It reads only cached/local state — a
-// token-expiry decode from a file stat and the catalog's held snapshot — so a
-// health poll never contacts the network and never reveals a token value.
+// and tracing fields to /healthz, plus whether the DeepSeek leg exists. It
+// reads only cached/local state — a token-expiry decode from a file stat and
+// the catalog's held snapshot — so a health poll never contacts the network
+// and never reveals a token value.
 type healthReporter struct {
 	auth     *auth.Source    // nil when no credential file is configured
 	cat      *catalog.Client // always set
 	catState *catalogState   // always set
 	obs      *codexObserver  // always set
-	// The two legs hold SEPARATE transports and only the Codex one can ever
-	// change stack, so both are reported. Reporting one number for "the"
-	// transport was wrong in the only case that matters: after an auto flip,
-	// the Anthropic leg is still std and the Codex leg is not.
+	// The Anthropic and Codex legs hold SEPARATE transports and only the Codex
+	// one can ever change stack, so both are reported. Reporting one number
+	// for "the" transport was wrong in the only case that matters: after an
+	// auto flip, the Anthropic leg is still std and the Codex leg is not. The
+	// DeepSeek leg rides the Anthropic transport, so it has no entry of its
+	// own there.
 	anthTransport  transport.Transport // always set
 	codexTransport transport.Transport // always set
 	tracer         *obs.Tracer         // nil unless tracing is on
+	// deepseekConfigured is whether newApp built the DeepSeek leg, which it
+	// does exactly when a DeepSeek API key is configured. Without it the leg
+	// answers 503 "deepseek leg is not configured" — the one state a health
+	// poll could not previously see.
+	deepseekConfigured bool
 }
 
 func (h *healthReporter) extra(context.Context) map[string]any {
-	codex := map[string]any{"status": string(auth.StateMissing)}
+	// codex_auth.state (was "status" before the healthz revision that aligned
+	// it with codex_catalog.state and auth.Status.State) is what a Get would
+	// do next; "reason" says WHY a stale credential is stale and is omitted
+	// when there is nothing to say.
+	codex := map[string]any{"state": string(auth.StateMissing)}
 	if h.auth != nil {
 		st := h.auth.Peek()
-		codex["status"] = string(st.State)
+		codex["state"] = string(st.State)
+		if st.Reason != "" {
+			codex["reason"] = st.Reason
+		}
 		if st.HasExpiry {
 			// Whole seconds; may be negative for an already-expired token. The
 			// token value itself is never included.
@@ -1017,10 +1054,14 @@ func (h *healthReporter) extra(context.Context) map[string]any {
 		trace["dir"] = dir
 	}
 	out["trace"] = trace
-	// The alias families the router currently routes. It is the quickest way to
-	// see whether the live catalog has been loaded or the static seed is still
-	// in force.
-	out["codex_routing"] = map[string]any{"families": router.DefaultRegistry.BareAliases()}
+	// The bare (rolling) aliases the router currently routes. It is the
+	// quickest way to see whether the live catalog has been loaded or the
+	// static seed is still in force.
+	out["codex_routing"] = map[string]any{"bare_aliases": router.DefaultRegistry.BareAliases()}
+	// Whether the DeepSeek leg was built at all. Unlike Codex, whose missing
+	// credential shows up as codex_auth.state "missing", an unconfigured
+	// DeepSeek leg has no other health field to show through.
+	out["deepseek"] = map[string]any{"configured": h.deepseekConfigured}
 	return out
 }
 

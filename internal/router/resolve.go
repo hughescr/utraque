@@ -275,5 +275,8 @@ func unknownModelError(reg *Registry, model string) error {
 	}
 	acceptedModelPatterns = append(acceptedModelPatterns, "gpt-*")
 	acceptedModelPatterns = append(acceptedModelPatterns, reg.BareAliases()...)
-	return apierr.NotFound("model %q not recognised; known route families: %s", model, strings.Join(acceptedModelPatterns, ", "))
+	// "accepted model names" (was "known route families"): the list mixes
+	// globs, exact DeepSeek ids and bare Codex aliases, none of which is a
+	// family in any sense the rest of the code uses.
+	return apierr.NotFound("model %q not recognised; accepted model names: %s", model, strings.Join(acceptedModelPatterns, ", "))
 }

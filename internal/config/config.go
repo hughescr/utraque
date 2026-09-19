@@ -112,25 +112,25 @@ const (
 
 // Environment variable names.
 const (
-	EnvListen               = EnvPrefix + "LISTEN"
-	EnvLocalToken           = EnvPrefix + "LOCAL_TOKEN"
-	EnvMaxBodyBytes         = EnvPrefix + "MAX_BODY_BYTES"
-	EnvUpstreamIdleTimeout  = EnvPrefix + "UPSTREAM_IDLE_TIMEOUT"
-	EnvAnthropicBaseURL     = EnvPrefix + "ANTHROPIC_BASE_URL"
-	EnvDeepSeekBaseURL      = EnvPrefix + "DEEPSEEK_BASE_URL"
-	EnvDeepSeekAPIKeyFile   = EnvPrefix + "DEEPSEEK_API_KEY_FILE"
-	EnvCCUsageRunner        = EnvPrefix + "CCUSAGE_RUNNER"
-	EnvCCUsageExecutable    = EnvPrefix + "CCUSAGE_EXECUTABLE"
-	EnvCCUsageVersion       = EnvPrefix + "CCUSAGE_VERSION"
-	EnvCodexExecutable      = EnvPrefix + "CODEX_EXECUTABLE"
-	EnvProviderCacheTTL     = EnvPrefix + "PROVIDER_CACHE_TTL"
-	EnvProviderTimeout      = EnvPrefix + "PROVIDER_TIMEOUT"
-	EnvClaudePlan           = EnvPrefix + "CLAUDE_PLAN"
-	EnvClaudePlanMultiplier = EnvPrefix + "CLAUDE_PLAN_MULTIPLIER"
-	EnvIdleTimeout          = EnvPrefix + "IDLE_TIMEOUT"
-	EnvLaunchdSocketName    = EnvPrefix + "LAUNCHD_SOCKET"
-	EnvLogLevel             = EnvPrefix + "LOG_LEVEL"
-	EnvLogFormat            = EnvPrefix + "LOG_FORMAT"
+	EnvListen                 = EnvPrefix + "LISTEN"
+	EnvLocalToken             = EnvPrefix + "LOCAL_TOKEN"
+	EnvMaxBodyBytes           = EnvPrefix + "MAX_BODY_BYTES"
+	EnvUpstreamIdleTimeout    = EnvPrefix + "UPSTREAM_IDLE_TIMEOUT"
+	EnvAnthropicBaseURL       = EnvPrefix + "ANTHROPIC_BASE_URL"
+	EnvDeepSeekBaseURL        = EnvPrefix + "DEEPSEEK_BASE_URL"
+	EnvDeepSeekAPIKeyFile     = EnvPrefix + "DEEPSEEK_API_KEY_FILE"
+	EnvCCUsageRunner          = EnvPrefix + "CCUSAGE_RUNNER"
+	EnvCCUsageExecutable      = EnvPrefix + "CCUSAGE_EXECUTABLE"
+	EnvCCUsageVersion         = EnvPrefix + "CCUSAGE_VERSION"
+	EnvCodexExecutable        = EnvPrefix + "CODEX_EXECUTABLE"
+	EnvProviderReportCacheTTL = EnvPrefix + "PROVIDER_REPORT_CACHE_TTL"
+	EnvProviderReportTimeout  = EnvPrefix + "PROVIDER_REPORT_TIMEOUT"
+	EnvClaudePlan             = EnvPrefix + "CLAUDE_PLAN"
+	EnvClaudePlanMultiplier   = EnvPrefix + "CLAUDE_PLAN_MULTIPLIER"
+	EnvIdleTimeout            = EnvPrefix + "IDLE_TIMEOUT"
+	EnvLaunchdSocketName      = EnvPrefix + "LAUNCHD_SOCKET"
+	EnvLogLevel               = EnvPrefix + "LOG_LEVEL"
+	EnvLogFormat              = EnvPrefix + "LOG_FORMAT"
 	// EnvTraceDir turns on per-request trace dumps and names the directory
 	// they are written to. It is deliberately its OWN variable rather than a
 	// log level: raising the log level should never start writing prompt text
@@ -302,6 +302,74 @@ type Log struct {
 	TraceDir string
 }
 
+// The names that UTRAQUE_PROVIDER_REPORT_CACHE_TTL and
+// UTRAQUE_PROVIDER_REPORT_TIMEOUT replaced. LoadFrom still reads them, but only
+// when the replacement is unset, and reports the substitution through
+// DeprecatedEnv so the caller can warn.
+//
+// deprecated: remove in the next release.
+const (
+	EnvProviderCacheTTL = EnvPrefix + "PROVIDER_CACHE_TTL"
+	EnvProviderTimeout  = EnvPrefix + "PROVIDER_TIMEOUT"
+)
+
+// EnvAlias pairs a deprecated environment variable with the name that replaced
+// it.
+//
+// deprecated: remove in the next release, with the aliases it describes.
+type EnvAlias struct {
+	Old, New string
+}
+
+// deprecatedEnvAliases is the whole list of renamed environment variables, in
+// the order DeprecatedEnv reports them.
+//
+// deprecated: remove in the next release.
+var deprecatedEnvAliases = []EnvAlias{
+	{Old: EnvProviderCacheTTL, New: EnvProviderReportCacheTTL},
+	{Old: EnvProviderTimeout, New: EnvProviderReportTimeout},
+}
+
+// DeprecatedEnv lists the deprecated environment variables LoadFrom would read
+// from getenv in place of their replacements: each old name that is set while
+// its new name is not. The caller logs one warning per entry once it has a
+// logger; config itself never logs. An old name set alongside its replacement
+// is not listed, because the replacement wins and the old value is ignored.
+//
+// deprecated: remove in the next release.
+func DeprecatedEnv(getenv func(string) string) []EnvAlias {
+	if getenv == nil {
+		return nil
+	}
+	var used []EnvAlias
+	for _, a := range deprecatedEnvAliases {
+		if envKey(getenv, a.New) == a.Old {
+			used = append(used, a)
+		}
+	}
+	return used
+}
+
+// envKey returns the variable LoadFrom should read for key: key itself when it
+// is set or has no deprecated alias, else the alias when that is set, else key.
+//
+// deprecated: remove in the next release, together with deprecatedEnvAliases,
+// after which callers read key directly.
+func envKey(getenv func(string) string, key string) string {
+	if _, ok := lookup(getenv, key); ok {
+		return key
+	}
+	for _, a := range deprecatedEnvAliases {
+		if a.New != key {
+			continue
+		}
+		if _, ok := lookup(getenv, a.Old); ok {
+			return a.Old
+		}
+	}
+	return key
+}
+
 // ProviderReport configures the loopback-only provider report. Every helper
 // named here (the ccusage runner or binary, the Claude-plan label) is checked
 // only when the endpoint is requested, so a missing or misconfigured one can
@@ -468,10 +536,13 @@ func LoadFrom(getenv func(string) string) (Config, error) {
 	if err := setDuration(EnvCodexLockTimeout, &c.Codex.LockTimeout); err != nil {
 		return Config{}, err
 	}
-	if err := setDuration(EnvProviderCacheTTL, &c.ProviderReport.CacheTTL); err != nil {
+	// envKey lets the deprecated UTRAQUE_PROVIDER_* names stand in for these
+	// two while nothing sets the replacement; a parse error names whichever
+	// variable was actually read.
+	if err := setDuration(envKey(getenv, EnvProviderReportCacheTTL), &c.ProviderReport.CacheTTL); err != nil {
 		return Config{}, err
 	}
-	if err := setDuration(EnvProviderTimeout, &c.ProviderReport.Timeout); err != nil {
+	if err := setDuration(envKey(getenv, EnvProviderReportTimeout), &c.ProviderReport.Timeout); err != nil {
 		return Config{}, err
 	}
 	if v, ok := lookup(getenv, EnvClaudePlanMultiplier); ok {
@@ -647,10 +718,10 @@ func (c Config) Validate() error {
 		return fmt.Errorf("config: %s must name an executable", EnvCodexExecutable)
 	}
 	if c.ProviderReport.CacheTTL <= 0 {
-		return fmt.Errorf("config: %s must be positive", EnvProviderCacheTTL)
+		return fmt.Errorf("config: %s must be positive", EnvProviderReportCacheTTL)
 	}
 	if c.ProviderReport.Timeout <= 0 {
-		return fmt.Errorf("config: %s must be positive", EnvProviderTimeout)
+		return fmt.Errorf("config: %s must be positive", EnvProviderReportTimeout)
 	}
 	if c.ProviderReport.ClaudePlanMultiplier != nil && *c.ProviderReport.ClaudePlanMultiplier <= 0 {
 		return fmt.Errorf("config: %s must be positive", EnvClaudePlanMultiplier)
@@ -794,8 +865,8 @@ func (c Config) String() string {
 	fmt.Fprintf(&b, " log.level=%s", c.Log.Level)
 	fmt.Fprintf(&b, " log.format=%s", c.Log.Format)
 	fmt.Fprintf(&b, " reporting.ccusage_version=%s", c.ProviderReport.CCUsageVersion)
-	fmt.Fprintf(&b, " reporting.cache_ttl=%s", c.ProviderReport.CacheTTL)
-	fmt.Fprintf(&b, " reporting.timeout=%s", c.ProviderReport.Timeout)
+	fmt.Fprintf(&b, " provider_report.cache_ttl=%s", c.ProviderReport.CacheTTL)
+	fmt.Fprintf(&b, " provider_report.timeout=%s", c.ProviderReport.Timeout)
 	fmt.Fprintf(&b, " reporting.claude_plan=%s", c.ProviderReport.ClaudePlan)
 	fmt.Fprintf(&b, " reporting.claude_plan_multiplier=%s", optionalFloat(c.ProviderReport.ClaudePlanMultiplier))
 	b.WriteString("}")
@@ -828,8 +899,8 @@ func (c Config) LogValue() slog.Value {
 		slog.String("log.level", c.Log.Level),
 		slog.String("log.format", c.Log.Format),
 		slog.String("reporting.ccusage_version", c.ProviderReport.CCUsageVersion),
-		slog.Duration("reporting.cache_ttl", c.ProviderReport.CacheTTL),
-		slog.Duration("reporting.timeout", c.ProviderReport.Timeout),
+		slog.Duration("provider_report.cache_ttl", c.ProviderReport.CacheTTL),
+		slog.Duration("provider_report.timeout", c.ProviderReport.Timeout),
 		slog.String("reporting.claude_plan", c.ProviderReport.ClaudePlan),
 		slog.String("reporting.claude_plan_multiplier", optionalFloat(c.ProviderReport.ClaudePlanMultiplier)),
 	)

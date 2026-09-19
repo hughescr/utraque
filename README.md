@@ -11,10 +11,10 @@ models, and a prepaid DeepSeek API balance side by side.
 `utraque` is a local HTTP proxy you point Claude Code at. It routes by model
 name: pick an Anthropic model and the request goes to `api.anthropic.com`
 billed against your Claude Max subscription; pick an OpenAI GPT model
-(native names `sol`, `terra`, `luna`) and the request goes to OpenAI billed
+(bare aliases `sol`, `terra`, `luna`) and the request goes to OpenAI billed
 against your ChatGPT/Codex subscription; pick `deepseek-flash` or
 `deepseek-v4-pro` and the request uses your prepaid DeepSeek API key. All three
-backends are addressed by native model names inside one Claude Code session.
+backends are addressed by their own model names inside one Claude Code session.
 
 ## Status
 
@@ -157,7 +157,7 @@ unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN
 
 ./bin/utraque &                # or let launchd do it — see below
 curl -sf http://127.0.0.1:8317/healthz | python3 -m json.tool | head -20
-#   codex_auth.status should read "ok"; if it says "missing", run codex login
+#   codex_auth.state should read "ok"; if it says "missing", run codex login
 
 export ANTHROPIC_BASE_URL=http://127.0.0.1:8317
 export _CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL=1
@@ -465,10 +465,27 @@ override is changed or removed.
 | `UTRAQUE_CCUSAGE_RUNNER` | `bunx` | Package runner used when no native executable is set. |
 | `UTRAQUE_CCUSAGE_VERSION` | `latest` | `ccusage` package version requested through the runner. The resolved version is recorded in each report. |
 | `UTRAQUE_CODEX_EXECUTABLE` | `codex` | Codex executable queried once at startup for the model-catalog client version, then used for the report's isolated, short-lived app-server query. It uses the same credential source as inference. Under launchd, configure an absolute path because its `PATH` is intentionally narrow. |
-| `UTRAQUE_PROVIDER_CACHE_TTL` | `30s` | Lifetime of one coherent local-history and live-quota snapshot. |
-| `UTRAQUE_PROVIDER_TIMEOUT` | `90s` | Overall deadline for an on-demand report collection. |
+| `UTRAQUE_PROVIDER_REPORT_CACHE_TTL` | `30s` | Lifetime of one coherent local-history and live-quota snapshot. Was `UTRAQUE_PROVIDER_CACHE_TTL`, which is still read as a deprecated alias for one release: it applies only when the new name is unset, and using it logs a WARN line naming both. |
+| `UTRAQUE_PROVIDER_REPORT_TIMEOUT` | `90s` | Overall deadline for an on-demand report collection. Was `UTRAQUE_PROVIDER_TIMEOUT`, a deprecated alias on the same terms. |
 | `UTRAQUE_CLAUDE_PLAN` | *(none)* | Optional operator-supplied Claude plan label. It is reported as configured metadata, not provider-confirmed data. |
 | `UTRAQUE_CLAUDE_PLAN_MULTIPLIER` | *(none)* | Optional positive operator-supplied plan multiplier. There is deliberately no assumed default. |
+
+The startup `listening` line's `config` group renders the two timing values
+as `provider_report.cache_ttl` and `provider_report.timeout` (they were
+`reporting.cache_ttl` and `reporting.timeout` before the variables were
+renamed to match).
+
+Errors about these two values name a variable, and which one depends on the
+kind of error. A value that does not parse as a duration is reported against
+the variable that was actually read, so `UTRAQUE_PROVIDER_CACHE_TTL=forever`
+fails with `config: UTRAQUE_PROVIDER_CACHE_TTL: time: invalid duration
+"forever"` and points at the line to fix. A value that parses but is not
+positive fails validation of the loaded configuration, which no longer knows
+where the value came from, so it is always reported against the canonical
+name: `UTRAQUE_PROVIDER_TIMEOUT=0` fails with `config:
+UTRAQUE_PROVIDER_REPORT_TIMEOUT must be positive`, the variable you should be
+setting anyway. (Both validation errors named the old variables before the
+rename.)
 
 The native ccusage executable avoids a Bun/Node runtime dependency. The default
 remains `bunx ccusage@latest` for installations that do not set a native path.
@@ -669,6 +686,19 @@ request line's `err` and the trace manifest's `summary.err` carry, still reads
 renamed. The Anthropic leg's sanitizer logs `stripped synthetic thinking
 blocks` with `thinking_blocks_removed` (an int; it was `dropped`).
 
+Every error the proxy produces itself, and every Codex or catalog failure it
+renders from an upstream status, is an Anthropic error envelope whose `type`
+is one of the values on the published
+[Claude API errors](https://platform.claude.com/docs/en/api/errors) page: 400
+`invalid_request_error`, 401 `authentication_error`, 402 `billing_error`, 403
+`permission_error`, 404 `not_found_error`, 409 `conflict_error`, 413
+`request_too_large`, 429 `rate_limit_error`, 500 `api_error`, 504
+`timeout_error` (official, not a utraque extension) and 529
+`overloaded_error`. A 402 and a 409 rendered from an upstream status are
+`billing_error` and `conflict_error`; both were `api_error` (and, on a Codex
+rejection, `invalid_request_error`) before the taxonomy was checked against
+that page.
+
 ## Prompt caching
 
 The Codex backend caches a prompt prefix and bills the cached part at a
@@ -846,13 +876,32 @@ resolving as soon as anything reads the catalog, and a retired slug stops.
 Until the first read succeeds, a compiled-in seed applies. Raw `gpt-*` slugs
 always route regardless.
 
+A model name that resolves to no leg at all is answered locally with a 404
+`not_found_error` whose message lists the accepted model names — the
+Anthropic globs, the DeepSeek ids, `gpt-*` and the bare aliases currently in
+force — so the reply says what would have worked:
+
+```json
+{"type":"error","error":{"type":"not_found_error","message":"model \"banana\" not recognised; accepted model names: claude-*, anthropic-*, deepseek-flash, deepseek-v4-pro, gpt-*, 5.4, 5.4-mini, 5.5, luna, sol, terra"}}
+```
+
+(The message read "known route families" before the list was renamed: it
+mixes globs, exact ids and bare aliases, and "family" now means nothing in
+the router.) When the aliases are republished from the live catalog, the
+INFO line `router aliases republished from the live codex catalog` carries
+them as `bare_aliases` (was `families`).
+
 ## Health
 
 `GET /healthz` is answered locally and never contacts any upstream. It
 reports process status, version and uptime, plus, for the Codex leg:
 
-- `codex_auth` — the credential state (`ok` / `stale` / `missing`) and the
-  seconds until the access token expires. The token value never appears.
+- `codex_auth` — `state`: the credential state (`ok` / `stale` / `missing`),
+  `reason` when it is `stale` (`expiring` for a token at or past expiry,
+  `invalidated` when the backend rejected it; omitted otherwise), and
+  `expires_in_s`, the seconds until the access token expires. The token value
+  never appears. (`state` was `status`, and there was no `reason`, before the
+  healthz revision that aligned it with `codex_catalog.state`.)
 - `codex_catalog` — how many models the held snapshot holds, how old it is, and
   `state`: **why** it looks like that. A bare `models: 0` is several different
   situations wearing one face, so they are named — `loaded`, `empty` (a fetch
@@ -861,9 +910,10 @@ reports process status, version and uptime, plus, for the Codex leg:
   The catalog is also warmed in the background at startup, so the count is a
   fact about the backend rather than a fact about whether anyone has used the
   proxy yet.
-- `codex_routing` — the short-name route families the router currently
-  resolves: the quickest way to see whether the live catalog has been loaded or
-  the compiled-in seed is still in force.
+- `codex_routing` — `bare_aliases`, the bare (rolling) aliases the router
+  currently resolves: the quickest way to see whether the live catalog has
+  been loaded or the compiled-in seed is still in force. (The key was
+  `families` before the same revision.)
 - `codex_quota` — the rolling usage windows the backend reports on its own
   response headers, with the age of that reading, so subscription burn-down is
   visible. Always present, carrying `reported: false` until the backend has
@@ -878,6 +928,14 @@ reports process status, version and uptime, plus, for the Codex leg:
   change), read live, since the auto transport can switch stacks mid-process.
 - `trace` — whether per-request trace dumps are being written, and where. A
   directory of conversations accumulating on disk should never be a surprise.
+
+And, for the DeepSeek leg:
+
+- `deepseek` — `configured`: whether the leg was built at all, which it is
+  exactly when a DeepSeek API key was configured. Without it a `deepseek-*`
+  request is answered 503 "deepseek leg is not configured"; this is that
+  state, visible before the first request. The DeepSeek leg rides the
+  Anthropic transport, so it has no entry of its own under `transport`.
 
 ## Provider report
 
