@@ -183,7 +183,9 @@ func TestModelsDevRejectsOversizeAndInvalidCatalogs(t *testing.T) {
 			if !errors.As(err, &priceErr) {
 				t.Fatalf("err=%v", err)
 			}
-			want := "invalid_response"
+			// Literal expectations pin the wire values independently of the
+			// CodeInvalidData / CodeTooLarge constants.
+			var want ErrorCode = "invalid_response"
 			if name == "oversize" {
 				want = "response_too_large"
 			}
@@ -191,6 +193,23 @@ func TestModelsDevRejectsOversizeAndInvalidCatalogs(t *testing.T) {
 				t.Fatalf("code=%q want %q", priceErr.Code, want)
 			}
 		})
+	}
+}
+
+// TestErrorCodeWireValues pins every ErrorCode constant to the string the
+// provider report emits for it, so a renamed constant cannot silently change
+// the wire vocabulary.
+func TestErrorCodeWireValues(t *testing.T) {
+	for want, got := range map[string]ErrorCode{
+		"configuration_error": CodeConfiguration,
+		"unavailable":         CodeUnavailable,
+		"timeout":             CodeTimeout,
+		"response_too_large":  CodeTooLarge,
+		"invalid_response":    CodeInvalidData,
+	} {
+		if string(got) != want {
+			t.Errorf("code=%q want %q", got, want)
+		}
 	}
 }
 

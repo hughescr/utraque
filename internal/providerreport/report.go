@@ -17,6 +17,16 @@ import (
 	"github.com/hughescr/utraque/internal/usagehistory"
 )
 
+// errCredentialUnavailable and errNotConfigured are the two ways readQuotas
+// declines to read a provider without going upstream. safeError classifies
+// them with errors.Is into CodeCredentialUnavailable and
+// CodeConfigurationError; a reader's own failures arrive as
+// *providerquota.Error instead.
+var (
+	errCredentialUnavailable = errors.New("credential unavailable")
+	errNotConfigured         = errors.New("provider not configured")
+)
+
 type credentials struct {
 	anthropicToken string
 	codex          auth.Credential
@@ -90,19 +100,19 @@ func (h *Handler) readQuotas(ctx context.Context, creds credentials) map[string]
 	wg.Add(3)
 	go read("anthropic", func() (providerquota.Observation, error) {
 		if h.anthropic == nil || creds.anthropicToken == "" {
-			return providerquota.Observation{}, errors.New("credential unavailable")
+			return providerquota.Observation{}, errCredentialUnavailable
 		}
 		return h.anthropic.Read(ctx, creds.anthropicToken)
 	})
 	go read("deepseek", func() (providerquota.Observation, error) {
 		if h.deepseek == nil {
-			return providerquota.Observation{}, errors.New("provider not configured")
+			return providerquota.Observation{}, errNotConfigured
 		}
 		return h.deepseek.Read(ctx)
 	})
 	go read("codex", func() (providerquota.Observation, error) {
 		if h.codex == nil || h.codexSource == nil || creds.codex.AccountID == "" {
-			return providerquota.Observation{}, errors.New("credential unavailable")
+			return providerquota.Observation{}, errCredentialUnavailable
 		}
 		return h.codex.ReadCredential(ctx, h.codexSource, creds.codex)
 	})
@@ -136,7 +146,7 @@ func (h *Handler) buildProvider(name string, kind usagehistory.Provider, ended t
 			ThirtyDays:                 PeriodSummary{Since: since, Until: until, Models: rows30}, Blocks: blocks, Issues: history.Issues}
 	}
 	if historyErr != nil {
-		pr.Errors = append(pr.Errors, safeError("history", historyErr))
+		pr.Errors = append(pr.Errors, safeError(SectionHistory, historyErr))
 	}
 	if reference := h.referencePrices(name, rows30, prices.snapshot); reference != nil {
 		pr.ReferencePrices = reference
@@ -149,18 +159,18 @@ func (h *Handler) buildProvider(name string, kind usagehistory.Provider, ended t
 	hasHistory := pr.History != nil
 	switch {
 	case hasQuota && hasHistory && len(pr.Errors) == 0:
-		pr.Status = "ok"
+		pr.Status = StatusOK
 	case hasQuota || hasHistory:
-		pr.Status = "partial"
+		pr.Status = StatusPartial
 	default:
-		pr.Status = "error"
+		pr.Status = StatusError
 	}
-	if pr.Status != "error" {
+	if pr.Status != StatusError {
 		t := ended
 		pr.LastSuccess = &t
 	}
 	if name == "anthropic" {
-		pr.Calibration = &Calibration{UnavailableReason: "paired_quota_measurement_unavailable"}
+		pr.Calibration = &Calibration{UnavailableReason: ReasonPairedMeasurementUnavailable}
 		if h.planLabel != "" || h.planMultiplier != nil {
 			pr.ConfiguredPlan = &ConfiguredPlan{Label: h.planLabel, Multiplier: h.planMultiplier, Source: "configured"}
 		}
@@ -171,7 +181,7 @@ func (h *Handler) buildProvider(name string, kind usagehistory.Provider, ended t
 	return pr
 }
 
-func (h *Handler) referencePrices(provider string, history []ModelStats, snapshot referenceprice.Snapshot) *referenceprice.Snapshot {
+func (h *Handler) referencePrices(provider string, history []ModelStats, snapshot referenceprice.Snapshot) *PriceSnapshot {
 	if len(snapshot.Models) == 0 {
 		return nil
 	}
@@ -193,8 +203,8 @@ func (h *Handler) referencePrices(provider string, history []ModelStats, snapsho
 			}
 		}
 	}
-	out := referenceprice.Snapshot{Source: snapshot.Source, ObservedAt: snapshot.ObservedAt,
-		Stale: snapshot.Stale, Unit: snapshot.Unit, Models: []referenceprice.ModelPrice{}}
+	out := PriceSnapshot{Source: snapshot.Source, ObservedAt: snapshot.ObservedAt,
+		Stale: snapshot.Stale, Unit: snapshot.Unit, Models: []PriceRow{}}
 	baseTier := false
 	for _, price := range snapshot.Models {
 		if price.Provider != provider {
@@ -204,9 +214,8 @@ func (h *Handler) referencePrices(provider string, history []ModelStats, snapsho
 		if !eligible && !observed[strings.ToLower(price.Model)] {
 			continue
 		}
-		price.Eligible = eligible
 		baseTier = baseTier || price.HasHigherTier
-		out.Models = append(out.Models, price)
+		out.Models = append(out.Models, PriceRow{ModelPrice: price, Eligible: eligible})
 	}
 	if len(out.Models) == 0 {
 		return nil
@@ -214,7 +223,7 @@ func (h *Handler) referencePrices(provider string, history []ModelStats, snapsho
 	if baseTier {
 		out.Assumptions = append(out.Assumptions, "base_tier")
 	}
-	if provider == "anthropic" && slices.ContainsFunc(out.Models, func(price referenceprice.ModelPrice) bool { return price.CacheWrite != nil }) {
+	if provider == "anthropic" && slices.ContainsFunc(out.Models, func(row PriceRow) bool { return row.CacheWrite != nil }) {
 		out.Assumptions = append(out.Assumptions, "cache_write_5m")
 	}
 	return &out
@@ -223,26 +232,34 @@ func (h *Handler) referencePrices(provider string, history []ModelStats, snapsho
 func safeReferencePriceError(err error) ReportError {
 	var priceErr *referenceprice.Error
 	if errors.As(err, &priceErr) {
-		return ReportError{Section: "reference_prices", Code: priceErr.Code, Retryable: priceErr.Retryable, Message: "reference prices unavailable"}
+		return ReportError{Section: SectionReferencePrices, Code: ErrorCodeFromPrice(priceErr.Code), Retryable: priceErr.Retryable, Message: "reference prices unavailable"}
 	}
-	return ReportError{Section: "reference_prices", Code: "unavailable", Retryable: true, Message: "reference prices unavailable"}
+	return ReportError{Section: SectionReferencePrices, Code: CodeUnavailable, Retryable: true, Message: "reference prices unavailable"}
 }
 
-func safeError(section string, err error) ReportError {
+// safeError classifies a quota or history failure without exposing its text.
+// The quota error's AttemptedAt travels with the report error (and also
+// overrides ProviderReport.LastAttempt in buildProvider).
+func safeError(section Section, err error) ReportError {
 	var pe *providerquota.Error
 	if errors.As(err, &pe) {
-		return ReportError{Section: section, Code: string(pe.Code), Retryable: pe.Retryable, RetryAt: pe.RetryAt, Message: "provider reading unavailable"}
+		re := ReportError{Section: section, Code: ErrorCodeFromQuota(pe.Code), Retryable: pe.Retryable, RetryAt: pe.RetryAt, Message: "provider reading unavailable"}
+		if !pe.AttemptedAt.IsZero() {
+			attempted := pe.AttemptedAt
+			re.AttemptedAt = &attempted
+		}
+		return re
 	}
 	var ce *usagehistory.CollectError
 	if errors.As(err, &ce) {
-		return ReportError{Section: section, Code: string(ce.Kind), Retryable: ce.Kind == usagehistory.ErrorTimeout || ce.Kind == usagehistory.ErrorCanceled || ce.Kind == usagehistory.ErrorCommand, Message: "local usage history unavailable"}
+		return ReportError{Section: section, Code: ErrorCodeFromHistory(ce.Kind), Retryable: ce.Kind == usagehistory.ErrorTimeout || ce.Kind == usagehistory.ErrorCanceled || ce.Kind == usagehistory.ErrorCommand, Message: "local usage history unavailable"}
 	}
-	code := "unavailable"
-	if strings.Contains(err.Error(), "credential") {
-		code = "credential_unavailable"
-	}
-	if strings.Contains(err.Error(), "configured") {
-		code = "configuration_error"
+	code := CodeUnavailable
+	switch {
+	case errors.Is(err, errCredentialUnavailable):
+		code = CodeCredentialUnavailable
+	case errors.Is(err, errNotConfigured):
+		code = CodeConfigurationError
 	}
 	return ReportError{Section: section, Code: code, Message: "report source unavailable"}
 }
@@ -358,14 +375,14 @@ func estimateDeepSeek(obs providerquota.Observation, models []ModelStats) []Rema
 				HistoricalUSDToken: rate,
 				Assumptions:        []string{"historical_api_reference_rate_matches_future_workload", "future_provider_prices_do_not_change"}}
 			if b.Currency != "USD" {
-				e.UnavailableReason = "unsupported_balance_currency"
+				e.UnavailableReason = ReasonUnsupportedBalanceCurrency
 			} else if rate == nil || *rate <= 0 {
-				e.UnavailableReason = "historical_effective_rate_unavailable"
+				e.UnavailableReason = ReasonHistoricalRateUnavailable
 			} else if amount, ok := decimalFloat(b.Total); ok {
 				t := amount / *rate
 				e.Tokens = &t
 			} else {
-				e.UnavailableReason = "invalid_balance_decimal"
+				e.UnavailableReason = ReasonInvalidBalanceDecimal
 			}
 			out = append(out, e)
 		}

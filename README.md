@@ -842,7 +842,10 @@ least one successful quota or history section, including a partial collection.
 `last_complete_snapshot.last_success` instead records the time a complete
 measurement succeeded. `last_attempt` is normally the collection end time; for a
 quota rate-limit error with a recorded real upstream attempt it uses that attempt
-time, which can predate `collection_started_at` during a cooldown.
+time, which can predate `collection_started_at` during a cooldown. That same
+`quota_after` error then also carries the attempt time as `attempted_at`, so the
+two meanings of `last_attempt` can be told apart; `attempted_at` is omitted from
+every other error.
 
 In schema version 1, `source` has a field-specific value space: `quota_after`
 uses the leg name; `history.source` is `ccusage`; `models[].source` is the

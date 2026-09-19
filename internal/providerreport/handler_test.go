@@ -189,7 +189,8 @@ func TestRateLimitedQuotaReportsRetryTimeAndActualAttempt(t *testing.T) {
 	r.Header.Set("Authorization", "Bearer token")
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
-	p := providerNamed(decodeReport(t, w), "anthropic")
+	report := decodeReport(t, w)
+	p := providerNamed(report, "anthropic")
 	if p == nil || !p.LastAttempt.Equal(attempted) || len(p.Errors) == 0 {
 		t.Fatalf("provider=%+v", p)
 	}
@@ -197,8 +198,26 @@ func TestRateLimitedQuotaReportsRetryTimeAndActualAttempt(t *testing.T) {
 	if err.Section != "quota_after" || err.Code != "rate_limited" || !err.Retryable || err.RetryAt == nil || !err.RetryAt.Equal(retryAt) {
 		t.Fatalf("report error=%+v", err)
 	}
+	if err.AttemptedAt == nil || !err.AttemptedAt.Equal(attempted) {
+		t.Fatalf("quota error attempted_at=%v want %v", err.AttemptedAt, attempted)
+	}
 	if p.Calibration == nil || p.Calibration.UnavailableReason != "paired_quota_measurement_unavailable" {
 		t.Fatalf("calibration=%+v", p.Calibration)
+	}
+	// attempted_at belongs to the quota error that carried it and nowhere else:
+	// not on the other providers' sentinel errors, and not as a bare key.
+	for _, provider := range report.Providers {
+		for i, reportErr := range provider.Errors {
+			if provider.Provider == "anthropic" && i == 0 {
+				continue
+			}
+			if reportErr.AttemptedAt != nil {
+				t.Fatalf("provider %s error %+v carries attempted_at", provider.Provider, reportErr)
+			}
+		}
+	}
+	if got := strings.Count(w.Body.String(), `"attempted_at":"2026-09-11T12:04:00Z"`); got != 1 || strings.Count(w.Body.String(), `"attempted_at"`) != 1 {
+		t.Fatalf("attempted_at occurrences=%d body=%s", got, w.Body.String())
 	}
 }
 
@@ -306,7 +325,7 @@ func TestReferencePriceFailureIsProviderLocalAndCollectionConcurrent(t *testing.
 		ReferencePrices: priceFunc(func(context.Context) (referenceprice.Snapshot, error) {
 			close(priceStarted)
 			<-releasePrice
-			return referenceprice.Snapshot{}, &referenceprice.Error{Code: "timeout", Retryable: true}
+			return referenceprice.Snapshot{}, &referenceprice.Error{Code: referenceprice.CodeTimeout, Retryable: true}
 		}),
 		Now: func() time.Time { return now },
 	})

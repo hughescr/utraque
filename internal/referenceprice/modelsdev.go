@@ -41,14 +41,15 @@ type Options struct {
 }
 
 // ModelPrice is one exact model id from its author provider's models.dev
-// catalog. Provider and HasHigherTier are internal assembly metadata.
+// catalog. Provider and HasHigherTier are internal assembly metadata. Whether
+// a model is a current routing candidate is not a price fact: the provider
+// report attaches that after joining (providerreport.PriceRow).
 type ModelPrice struct {
 	Model      string   `json:"model"`
 	Input      float64  `json:"input"`
 	Output     float64  `json:"output"`
 	CacheRead  *float64 `json:"cache_read,omitempty"`
 	CacheWrite *float64 `json:"cache_write,omitempty"`
-	Eligible   bool     `json:"eligible"`
 
 	Provider      string `json:"-"`
 	HasHigherTier bool   `json:"-"`
@@ -63,8 +64,19 @@ type Snapshot struct {
 	Assumptions []string     `json:"assumptions,omitempty"`
 }
 
+// ErrorCode classifies a catalog read failure.
+type ErrorCode string
+
+const (
+	CodeConfiguration ErrorCode = "configuration_error"
+	CodeUnavailable   ErrorCode = "unavailable"
+	CodeTimeout       ErrorCode = "timeout"
+	CodeTooLarge      ErrorCode = "response_too_large"
+	CodeInvalidData   ErrorCode = "invalid_response"
+)
+
 type Error struct {
-	Code      string
+	Code      ErrorCode
 	Retryable bool
 }
 
@@ -101,7 +113,7 @@ func NewModelsDevClient(opts Options) (*Client, error) {
 	}
 	u, err := url.Parse(strings.TrimSpace(opts.URL))
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
-		return nil, &Error{Code: "configuration_error"}
+		return nil, &Error{Code: CodeConfiguration}
 	}
 	if opts.Timeout <= 0 {
 		opts.Timeout = defaultTimeout
@@ -116,7 +128,7 @@ func NewModelsDevClient(opts Options) (*Client, error) {
 		opts.MaxResponseBytes = defaultMaxResponseBytes
 	}
 	if opts.MaxResponseBytes > 64<<20 {
-		return nil, &Error{Code: "configuration_error"}
+		return nil, &Error{Code: CodeConfiguration}
 	}
 	if opts.Now == nil {
 		opts.Now = time.Now
@@ -138,7 +150,7 @@ type readResult struct {
 
 func (c *Client) Read(ctx context.Context) (Snapshot, error) {
 	if c == nil {
-		return Snapshot{}, &Error{Code: "configuration_error"}
+		return Snapshot{}, &Error{Code: CodeConfiguration}
 	}
 	if err := ctx.Err(); err != nil {
 		return Snapshot{}, classifyContext(err)
@@ -157,7 +169,7 @@ func (c *Client) Read(ctx context.Context) (Snapshot, error) {
 		return Snapshot{}, classifyContext(ctx.Err())
 	case result := <-ch:
 		if result.Err != nil {
-			return Snapshot{}, &Error{Code: "unavailable", Retryable: true}
+			return Snapshot{}, &Error{Code: CodeUnavailable, Retryable: true}
 		}
 		value := result.Val.(readResult)
 		return value.snapshot, value.err
@@ -171,7 +183,7 @@ func (c *Client) cached(now time.Time) (Snapshot, error, bool) {
 		return cloneSnapshot(c.cache.snapshot), nil, true
 	}
 	if now.Before(c.cache.retryAfter) {
-		err := &Error{Code: "unavailable", Retryable: true}
+		err := &Error{Code: CodeUnavailable, Retryable: true}
 		if len(c.cache.snapshot.Models) == 0 {
 			return Snapshot{}, err, true
 		}
@@ -191,7 +203,7 @@ func (c *Client) refresh() readResult {
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.endpoint, nil)
 	if err != nil {
-		return c.failed(&Error{Code: "configuration_error"})
+		return c.failed(&Error{Code: CodeConfiguration})
 	}
 	req.Header.Set("Accept", "application/json")
 	if etag != "" {
@@ -200,9 +212,9 @@ func (c *Client) refresh() readResult {
 	resp, err := c.client.Do(req)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			return c.failed(&Error{Code: "timeout", Retryable: true})
+			return c.failed(&Error{Code: CodeTimeout, Retryable: true})
 		}
-		return c.failed(&Error{Code: "unavailable", Retryable: true})
+		return c.failed(&Error{Code: CodeUnavailable, Retryable: true})
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotModified {
@@ -211,21 +223,21 @@ func (c *Client) refresh() readResult {
 	}
 	if resp.StatusCode != http.StatusOK {
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, c.maxBody))
-		return c.failed(&Error{Code: "unavailable", Retryable: resp.StatusCode >= 500 || resp.StatusCode == http.StatusTooManyRequests})
+		return c.failed(&Error{Code: CodeUnavailable, Retryable: resp.StatusCode >= 500 || resp.StatusCode == http.StatusTooManyRequests})
 	}
 	if resp.ContentLength > c.maxBody {
-		return c.failed(&Error{Code: "response_too_large"})
+		return c.failed(&Error{Code: CodeTooLarge})
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, c.maxBody+1))
 	if err != nil {
-		return c.failed(&Error{Code: "unavailable", Retryable: true})
+		return c.failed(&Error{Code: CodeUnavailable, Retryable: true})
 	}
 	if int64(len(body)) > c.maxBody {
-		return c.failed(&Error{Code: "response_too_large"})
+		return c.failed(&Error{Code: CodeTooLarge})
 	}
 	models, err := parseModelsDev(body)
 	if err != nil {
-		return c.failed(&Error{Code: "invalid_response"})
+		return c.failed(&Error{Code: CodeInvalidData})
 	}
 	now := c.now().UTC()
 	snapshot := Snapshot{Source: SourceModelsDev, ObservedAt: now, Unit: USDPerMillion, Models: models}
@@ -240,7 +252,7 @@ func (c *Client) notModified() readResult {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if len(c.cache.snapshot.Models) == 0 {
-		return c.failedLocked(&Error{Code: "invalid_response"}, now)
+		return c.failedLocked(&Error{Code: CodeInvalidData}, now)
 	}
 	c.cache.snapshot.ObservedAt = now
 	c.cache.snapshot.Stale = false
@@ -268,9 +280,9 @@ func (c *Client) failedLocked(err error, now time.Time) readResult {
 
 func classifyContext(err error) error {
 	if errors.Is(err, context.DeadlineExceeded) {
-		return &Error{Code: "timeout", Retryable: true}
+		return &Error{Code: CodeTimeout, Retryable: true}
 	}
-	return &Error{Code: "unavailable", Retryable: true}
+	return &Error{Code: CodeUnavailable, Retryable: true}
 }
 
 type rawProvider struct {
