@@ -464,10 +464,11 @@ func newApp(cfg config.Config, log *slog.Logger, activity server.ActivityTracker
 		TransportKind: tr.Kind,
 		Tracer:        tracer,
 		Routes: server.Routes{
-			Messages:       http.HandlerFunc(d.messages),
-			CountTokens:    http.HandlerFunc(d.countTokens),
-			Models:         models,
-			ProviderReport: reportHandler,
+			Messages:         http.HandlerFunc(d.messages),
+			CountTokens:      http.HandlerFunc(d.countTokens),
+			Models:           models,
+			ProviderReport:   reportHandler,
+			ProviderReportV2: reportHandler.V2(),
 			// Everything else — /v1/organizations/..., whatever Claude Code
 			// reaches for next — relays upstream unchanged. None of it may 404
 			// locally.
@@ -496,7 +497,7 @@ type reportDependencies struct {
 	prices    providerreport.ReferencePriceReader
 }
 
-func newProviderReport(cfg config.Config, source auth.CredentialSource, deps *reportDependencies) (http.Handler, error) {
+func newProviderReport(cfg config.Config, source auth.CredentialSource, deps *reportDependencies) (*providerreport.Handler, error) {
 	if deps == nil {
 		deps = &reportDependencies{}
 	}

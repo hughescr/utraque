@@ -162,8 +162,8 @@ func (c *AnthropicClient) Read(ctx context.Context, oauthToken string) (Observat
 			return Observation{}, err
 		}
 		o.ExtraUsage = extra
-		// Schema v1 keeps ExtraUsage on the wire; SpendLimits carries the
-		// same facts in the provider-neutral shape — see
+		// Schema 1 keeps ExtraUsage on the wire; SpendLimits carries the
+		// same facts in the provider-neutral shape schema 2 serves — see
 		// Observation.SpendLimits.
 		o.SpendLimits = append(o.SpendLimits, spendLimitFromExtraUsage(extra))
 	}
@@ -213,30 +213,11 @@ func normalizeAnthropicLimit(l anthropicLimit, index int, now time.Time) (Quota,
 			return Quota{}, err
 		}
 		q.Scope = scope
-		q.ID += anthropicScopeSuffix(scope)
+		// Anthropic has no slots, so the schema-1 id already follows the
+		// schema-2 rule.
+		q.ID = QuotaID(q.ID, "", scope)
 	}
 	return q, nil
-}
-
-func anthropicScopeSuffix(s *Scope) string {
-	if s == nil {
-		return ""
-	}
-	result := ""
-	for _, item := range []struct {
-		name  string
-		label *ScopeLabel
-	}{{"model", s.Model}, {"surface", s.Surface}} {
-		if item.label == nil {
-			continue
-		}
-		value := item.label.ID
-		if value == "" {
-			value = item.label.DisplayName
-		}
-		result += ":" + item.name + "=" + value
-	}
-	return result
 }
 
 func normalizeAnthropicScope(s *anthropicScope) (*Scope, error) {
@@ -313,7 +294,7 @@ func spendLimitFromExtraUsage(e *ExtraUsage) SpendLimit {
 	result := SpendLimit{Enabled: &enabled, Limit: e.MonthlyLimit, Used: e.UsedCredits, AmountUnit: e.AmountUnit, Currency: e.Currency}
 	if e.UsedPercent != nil {
 		percent := *e.UsedPercent
-		result.UsedPercent = &percent
+		result.UsedPercent, result.Unit = &percent, PercentUnit
 	}
 	return result
 }

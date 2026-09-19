@@ -37,28 +37,31 @@ type Observation struct {
 	Balances []Balance `json:"balances,omitempty"`
 	// SpendControls is populated only by Codex (codex.go:339), one entry per
 	// bucket that reports the upstream spendControlReached flag. Nothing in
-	// the tree reads it today: its former reader, providerreport's DeepSeek
-	// remaining-value estimator, was removed because DeepSeek never populates
-	// this field. It is emitted in the report JSON as-is. The same flag is
-	// also carried by SpendLimits.Reached; this slice is retained for schema
-	// v1 and goes away when SpendLimits is serialised at v2.
+	// the tree reads it: it exists only so the schema-1 report JSON keeps its
+	// spend_controls array. The same flag is carried by SpendLimits.Reached,
+	// which is what schema 2 serves.
+	//
+	// deprecated: remove with schema 1, once clients migrate.
 	SpendControls []SpendControl `json:"spend_controls,omitempty"`
 	// SpendLimits is the single home for "a ceiling with consumption": one
 	// entry per Codex bucket that reports individualLimit and/or
 	// spendControlReached (codex.go:338-341,399-407), and one entry for
 	// Anthropic's extra_usage block (anthropic.go:157-167). DeepSeek never
-	// populates it. It is not serialised until schema v2; until then the
-	// same facts are still fanned out into the schema v1 shapes — Codex into
-	// Quotas (Kind QuotaKindSpendControl), Balances (Kind "spend_control")
-	// and SpendControls, Anthropic into ExtraUsage — and those must keep
-	// being populated so the report JSON is unchanged.
+	// populates it. The schema-2 report serves it as quota.spend_limits; it
+	// is kept off this type's own JSON form because that form is the schema-1
+	// quota reading, which instead fans the same facts out into Quotas (Kind
+	// QuotaKindSpendControl), Balances (Kind BalanceKindSpendControl),
+	// SpendControls and ExtraUsage. Those must keep being populated until
+	// schema 1 is retired.
 	SpendLimits []SpendLimit `json:"-"`
 	// Plan is populated only by Codex, from the account's plan type
 	// (codex.go:245).
 	Plan *PlanInfo `json:"plan,omitempty"`
 	// ExtraUsage is populated only by Anthropic, from its extra_usage block.
-	// The same facts are also carried by SpendLimits; this field is retained
-	// for schema v1 and goes away when SpendLimits is serialised at v2.
+	// The same facts are carried by SpendLimits, which is what schema 2
+	// serves; this field exists only for the schema-1 report JSON.
+	//
+	// deprecated: remove with schema 1, once clients migrate.
 	ExtraUsage *ExtraUsage `json:"extra_usage,omitempty"`
 	// ResetCredits is populated only by Codex, from rateLimitResetCredits
 	// (codex.go:414).
@@ -83,31 +86,150 @@ type PlanInfo struct {
 // path) or the fixed legacy window id (legacy path), neither of which this
 // package enumerates. The constants below are the values utraque itself
 // mints; a QuotaKind that is none of them came from upstream. Codex's
-// primary/secondary window rows leave Kind empty.
+// primary/secondary window rows leave Kind empty. The schema-2 report does
+// not serve this value: it serves WindowKindOf's closed vocabulary as
+// quotas[].kind, with the upstream value still readable as quotas[].bucket.
 type QuotaKind string
 
 const (
 	// QuotaKindSpendControl marks the Codex entry derived from a bucket's
-	// individualLimit (codex.go:397).
+	// individualLimit (codex.go:397). It is a schema-1 fan-out of the
+	// bucket's SpendLimit and is not served at schema 2.
 	QuotaKindSpendControl QuotaKind = "spend_control"
 )
 
+// WindowKind is utraque's own closed vocabulary for what a Quota row
+// measures, served as quotas[].kind at schema 2. Every provider's rows are
+// mapped into it by WindowKindOf; the upstream value the mapping started
+// from stays readable as Quota.Bucket, so the mapping loses nothing.
+type WindowKind string
+
+const (
+	// WindowSession is the short rolling window: Anthropic's "session" limit
+	// (legacy "five_hour") and Codex's primary window.
+	WindowSession WindowKind = "session"
+	// WindowWeekly is the long rolling window over all models: Anthropic's
+	// "weekly_all" limit (legacy "seven_day") and Codex's secondary window.
+	WindowWeekly WindowKind = "weekly"
+	// WindowWeeklyScoped is a weekly window that applies to one model or
+	// surface: Anthropic's "weekly_scoped" limit and the legacy
+	// "seven_day_opus", "seven_day_sonnet" and "seven_day_oauth_apps"
+	// windows. Codex reports no scoped windows.
+	WindowWeeklyScoped WindowKind = "weekly_scoped"
+	// WindowOther is every row the table above does not place: Anthropic's
+	// legacy "cinder_cove" window, an upstream limit kind and group this
+	// package has never seen, or a Codex row in neither slot.
+	WindowOther WindowKind = "other"
+)
+
+// WindowKindOf places one provider's Quota row in the WindowKind vocabulary.
+//
+// Anthropic rows are placed by their upstream limit kind (Quota.Kind, or
+// Quota.Bucket when a caller built the row without one) or, failing that,
+// their upstream group: "session"/"five_hour" (group "session") is the
+// session window; "weekly_all", "weekly_scoped", the legacy "seven_day*"
+// ids and group "weekly" are weekly windows, which are weekly_scoped when
+// the row carries a Scope or is one of the legacy per-model/per-surface ids
+// ("seven_day_opus", "seven_day_sonnet", "seven_day_oauth_apps") and weekly
+// otherwise. Codex rows are placed by Slot: the Codex payload names its
+// windows only by position, "primary" being the short window and
+// "secondary" the weekly one, so the mapping is positional rather than a
+// claim about DurationSeconds, which the row still carries verbatim. Any
+// other provider, and any row the tables do not place, is WindowOther.
+func WindowKindOf(provider leg.ID, q Quota) WindowKind {
+	switch provider {
+	case leg.Anthropic:
+		raw := string(q.Kind)
+		if raw == "" {
+			raw = q.Bucket
+		}
+		scoped := q.Scope != nil
+		switch raw {
+		case "session", "five_hour":
+			return WindowSession
+		case "weekly_all", "seven_day", "weekly_scoped":
+		case "seven_day_opus", "seven_day_sonnet", "seven_day_oauth_apps":
+			scoped = true
+		default:
+			switch q.Group {
+			case "session":
+				return WindowSession
+			case "weekly":
+			default:
+				return WindowOther
+			}
+		}
+		if scoped || raw == "weekly_scoped" {
+			return WindowWeeklyScoped
+		}
+		return WindowWeekly
+	case leg.Codex:
+		switch q.Slot {
+		case "primary":
+			return WindowSession
+		case "secondary":
+			return WindowWeekly
+		}
+	}
+	return WindowOther
+}
+
+// QuotaID composes the schema-2 quota identity, bucket[:slot][:scope]: the
+// bucket, then ":"+slot when the provider splits a bucket into slots
+// (Codex), then the scope suffix when the window is scoped (Anthropic). It is
+// unique within one Observation for every provider. The schema-1 Quota.ID
+// follows the same rule only on Anthropic; Codex's schema-1 rows carry the
+// bare bucket and rely on Slot.
+func QuotaID(bucket, slot string, scope *Scope) string {
+	id := bucket
+	if slot != "" {
+		id += ":" + slot
+	}
+	return id + scopeSuffix(scope)
+}
+
+// scopeSuffix renders a Scope as the ":model=<id>:surface=<id>" tail QuotaID
+// appends, each label by its id or, failing that, its display name.
+func scopeSuffix(s *Scope) string {
+	if s == nil {
+		return ""
+	}
+	result := ""
+	for _, item := range []struct {
+		name  string
+		label *ScopeLabel
+	}{{"model", s.Model}, {"surface", s.Surface}} {
+		if item.label == nil {
+			continue
+		}
+		value := item.label.ID
+		if value == "" {
+			value = item.label.DisplayName
+		}
+		result += ":" + item.name + "=" + value
+	}
+	return result
+}
+
 type Quota struct {
-	// ID's identity contract differs by provider. On Anthropic it is a
-	// fully-qualified window id: Kind (always non-empty — checked at
-	// anthropic.go:187), with a scope suffix appended when the window is
-	// scoped (anthropic.go:194,214, anthropicScopeSuffix). On Codex it is a
+	// ID is the schema-1 identity, and its contract differs by provider. On
+	// Anthropic it is a fully-qualified window id: Kind (always non-empty —
+	// checked at anthropic.go:187), with a scope suffix appended when the
+	// window is scoped (anthropic.go:194,214, QuotaID). On Codex it is a
 	// bucket id (the upstream limitId, or the map key when absent) shared by
 	// the primary and secondary window rows for the same bucket, which Slot
-	// disambiguates
-	// (codex.go:362); the derived spend-control entry reuses that bucket id
-	// with a ":spend_control" suffix (codex.go:397).
+	// disambiguates (codex.go:362); the derived spend-control entry reuses
+	// that bucket id with a ":spend_control" suffix (codex.go:397). The
+	// schema-2 report does not serve this value: it recomputes every row's
+	// id with QuotaID from Bucket, Slot and Scope.
 	ID string `json:"id"`
 	// Bucket is the upstream identity the ID is derived from, without any
 	// slot or scope decoration: on Codex the limitId (or the map key when
 	// absent — codex.go:326-329,362,397), on Anthropic the wire limit kind
-	// (anthropic.go:194) or the legacy window key (anthropic.go:179). It is
-	// not serialised until schema v2 exposes it as quotas[].bucket.
+	// (anthropic.go:194) or the legacy window key (anthropic.go:179). The
+	// schema-2 report serves it as quotas[].bucket and derives quotas[].id
+	// from it; it is kept off this type's own JSON form because that form is
+	// the schema-1 quota reading.
 	Bucket string `json:"-"`
 	// Name is populated only by Codex, from the upstream limitName
 	// (codex.go:364).
@@ -178,6 +300,26 @@ type ScopeLabel struct {
 	DisplayName string `json:"display_name,omitempty"`
 }
 
+// BalanceKind is the vocabulary of Balance.Kind. The two funds-on-hand kinds
+// are what the schema-2 report serves as balances[]; BalanceKindSpendControl
+// is a schema-1 fan-out of a Codex SpendLimit and is dropped there.
+type BalanceKind string
+
+const (
+	// BalanceKindAccount is DeepSeek's prepaid account balance: Total is the
+	// sum of its granted and topped_up Components and is money on hand.
+	BalanceKindAccount BalanceKind = "account_balance"
+	// BalanceKindWorkspaceCredits is a Codex bucket's credit balance: Total
+	// is money on hand, never broken into Components.
+	BalanceKindWorkspaceCredits BalanceKind = "workspace_credits"
+	// BalanceKindSpendControl is the schema-1 rendering of a Codex bucket's
+	// individualLimit: Total is the ceiling, not money on hand, and the one
+	// "used" Component is consumption against it.
+	//
+	// deprecated: remove with schema 1, once clients migrate.
+	BalanceKindSpendControl BalanceKind = "spend_control"
+)
+
 // Balance's Total means a different accounting equation depending on Kind,
 // because the three producers populate it from three different upstream
 // shapes:
@@ -193,16 +335,14 @@ type ScopeLabel struct {
 // A caller that treats every Total as spendable funds (dividing by a price
 // rate, for instance) is correct only for the first two kinds.
 type Balance struct {
-	// Kind selects the accounting equation for this row: "account_balance"
-	// (DeepSeek, deepseek.go:93), "workspace_credits" (Codex,
-	// codex.go:378), or "spend_control" (Codex, codex.go:398) — see the
-	// type doc above.
-	Kind string `json:"kind"`
+	// Kind selects the accounting equation for this row — see BalanceKind
+	// and the type doc above.
+	Kind BalanceKind `json:"kind"`
 	// LimitID is populated only by Codex, both for "workspace_credits" and
 	// "spend_control" rows, from the upstream limitId — the same bucket id as
-	// the paired Quota.ID (codex.go:378,398). DeepSeek never sets it. The
-	// JSON key is still "scope_id" for schema v1 compatibility, although the
-	// value is a limit bucket id and never refers to a Scope.
+	// the paired Quota.Bucket (codex.go:378,398). DeepSeek never sets it. The
+	// schema-1 JSON key is "scope_id", although the value is a limit bucket
+	// id and never refers to a Scope; schema 2 serves it as limit_id.
 	LimitID string `json:"scope_id,omitempty"`
 	// Currency is populated only by DeepSeek, from the upstream balance
 	// entry's currency, "USD" or "CNY" (deepseek.go:89,94). Codex never sets
@@ -244,10 +384,11 @@ type BalanceComponent struct {
 // state. A missing backend flag produces no entry; Reached=false is retained.
 // Populated only by Codex (codex.go:339, from spendControlReached); no Go code
 // reads it back — see Observation.SpendControls.
+//
+// deprecated: remove with schema 1, once clients migrate.
 type SpendControl struct {
 	// LimitID is the same bucket id used for the paired Quota/Balance rows
-	// for that bucket (codex.go:339). The JSON key is still "scope_id" for
-	// schema v1 compatibility.
+	// for that bucket (codex.go:339). The schema-1 JSON key is "scope_id".
 	LimitID string `json:"scope_id"`
 	// Reached is the upstream spendControlReached flag verbatim (codex.go:339).
 	Reached bool `json:"reached"`
@@ -259,49 +400,54 @@ type SpendControl struct {
 // The two payloads carry different subsets of these facts (Codex has a reset
 // time and a reached flag but no enabled flag or currency; Anthropic the
 // reverse), so every provider-dependent field is a pointer whose nil means
-// "not reported". Amounts stay in the provider's decimal representation. Not
-// serialised until schema v2 — see Observation.SpendLimits.
+// "not reported". Amounts stay in the provider's decimal representation. The
+// JSON tags are the schema-2 quota.spend_limits[] shape — see
+// Observation.SpendLimits for why the Observation itself does not carry it.
 type SpendLimit struct {
 	// LimitID is the Codex bucket id, the same value as the paired
 	// Quota.Bucket, Balance.LimitID and SpendControl.LimitID
 	// (codex.go:341,400). Empty on Anthropic, whose extra usage is
 	// account-wide and tied to no bucket.
-	LimitID string
+	LimitID string `json:"limit_id,omitempty"`
 	// Enabled is Anthropic's is_enabled flag (anthropic.go:274). Codex never
 	// reports it.
-	Enabled *bool
+	Enabled *bool `json:"enabled,omitempty"`
 	// Limit is the ceiling: Codex individualLimit.limit (codex.go:403),
 	// Anthropic monthly_limit when present (anthropic.go:278-287).
-	Limit *string
+	Limit *string `json:"limit,omitempty"`
 	// Used is consumption against Limit: Codex individualLimit.used
 	// (codex.go:403), Anthropic used_credits when present
 	// (anthropic.go:278-287).
-	Used *string
+	Used *string `json:"used,omitempty"`
 	// AmountUnit is the fixed literal "provider_units" whenever Limit or
 	// Used is set (codex.go:403; anthropic.go:288); empty otherwise.
-	AmountUnit string
+	AmountUnit string `json:"amount_unit,omitempty"`
 	// Currency is Anthropic's currency when present and valid
 	// (anthropic.go:297-301). Codex never reports one.
-	Currency string
+	Currency string `json:"currency,omitempty"`
 	// UsedPercent is on the PercentUnit scale: Codex 100 minus
 	// individualLimit.remainingPercent (codex.go:396,404), Anthropic
 	// utilization when present (anthropic.go:290-295).
-	UsedPercent *float64
+	UsedPercent *float64 `json:"used_percent,omitempty"`
+	// Unit is PercentUnit whenever UsedPercent is set; empty otherwise.
+	Unit string `json:"unit,omitempty"`
 	// ResetsAt is Codex individualLimit.resetsAt (codex.go:392,404).
 	// Anthropic never reports one.
-	ResetsAt *time.Time
+	ResetsAt *time.Time `json:"resets_at,omitempty"`
 	// Reached is Codex spendControlReached when present (codex.go:340-341). It
 	// is independent of Limit/Used: a bucket can report either fact without
 	// the other. Anthropic never reports it.
-	Reached *bool
+	Reached *bool `json:"reached,omitempty"`
 }
 
 // ExtraUsage retains only the documented, non-identifying fields returned by
 // Anthropic. Amounts remain in the provider's original decimal representation.
 // Every field is populated only by Anthropic's normalizeAnthropicExtra
 // (anthropic.go:270-300); no other provider sets ExtraUsage at all. The same
-// facts are also projected into a SpendLimit (spendLimitFromExtraUsage); this
-// shape is retained for schema v1.
+// facts are also projected into a SpendLimit (spendLimitFromExtraUsage),
+// which is what schema 2 serves; this shape exists for the schema-1 JSON.
+//
+// deprecated: remove with schema 1, once clients migrate.
 type ExtraUsage struct {
 	// Enabled is the upstream is_enabled flag verbatim (anthropic.go:274);
 	// required, always set.

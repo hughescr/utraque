@@ -72,7 +72,7 @@ func (h *Handler) collect(ctx context.Context, creds credentials, since, until t
 	prices := <-pricesDone
 	ended := h.now().UTC()
 
-	r := Report{SchemaVersion: SchemaVersion, GeneratedAt: ended,
+	r := Report{SchemaVersion: SchemaVersionV1, GeneratedAt: ended,
 		CollectionStartedAt: started, CollectionEndedAt: ended,
 		HistoryRange: DateRange{Since: since, Until: until}}
 	for _, id := range reportedLegs {

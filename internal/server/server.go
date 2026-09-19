@@ -28,7 +28,19 @@ const (
 	// HealthPath is the local health endpoint.
 	HealthPath = "/healthz"
 
-	// ProviderReportPath is the loopback-only provider reporting endpoint.
+	// ProviderReportV1Path and ProviderReportV2Path are the loopback-only
+	// provider report endpoints, one per schema version. Utraque-owned
+	// routes live under /utraque/<endpoint>/<version>; only Anthropic-alike
+	// routes live under /v1/.
+	ProviderReportV1Path = "/utraque/providers/v1"
+	ProviderReportV2Path = "/utraque/providers/v2"
+
+	// ProviderReportPath is the schema-1 report's original path. It stays
+	// registered as an alias of ProviderReportV1Path with the same handler,
+	// so its body and headers are byte-identical to that path's.
+	//
+	// deprecated: remove once clients migrate to ProviderReportV1Path or
+	// ProviderReportV2Path.
 	ProviderReportPath = "/v1/utraque/providers"
 )
 
@@ -38,11 +50,16 @@ const DefaultShutdownGrace = 25 * time.Second
 // Routes are the backend handlers main mounts. A nil handler is not
 // registered; a nil Passthrough means unmatched paths get a 404 envelope.
 type Routes struct {
-	Messages       http.Handler // POST /v1/messages
-	CountTokens    http.Handler // POST /v1/messages/count_tokens
-	Models         http.Handler // GET  /v1/models
-	ProviderReport http.Handler // GET/HEAD /v1/utraque/providers; handler owns 405s
-	Passthrough    http.Handler // catch-all; in production this must not 404
+	Messages    http.Handler // POST /v1/messages
+	CountTokens http.Handler // POST /v1/messages/count_tokens
+	Models      http.Handler // GET  /v1/models
+	// ProviderReport serves schema 1 at ProviderReportV1Path and, unchanged,
+	// at the deprecated ProviderReportPath alias; GET/HEAD, handler owns 405s.
+	ProviderReport http.Handler
+	// ProviderReportV2 serves schema 2 at ProviderReportV2Path under the same
+	// terms.
+	ProviderReportV2 http.Handler
+	Passthrough      http.Handler // catch-all; in production this must not 404
 }
 
 // ActivityTracker is the slice of *idle.Timer the server depends on: Hold
@@ -201,9 +218,14 @@ func New(opts Options) (*Server, error) {
 		mux.Handle("GET /v1/models", h)
 	}
 	if h := opts.Routes.ProviderReport; h != nil {
-		// Reserve the exact path for every method. The report handler answers
+		// Reserve the exact paths for every method. The report handler answers
 		// unsupported methods with 405 so they can never leak to passthrough.
+		mux.Handle(ProviderReportV1Path, h)
+		// deprecated: remove once clients migrate.
 		mux.Handle(ProviderReportPath, h)
+	}
+	if h := opts.Routes.ProviderReportV2; h != nil {
+		mux.Handle(ProviderReportV2Path, h)
 	}
 	var root http.Handler = mux
 	if h := opts.Routes.Passthrough; h != nil {
@@ -267,11 +289,24 @@ func (s *Server) chain(h http.Handler) http.Handler {
 	return h
 }
 
+// IsProviderReport reports whether r targets one of the provider report
+// paths, either schema or the deprecated alias.
+func IsProviderReport(r *http.Request) bool {
+	if r == nil || r.URL == nil {
+		return false
+	}
+	switch r.URL.Path {
+	case ProviderReportV1Path, ProviderReportV2Path, ProviderReportPath:
+		return true
+	}
+	return false
+}
+
 // withProviderReportNoStore applies before authentication so even a rejected
 // report request cannot be cached by an HTTP intermediary.
 func withProviderReportNoStore(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r != nil && r.URL != nil && r.URL.Path == ProviderReportPath {
+		if IsProviderReport(r) {
 			w.Header().Set("Cache-Control", "no-store")
 		}
 		next.ServeHTTP(w, r)

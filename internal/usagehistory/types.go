@@ -110,9 +110,9 @@ type Report struct {
 // is an agent label such as "claude", "codex", or "opencode"; it does not
 // identify a provider billing account. InferredLeg is classifyLeg's guess
 // from the model name alone (leg.Unknown when no prefix matches); it is
-// serialised under the schema v1 key "provider". Token categories are counted
-// exactly once; output tokens already include any reasoning-token subset
-// reported by a provider.
+// serialised under the key "provider" in both report schemas. Token
+// categories are counted exactly once; output tokens already include any
+// reasoning-token subset reported by a provider.
 type DailyModelUsage struct {
 	Date                time.Time  `json:"date"`
 	Source              string     `json:"source"`
@@ -128,7 +128,7 @@ type DailyModelUsage struct {
 }
 
 // BlockModel is a raw model name plus the leg classifyLeg infers from it,
-// serialised under the schema v1 key "provider".
+// serialised under the key "provider" in both report schemas.
 type BlockModel struct {
 	Model       string `json:"model"`
 	InferredLeg leg.ID `json:"provider"`

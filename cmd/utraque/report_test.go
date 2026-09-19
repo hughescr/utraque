@@ -86,24 +86,30 @@ func TestProductionReportCompositionUsesAllInjectedSources(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv, err := server.New(server.Options{Config: cfg, Routes: server.Routes{ProviderReport: h, Passthrough: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusTeapot) })}})
+	// Mounted exactly as main mounts it: schema 1 on ProviderReport, schema 2
+	// on ProviderReportV2 from the same handler.
+	srv, err := server.New(server.Options{Config: cfg, Routes: server.Routes{ProviderReport: h, ProviderReportV2: h.V2(), Passthrough: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusTeapot) })}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	r := httptest.NewRequest(http.MethodGet, server.ProviderReportPath, nil)
-	r.RemoteAddr = "127.0.0.1:4000"
-	r.Header.Set(proxyhdr.LocalToken, cfg.LocalToken)
-	r.Header.Set("Authorization", "Bearer caller-token")
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, r)
-	if w.Code != 200 {
-		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	get := func(path string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(http.MethodGet, path, nil)
+		r.RemoteAddr = "127.0.0.1:4000"
+		r.Header.Set(proxyhdr.LocalToken, cfg.LocalToken)
+		r.Header.Set("Authorization", "Bearer caller-token")
+		w := httptest.NewRecorder()
+		srv.ServeHTTP(w, r)
+		if w.Code != 200 {
+			t.Fatalf("%s status=%d body=%s", path, w.Code, w.Body.String())
+		}
+		if w.Header().Get("Cache-Control") != "no-store" {
+			t.Fatalf("%s response is cacheable", path)
+		}
+		return w
 	}
+	w := get(server.ProviderReportPath)
 	if historyCalls.Load() != 1 || anthropicCalls.Load() != 1 || deepSeekCalls.Load() != 1 || codexCalls.Load() != 1 || priceCalls.Load() != 1 {
 		t.Fatalf("calls history=%d anthropic=%d deepseek=%d codex=%d prices=%d", historyCalls.Load(), anthropicCalls.Load(), deepSeekCalls.Load(), codexCalls.Load(), priceCalls.Load())
-	}
-	if w.Header().Get("Cache-Control") != "no-store" {
-		t.Fatal("report response is cacheable")
 	}
 	var report providerreport.Report
 	if err := json.Unmarshal(w.Body.Bytes(), &report); err != nil {
@@ -111,6 +117,32 @@ func TestProductionReportCompositionUsesAllInjectedSources(t *testing.T) {
 	}
 	if codex := reportProviderNamed(report, leg.Codex); codex == nil || codex.ReferencePrices == nil || len(codex.ReferencePrices.Models) != 1 || !codex.ReferencePrices.Models[0].Eligible {
 		t.Fatalf("codex reference prices=%+v", codex)
+	}
+	// The versioned schema-1 path and the schema-2 path are served from that
+	// one collection: no source is consulted again. (That the alias and the
+	// versioned path share one handler, byte for byte, is the server
+	// package's test; here the second request is a cache hit.)
+	var v1 providerreport.Report
+	if err := json.Unmarshal(get(server.ProviderReportV1Path).Body.Bytes(), &v1); err != nil {
+		t.Fatal(err)
+	}
+	if v1.SchemaVersion != 1 || !v1.CollectionEndedAt.Equal(report.CollectionEndedAt) || !v1.Providers[0].SourceFreshness.Cached {
+		t.Fatalf("versioned schema-1 path re-collected or changed schema: %+v", v1)
+	}
+	var v2 providerreport.ReportV2
+	if err := json.Unmarshal(get(server.ProviderReportV2Path).Body.Bytes(), &v2); err != nil {
+		t.Fatal(err)
+	}
+	if v2.SchemaVersion != 2 || !v2.CollectionEndedAt.Equal(report.CollectionEndedAt) {
+		t.Fatalf("schema 2 document=%+v", v2)
+	}
+	if historyCalls.Load() != 1 || anthropicCalls.Load() != 1 || deepSeekCalls.Load() != 1 || codexCalls.Load() != 1 || priceCalls.Load() != 1 {
+		t.Fatalf("second schema re-collected: history=%d anthropic=%d deepseek=%d codex=%d prices=%d", historyCalls.Load(), anthropicCalls.Load(), deepSeekCalls.Load(), codexCalls.Load(), priceCalls.Load())
+	}
+	for i := range v2.Providers {
+		if p := v2.Providers[i]; p.Provider == leg.Codex && (p.ReferencePrices == nil || p.ReferencePrices.Catalog != referenceprice.SourceModelsDev || !p.ReferencePrices.Models[0].Eligible) {
+			t.Fatalf("schema 2 codex reference prices=%+v", p.ReferencePrices)
+		}
 	}
 }
 

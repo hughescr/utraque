@@ -332,7 +332,7 @@ func normalizeCodexLimits(o *Observation, response codexRateLimitsResponse, now 
 			return quotaError(leg.Codex, CodeInvalidData, false)
 		}
 		// spend collects the bucket's ceiling facts into one SpendLimit; the
-		// schema v1 fan-out (SpendControls, the spend_control Quota and
+		// schema-1 fan-out (SpendControls, the spend_control Quota and
 		// Balance rows) is still populated alongside it — see
 		// Observation.SpendLimits.
 		var spend *SpendLimit
@@ -376,7 +376,7 @@ func normalizeCodexLimits(o *Observation, response codexRateLimitsResponse, now 
 			if item.s.Credits.HasCredits == nil || item.s.Credits.Unlimited == nil {
 				return quotaError(leg.Codex, CodeInvalidData, false)
 			}
-			b := Balance{Kind: "workspace_credits", LimitID: id, AmountUnit: "credits", Available: item.s.Credits.HasCredits, Unlimited: item.s.Credits.Unlimited}
+			b := Balance{Kind: BalanceKindWorkspaceCredits, LimitID: id, AmountUnit: "credits", Available: item.s.Credits.HasCredits, Unlimited: item.s.Credits.Unlimited}
 			if item.s.Credits.Balance != nil {
 				if !validDecimal(*item.s.Credits.Balance) {
 					return quotaError(leg.Codex, CodeInvalidData, false)
@@ -396,13 +396,13 @@ func normalizeCodexLimits(o *Observation, response codexRateLimitsResponse, now 
 			}
 			used := 100 - *s.RemainingPercent
 			o.Quotas = append(o.Quotas, Quota{ID: id + ":spend_control", Bucket: id, Kind: QuotaKindSpendControl, UsedPercent: used, Unit: PercentUnit, ResetsAt: reset})
-			o.Balances = append(o.Balances, Balance{Kind: "spend_control", LimitID: id, AmountUnit: "provider_units", Total: s.Limit, Components: []BalanceComponent{{Name: "used", Amount: s.Used}}})
+			o.Balances = append(o.Balances, Balance{Kind: BalanceKindSpendControl, LimitID: id, AmountUnit: "provider_units", Total: s.Limit, Components: []BalanceComponent{{Name: "used", Amount: s.Used}}})
 			if spend == nil {
 				spend = &SpendLimit{LimitID: id}
 			}
 			limit, usedAmount := s.Limit, s.Used
 			spend.Limit, spend.Used, spend.AmountUnit = &limit, &usedAmount, "provider_units"
-			spend.UsedPercent, spend.ResetsAt = &used, reset
+			spend.UsedPercent, spend.Unit, spend.ResetsAt = &used, PercentUnit, reset
 		}
 		if spend != nil {
 			o.SpendLimits = append(o.SpendLimits, *spend)

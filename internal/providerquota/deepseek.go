@@ -92,7 +92,7 @@ func (c *DeepSeekClient) Read(ctx context.Context) (Observation, error) {
 			return Observation{}, quotaError(leg.DeepSeek, CodeInvalidData, false)
 		}
 		o.Balances = append(o.Balances, Balance{
-			Kind:       "account_balance",
+			Kind:       BalanceKindAccount,
 			Currency:   info.Currency,
 			AmountUnit: "currency",
 			Total:      info.TotalBalance,

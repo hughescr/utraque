@@ -42,9 +42,29 @@ type Options struct {
 	Now                  func() time.Time
 }
 
+// providerMemory is the cross-attempt memory schema 2 serves as last_attempt
+// and last_success. It lives with the cache entry, so it is scoped like the
+// entry (per credential set, history range and plan) and is forgotten when
+// the entry is evicted.
+type providerMemory struct {
+	// lastAttemptAt is the end of the most recent collection attempt.
+	lastAttemptAt time.Time
+	// lastSuccessAt is the end of the most recent attempt whose Status was
+	// not StatusError; a failed attempt leaves it as it was.
+	lastSuccessAt time.Time
+}
+
 type cacheEntry struct {
 	report  Report
 	created time.Time
+	memory  map[leg.ID]providerMemory
+}
+
+// served is what the cache hands ServeHTTP: the schema-1 document plus the
+// memory the schema-2 projection needs.
+type served struct {
+	report Report
+	memory map[leg.ID]providerMemory
 }
 
 type Handler struct {
@@ -86,7 +106,21 @@ func New(opts Options) *Handler {
 		cache: make(map[string]*cacheEntry), sem: make(chan struct{}, 4)}
 }
 
+// ServeHTTP serves schema 1 (Report), the document the legacy path and
+// /utraque/providers/v1 return. V2 serves schema 2 from the same collection.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	h.serve(w, r, func(s served) any { return s.report })
+}
+
+// V2 returns the handler for schema 2 (ReportV2). It shares ServeHTTP's
+// cache, coalescing and access checks; only the rendering differs.
+func (h *Handler) V2() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h.serve(w, r, func(s served) any { return renderV2(s.report, s.memory) })
+	})
+}
+
+func (h *Handler) serve(w http.ResponseWriter, r *http.Request, render func(served) any) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "application/json")
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
@@ -117,7 +151,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	until := utcDate(now)
 	key := h.scopeKey(creds, since, until)
 	if rep, ok := h.cached(key, now, false); ok {
-		writeJSON(w, http.StatusOK, rep, r.Method == http.MethodHead)
+		writeJSON(w, http.StatusOK, render(rep), r.Method == http.MethodHead)
 		return
 	}
 
@@ -131,7 +165,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		case h.sem <- struct{}{}:
 			defer func() { <-h.sem }()
 		case <-work.Done():
-			return Report{}, work.Err()
+			return served{}, work.Err()
 		}
 		attempt := h.collect(work, creds, since, until)
 		if h.codexSource != nil && creds.codex.AccountID != "" {
@@ -157,7 +191,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": map[string]string{"type": "unavailable", "message": "provider report unavailable"}}, r.Method == http.MethodHead)
 			return
 		}
-		writeJSON(w, http.StatusOK, res.Val.(Report), r.Method == http.MethodHead)
+		writeJSON(w, http.StatusOK, render(res.Val.(served)), r.Method == http.MethodHead)
 	}
 }
 
@@ -222,31 +256,49 @@ func (h *Handler) scopeKey(creds credentials, since, until time.Time) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func (h *Handler) cached(key string, now time.Time, allowExpired bool) (Report, bool) {
+func (h *Handler) cached(key string, now time.Time, allowExpired bool) (served, bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	e := h.cache[key]
 	if e == nil {
-		return Report{}, false
+		return served{}, false
 	}
 	age := now.Sub(e.created)
 	if age < 0 {
 		age = 0
 	}
 	if !allowExpired && age >= h.ttl {
-		return Report{}, false
+		return served{}, false
 	}
 	r := cloneReport(e.report)
 	r.GeneratedAt = now
 	markFreshness(&r, true, age >= h.ttl, age)
-	return r, true
+	return served{report: r, memory: e.memory}, true
 }
 
-func (h *Handler) storeAttempt(key string, attempt Report) Report {
+// storeAttempt records a finished collection under key, carrying forward
+// from the previous entry the last complete snapshot (schema 1's
+// last_complete_snapshot, for providers this attempt did not fully succeed
+// on) and the per-provider memory (schema 2's last_attempt / last_success),
+// and returns the attempt as it is to be served.
+func (h *Handler) storeAttempt(key string, attempt Report) served {
 	now := h.now().UTC()
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if old := h.cache[key]; old != nil {
+	old := h.cache[key]
+	memory := make(map[leg.ID]providerMemory, len(attempt.Providers))
+	for _, p := range attempt.Providers {
+		var mem providerMemory
+		if old != nil {
+			mem = old.memory[p.Provider]
+		}
+		mem.lastAttemptAt = attempt.CollectionEndedAt
+		if p.Status != StatusError {
+			mem.lastSuccessAt = attempt.CollectionEndedAt
+		}
+		memory[p.Provider] = mem
+	}
+	if old != nil {
 		for i := range attempt.Providers {
 			if attempt.Providers[i].Status == StatusOK || attempt.Providers[i].discardPrevious {
 				continue
@@ -283,9 +335,9 @@ func (h *Handler) storeAttempt(key string, attempt Report) Report {
 		}
 		delete(h.cache, oldestKey)
 	}
-	h.cache[key] = &cacheEntry{report: cloneReport(attempt), created: now}
+	h.cache[key] = &cacheEntry{report: cloneReport(attempt), created: now, memory: memory}
 	markFreshness(&attempt, false, false, 0)
-	return attempt
+	return served{report: attempt, memory: memory}
 }
 
 func markFreshness(r *Report, cached, stale bool, age time.Duration) {
@@ -345,11 +397,30 @@ func observationResetPassed(obs *providerquota.Observation, now time.Time) bool 
 	return false
 }
 
+// cloneReport deep-copies a report so the cache and a response never share
+// memory. The copy goes through the schema-1 JSON form, which drops the
+// observation fields that form does not carry (Quota.Bucket, SpendLimits);
+// the schema-2 projection needs them, so each observation is cloned by
+// providerquota instead.
 func cloneReport(in Report) Report {
 	b, _ := json.Marshal(in)
 	var out Report
 	_ = json.Unmarshal(b, &out)
+	for i := range in.Providers {
+		out.Providers[i].Quota = cloneObservation(in.Providers[i].Quota)
+		if s := in.Providers[i].LastComplete; s != nil {
+			out.Providers[i].LastComplete.Quota = cloneObservation(s.Quota)
+		}
+	}
 	return out
+}
+
+func cloneObservation(o *providerquota.Observation) *providerquota.Observation {
+	if o == nil {
+		return nil
+	}
+	c := o.Clone()
+	return &c
 }
 
 func bearer(v string) string {

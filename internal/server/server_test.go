@@ -13,14 +13,17 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/hughescr/utraque/internal/anthropic/schema"
 	"github.com/hughescr/utraque/internal/apierr"
 	"github.com/hughescr/utraque/internal/config"
+	"github.com/hughescr/utraque/internal/providerreport"
 	"github.com/hughescr/utraque/internal/proxyhdr"
 	"github.com/hughescr/utraque/internal/server"
+	"github.com/hughescr/utraque/internal/usagehistory"
 )
 
 const localSecret = "loopback-shared-secret"
@@ -360,6 +363,202 @@ func TestProviderReportPathNeverFallsThrough(t *testing.T) {
 	unauthorized := httptest.NewRequest(http.MethodGet, server.ProviderReportPath, nil)
 	if w := do(t, s, unauthorized); w.Code != http.StatusUnauthorized || w.Header().Get("Cache-Control") != "no-store" {
 		t.Fatalf("unauthorized report status=%d Cache-Control=%q", w.Code, w.Header().Get("Cache-Control"))
+	}
+}
+
+// TestProviderReportVersionedPaths pins the route layout: schema 1 at
+// /utraque/providers/v1 and, byte-identical, at the deprecated
+// /v1/utraque/providers alias; schema 2 at /utraque/providers/v2; every
+// report path under the same local-token and no-store rules; /healthz
+// untouched by any of it.
+func TestProviderReportVersionedPaths(t *testing.T) {
+	v1 := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Report-Schema", "1")
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprintf(w, `{"schema_version":1,"path":%q}`, "same for every alias")
+	})
+	v2 := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{"schema_version":2}`)
+	})
+	s, _ := newServer(t, func(o *server.Options) {
+		o.Config.LocalToken = localSecret
+		o.Routes.ProviderReport = v1
+		o.Routes.ProviderReportV2 = v2
+		o.Routes.Passthrough = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusTeapot) })
+	})
+	if server.ProviderReportV1Path != "/utraque/providers/v1" || server.ProviderReportV2Path != "/utraque/providers/v2" || server.ProviderReportPath != "/v1/utraque/providers" {
+		t.Fatalf("paths %q %q %q", server.ProviderReportV1Path, server.ProviderReportV2Path, server.ProviderReportPath)
+	}
+	get := func(path string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(http.MethodGet, path, nil)
+		r.Header.Set(proxyhdr.LocalToken, localSecret)
+		return do(t, s, r)
+	}
+	canonical := get(server.ProviderReportV1Path)
+	alias := get(server.ProviderReportPath)
+	second := get(server.ProviderReportV2Path)
+	for path, w := range map[string]*httptest.ResponseRecorder{server.ProviderReportV1Path: canonical, server.ProviderReportPath: alias, server.ProviderReportV2Path: second} {
+		if w.Code != http.StatusOK || w.Header().Get("Cache-Control") != "no-store" {
+			t.Fatalf("%s status=%d Cache-Control=%q body=%s", path, w.Code, w.Header().Get("Cache-Control"), w.Body.String())
+		}
+	}
+	if !bytes.Equal(canonical.Body.Bytes(), alias.Body.Bytes()) {
+		t.Fatalf("alias body differs:\n%s\n%s", canonical.Body.String(), alias.Body.String())
+	}
+	for _, h := range []string{"Content-Type", "X-Report-Schema", "Cache-Control"} {
+		if canonical.Header().Get(h) != alias.Header().Get(h) {
+			t.Fatalf("alias header %s differs: %q vs %q", h, canonical.Header().Get(h), alias.Header().Get(h))
+		}
+	}
+	if !strings.Contains(canonical.Body.String(), `"schema_version":1`) || !strings.Contains(second.Body.String(), `"schema_version":2`) {
+		t.Fatalf("wrong handler on a path: v1=%s v2=%s", canonical.Body.String(), second.Body.String())
+	}
+	for _, path := range []string{server.ProviderReportV1Path, server.ProviderReportPath, server.ProviderReportV2Path} {
+		unauthorized := httptest.NewRequest(http.MethodGet, path, nil)
+		if w := do(t, s, unauthorized); w.Code != http.StatusUnauthorized || w.Header().Get("Cache-Control") != "no-store" {
+			t.Fatalf("%s without token status=%d Cache-Control=%q", path, w.Code, w.Header().Get("Cache-Control"))
+		}
+		post := httptest.NewRequest(http.MethodPost, path, nil)
+		post.Header.Set(proxyhdr.LocalToken, localSecret)
+		if w := do(t, s, post); w.Code == http.StatusTeapot {
+			t.Fatalf("%s POST fell through to passthrough", path)
+		}
+	}
+	// /healthz is unaffected: still token-exempt, same fields.
+	health := do(t, s, httptest.NewRequest(http.MethodGet, server.HealthPath, nil))
+	if health.Code != http.StatusOK {
+		t.Fatalf("/healthz status=%d", health.Code)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(health.Body.Bytes(), &body); err != nil || body["version"] != "1.2.3-test" || body["status"] != "ok" || len(body) != 3 {
+		t.Fatalf("/healthz body=%s err=%v", health.Body.String(), err)
+	}
+	// Only the report handlers mount on report paths: with neither set, the
+	// paths are ordinary unmatched routes.
+	bare, _ := newServer(t, nil)
+	for _, path := range []string{server.ProviderReportV1Path, server.ProviderReportPath, server.ProviderReportV2Path} {
+		if w := do(t, bare, httptest.NewRequest(http.MethodGet, path, nil)); w.Code != http.StatusNotFound {
+			t.Fatalf("%s with no report handler status=%d", path, w.Code)
+		}
+	}
+}
+
+// reportHistory is the smallest HistoryCollector the route tests need: it
+// counts collections so a rejected request can be shown to have run none.
+type reportHistory struct{ calls atomic.Int64 }
+
+func (h *reportHistory) Collect(context.Context, time.Time, time.Time) (usagehistory.Report, error) {
+	h.calls.Add(1)
+	return usagehistory.Report{}, nil
+}
+
+// TestProviderReportRoutesEnforceAccess mounts the real report handler the
+// way main does (schema 1 on both v1 paths, Handler.V2() on the v2 path) and
+// pins, per path, the access contract the README states: a non-loopback
+// caller holding a valid local token gets 403, no-store, and no collection
+// runs; an authenticated unsupported method gets exactly 405 with
+// Allow: GET, HEAD and never reaches passthrough; a loopback GET gets the
+// schema the path names, and all three paths share one collection.
+func TestProviderReportRoutesEnforceAccess(t *testing.T) {
+	history := &reportHistory{}
+	report := providerreport.New(providerreport.Options{History: history})
+	var relays atomic.Int64
+	s, _ := newServer(t, func(o *server.Options) {
+		o.Config.LocalToken = localSecret
+		o.Routes.ProviderReport = report
+		o.Routes.ProviderReportV2 = report.V2()
+		o.Routes.Passthrough = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			relays.Add(1)
+			w.WriteHeader(http.StatusTeapot)
+		})
+	})
+	request := func(method, path, remoteAddr string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(method, path, nil)
+		r.RemoteAddr = remoteAddr
+		r.Header.Set(proxyhdr.LocalToken, localSecret)
+		return do(t, s, r)
+	}
+	errorType := func(t *testing.T, body []byte) string {
+		t.Helper()
+		var env struct {
+			Error struct {
+				Type string `json:"type"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal(body, &env); err != nil {
+			t.Fatalf("decoding %q: %v", body, err)
+		}
+		return env.Error.Type
+	}
+	for _, tc := range []struct {
+		path   string
+		schema float64
+	}{
+		{server.ProviderReportV1Path, 1},
+		{server.ProviderReportPath, 1},
+		{server.ProviderReportV2Path, 2},
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			before := history.calls.Load()
+			// A remote caller is refused even with the local token, for GET
+			// and HEAD alike, over IPv4 and IPv6.
+			for _, addr := range []string{"192.0.2.10:4000", "[2001:db8::1]:4000", "10.0.0.7:5000"} {
+				for _, method := range []string{http.MethodGet, http.MethodHead} {
+					w := request(method, tc.path, addr)
+					if w.Code != http.StatusForbidden || w.Header().Get("Cache-Control") != "no-store" {
+						t.Fatalf("%s from %s: status=%d Cache-Control=%q body=%s", method, addr, w.Code, w.Header().Get("Cache-Control"), w.Body.String())
+					}
+					if method == http.MethodHead {
+						if w.Body.Len() != 0 {
+							t.Fatalf("HEAD from %s carried a body: %s", addr, w.Body.String())
+						}
+					} else if got := errorType(t, w.Body.Bytes()); got != "permission_error" {
+						t.Fatalf("GET from %s: error type=%q", addr, got)
+					}
+				}
+			}
+			// Unsupported methods are answered by the report handler itself
+			// with exactly 405 and the Allow list, whoever sends them.
+			for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodOptions} {
+				for _, addr := range []string{"127.0.0.1:4000", "192.0.2.10:4000"} {
+					w := request(method, tc.path, addr)
+					if w.Code != http.StatusMethodNotAllowed || w.Header().Get("Allow") != "GET, HEAD" || w.Header().Get("Cache-Control") != "no-store" {
+						t.Fatalf("%s from %s: status=%d Allow=%q Cache-Control=%q body=%s", method, addr, w.Code, w.Header().Get("Allow"), w.Header().Get("Cache-Control"), w.Body.String())
+					}
+					if got := errorType(t, w.Body.Bytes()); got != "method_not_allowed" {
+						t.Fatalf("%s from %s: error type=%q", method, addr, got)
+					}
+				}
+			}
+			if got := history.calls.Load(); got != before {
+				t.Fatalf("rejected requests ran %d collection(s)", got-before)
+			}
+			// A loopback GET, IPv4 or IPv6, serves the schema the path names.
+			for _, addr := range []string{"127.0.0.1:4000", "[::1]:4000"} {
+				w := request(http.MethodGet, tc.path, addr)
+				if w.Code != http.StatusOK || w.Header().Get("Cache-Control") != "no-store" {
+					t.Fatalf("GET from %s: status=%d Cache-Control=%q body=%s", addr, w.Code, w.Header().Get("Cache-Control"), w.Body.String())
+				}
+				var doc map[string]any
+				if err := json.Unmarshal(w.Body.Bytes(), &doc); err != nil {
+					t.Fatalf("decoding %s: %v", w.Body.String(), err)
+				}
+				if doc["schema_version"] != tc.schema {
+					t.Fatalf("GET from %s: schema_version=%v want %v", addr, doc["schema_version"], tc.schema)
+				}
+			}
+		})
+	}
+	if relays.Load() != 0 {
+		t.Fatalf("%d report request(s) reached passthrough", relays.Load())
+	}
+	// Six accepted GETs across three paths and two schemas were served from
+	// one collection: the paths share the handler's cache.
+	if got := history.calls.Load(); got != 1 {
+		t.Fatalf("collections=%d want 1", got)
 	}
 }
 

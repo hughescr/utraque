@@ -459,6 +459,11 @@ override is changed or removed.
 
 ### Provider reporting
 
+These settings feed the loopback-only provider report, served at
+`GET /utraque/providers/v2` (schema 2) and, frozen and deprecated, at
+`GET /utraque/providers/v1` and its original path `GET /v1/utraque/providers`
+(schema 1). See *Provider report* below for the documents themselves.
+
 | Variable | Default | What it does |
 | --- | --- | --- |
 | `UTRAQUE_CCUSAGE_EXECUTABLE` | *(none)* | Direct path to an installed native `ccusage` binary. When set, this takes precedence over the package runner. Homebrew users can set `/opt/homebrew/bin/ccusage` after `brew install ccusage`. Utraque never downloads or updates it. |
@@ -941,138 +946,64 @@ And, for the DeepSeek leg:
 
 ## Provider report
 
-`GET /v1/utraque/providers` returns schema version 1 JSON for Anthropic,
-Codex, and DeepSeek. It is restricted to loopback clients. When
+`GET /utraque/providers/v2` returns schema version 2 JSON for Anthropic,
+Codex, and DeepSeek: each provider's live quota reading, its share of the
+local `ccusage` history, public reference prices, and derived estimates.
+Utraque-owned routes live at `/utraque/<endpoint>/<version>` (`/healthz`,
+older than the scheme, stays where it is); only the Anthropic-alike routes
+live under `/v1/`. Schema version 1 is still served,
+frozen, at `GET /utraque/providers/v1` and at its original path
+`GET /v1/utraque/providers` — see [Schema 1 (deprecated)](#schema-1-deprecated)
+for the migration mapping. There is no query-parameter negotiation: the path
+is the version.
+
+Every report path is restricted to loopback clients. When
 `UTRAQUE_LOCAL_TOKEN` is configured, the ordinary server middleware also
 requires the matching `X-Utraque-Token`; without that optional setting, a
 loopback caller needs no local-auth header. The caller must supply its Claude
-OAuth bearer credential for the Anthropic
-usage reading; utraque sends that bearer only to Anthropic's official usage
-endpoint and does not capture it from OAuth files, the environment, or a
-keychain.
+OAuth bearer credential for the Anthropic usage reading; utraque sends that
+bearer only to Anthropic's official usage endpoint and does not capture it
+from OAuth files, the environment, or a keychain.
 
 ```sh
 curl -sS \
   -H 'Authorization: Bearer <claude-oauth-token>' \
-  http://127.0.0.1:8317/v1/utraque/providers
+  http://127.0.0.1:8317/utraque/providers/v2
 ```
 
 Add `-H 'X-Utraque-Token: <local-token>'` when `UTRAQUE_LOCAL_TOKEN` is
 configured.
 
-Every response is `Cache-Control: no-store`. Utraque collects 30 inclusive UTC
-dates of local `ccusage` history while reading each provider's live quota once.
-The schema-v1 field remains named `quota_after` for compatibility; the one live
-reading does not imply that it was taken after local-history collection. The
-current collector never produces `quota_before` or `paired_measurement`; it sets
-only `quota_after`. The collector records
-`paired_quota_measurement_unavailable` on every fresh Anthropic build, never
-the result of a paired measurement. Freshness post-processing may replace it
-with `quota_window_reset_after_collection` or `cached_measurement_expired`.
-Cached responses retain each source's original timestamp and
-identify cached and stale sources explicitly. Providers fail independently, so a
-DeepSeek balance can still be returned when local history fails, and local
-history can still be returned when a live provider reading fails. A previous
-complete snapshot may accompany a partial attempt as a separate stale object.
+Every response is `Cache-Control: no-store`. The endpoint returns `200` even
+when one provider is partial or unavailable; each provider carries its own
+status and classified errors. It returns the normal local-auth `401` for a
+missing or wrong `X-Utraque-Token` when that optional protection is
+configured, `403` for a non-loopback caller, `405` for methods other than GET
+or HEAD, `504` when collection exceeds `UTRAQUE_PROVIDER_REPORT_TIMEOUT`, and
+`503` when reporting is not configured or collection failed outright.
 
-`last_success` on a provider is per attempt: it means this collection had at
-least one successful quota or history section, including a partial collection.
-`last_complete_snapshot.last_success` instead records the time a complete
-measurement succeeded. `last_attempt` is normally the collection end time; for a
-quota rate-limit error with a recorded real upstream attempt it uses that attempt
-time, which can predate `collection_started_at` during a cooldown. That same
-`quota_after` error then also carries the attempt time as `attempted_at`, so the
-two meanings of `last_attempt` can be told apart; `attempted_at` is omitted from
-every other error.
+### How a report is collected
 
-In schema version 1, `source` has a field-specific value space: `quota_after`
-uses the leg name; `history.source` is `ccusage`; `models[].source` is the
-ccusage agent label of the local log (such as `claude`, `codex`, or
-`opencode`);
-`history.blocks[].source` is always `claude`, because blocks are collected from
-the Claude log only; `reference_prices.source` is `models.dev`; and
-`configured_plan.source` is `configured`.
+Utraque collects 30 inclusive UTC dates of local `ccusage` history while
+reading each provider's live quota once, concurrently; the quota read never
+waits for history. One collection is cached for
+`UTRAQUE_PROVIDER_REPORT_CACHE_TTL` per credential set, and both schema
+versions are projections of the same cached collection, so requesting one and
+then the other never consults a source twice. Concurrent requests coalesce.
+Providers fail independently, so a DeepSeek balance can still be returned
+when local history fails, and local history can still be returned when a
+live provider reading fails.
 
-An abbreviated response looks like this:
-
-```json
-{
-  "schema_version": 1,
-  "generated_at": "2026-09-11T12:00:00Z",
-  "collection_started_at": "2026-09-11T11:59:58Z",
-  "collection_ended_at": "2026-09-11T12:00:00Z",
-  "providers": [
-    {
-      "provider": "anthropic",
-      "status": "ok",
-      "source_freshness": {"cached": false, "stale": false, "age_seconds": 0},
-      "quota_after": {
-        "source": "anthropic",
-        "collected_at": "2026-09-11T12:00:00Z",
-        "quotas": [{"id": "five_hour", "used_percent": 31.5, "unit": "percent_0_100"}]
-      },
-      "history": {
-        "source": "ccusage",
-        "coverage": "local_only",
-        "cost_basis": "calculated_api_reference_usd",
-        "unit_prices_available": false,
-        "unit_price_unavailable_reason": "ccusage_does_not_report_unit_prices"
-      },
-      "reference_prices": {
-        "source": "models.dev",
-        "observed_at": "2026-09-11T12:00:00Z",
-        "unit": "usd_per_million_tokens",
-        "models": [
-          {"model": "claude-haiku-4-5", "input": 1, "output": 5, "cache_read": 0.1, "cache_write": 1.25, "eligible": true}
-        ],
-        "assumptions": ["cache_write_5m"]
-      }
-    }
-  ]
-}
-```
-
-The endpoint returns `200` even when one provider is partial or unavailable;
-each provider carries its own status and classified errors. It returns the
-normal local-auth `401` for a missing or wrong `X-Utraque-Token` when that
-optional protection is configured, `403` for a non-loopback caller, and
-`405` for methods other than GET or HEAD. Times are RFC 3339 UTC, durations and ages are seconds, percentages use
-`percent_0_100`, token fields are counts, and provider balances retain decimal
-strings plus their three-letter currency.
-
-History is always labelled `local_only`; it is not whole-account coverage.
-Costs are `calculated_api_reference_usd`, not subscription charges or prepaid
-deductions. `ccusage` does not expose a current unit-price catalog, so per-model
-effective rates are weighted historical observations and remain unavailable
-when any included usage is unpriced.
-
-Each provider may also carry `reference_prices`, an independent public
-models.dev snapshot denominated in USD per million tokens. The `codex`
-reference-price section carries the OpenAI API list prices that models.dev labels
-`openai`. Model ids are exact author-catalog ids. `eligible: true` identifies
-current selectable candidates:
-the held live Codex routing catalog (or its startup seed), the built-in current
-Claude fallback list, and the two DeepSeek routes when configured. A model seen
-in local history is included with `eligible: false` when it is no longer in
-that candidate set, which keeps old usage interpretable without making a
-retired cheap model the estimate target. The Claude candidate flag therefore
-reflects the fallback list rather than any credential-scoped live Anthropic
-catalog. Optional cache fields are omitted when the source has no price for
-them; `cache_write_5m` and `base_tier` state which source price was selected.
-
-The public catalog read carries no provider or caller credential. Utraque caps
-it at 8 MiB and five seconds, coalesces concurrent reads, revalidates its
-five-minute cache with ETag, and returns its last good snapshot as `stale: true`
-when a refresh fails. A catalog failure is reported under the
-`reference_prices` section and does not block quota or history collection.
-
-Remaining-token figures are conditional estimates. A DeepSeek USD balance can
-be divided by a fully priced historical workload rate, with future price and
-workload assumptions stated in the result. Other currencies remain null. The
-routine report does not emit a Claude five-hour estimate because doing so would
-require a second live quota request to bracket local-history collection. Its
-calibration field instead reports `paired_quota_measurement_unavailable`; the
-schema retains the older paired-measurement fields for compatibility.
+A cached response keeps each source's original timestamps and says so in
+`source_freshness` (`cached`, `stale`, `age_seconds`). When the attempt that
+produced the current document was partial or failed for a provider, the last
+attempt in which every section for that provider succeeded together is
+retained as `last_complete_snapshot`, a separate object that is always marked
+cached and stale. Freshness post-processing replaces `calibration` with
+`cached_measurement_expired` on a stale document or a retained snapshot and
+with `quota_window_reset_after_collection` when an active quota window's
+reset time has passed since the reading, and drops
+`conditional_remaining_token_estimates` in both cases.
 
 When a provider quota endpoint returns `429`, utraque honors its `Retry-After`
 time for that provider account. During that cooldown, reports return the safe
@@ -1081,6 +1012,262 @@ again. Missing or unusable retry guidance uses a bounded increasing backoff.
 
 `/healthz` remains network-free and contains none of this financial or usage
 detail. Report failures do not affect inference routes.
+
+### Schema 2 field reference
+
+Times are RFC 3339 UTC, durations and ages are seconds, percentages use
+`percent_0_100`, token fields are counts, and provider amounts are decimal
+strings in the provider's own representation. Keys marked *optional* are
+omitted when they have nothing to say.
+
+Top level:
+
+| Field | Meaning |
+| --- | --- |
+| `schema_version` | `2`. |
+| `generated_at` | When this response was rendered; advances on cache hits. |
+| `collection_started_at`, `collection_ended_at` | Bounds of the collection this document describes. |
+| `history_range` | `{since, until}`: the 30 inclusive UTC dates of local history. |
+| `providers[]` | One section per leg, always in the order `anthropic`, `codex`, `deepseek`, whether or not that leg is configured. |
+| `unattributed_history[]` | *optional.* History rows whose model name maps to no leg (`provider: "unknown"`), in the `models[]` row shape below. |
+
+`providers[]`:
+
+| Field | Meaning |
+| --- | --- |
+| `provider` | The leg: `anthropic`, `codex` or `deepseek`. |
+| `status` | `ok` (quota and history both present, no errors), `partial` (one of the two present) or `error` (neither). |
+| `last_attempt` | When the most recent collection attempt for this provider ended. Remembered across attempts for the life of the cache entry. Never moved to the quota leg's real upstream attempt: that instant is `errors[].attempted_at`. |
+| `last_success` | *optional.* The end of the most recent attempt in which at least one section (quota or history) succeeded — a partial attempt counts. Remembered across attempts: a failed attempt keeps the previous value, and the key is omitted until one attempt has succeeded. Memory is per cache entry (credential set, history range and plan), so a different credential never inherits another account's timestamps, and it is forgotten when the entry is evicted (the cache holds 16). |
+| `source_freshness` | `{cached, stale, age_seconds}` for this provider's sections. |
+| `errors[]` | Classified failures: `{section, code, retryable, retry_at?, attempted_at?, message}`. `message` is a fixed safe phrase, never provider text. `retry_at` accompanies `rate_limited`. `attempted_at` appears only on a `quota` error that carries the leg's most recent real upstream attempt (a live 429, or a cooldown-suppressed read stamped with the attempt that started the cooldown) and can predate `collection_started_at`. |
+| `quota` | *optional.* The live quota reading (below). |
+| `history` | *optional.* This provider's share of local history (below). |
+| `reference_prices` | *optional.* Public reference prices for this provider's models (below). |
+| `calibration` | *optional; Anthropic only.* `{quota_id?, block?, used_percent?, observed_tokens?, conditional_remaining_tokens?, model?, assumptions?, unavailable_reason?}`. The routine report never brackets history collection with a second live quota read, so every fresh Anthropic section carries `unavailable_reason: paired_quota_measurement_unavailable`; freshness post-processing may replace it as described above. |
+| `conditional_remaining_token_estimates[]` | *optional; DeepSeek only.* `{model, currency, remaining, tokens?, historical_effective_usd_per_token?, assumptions?, unavailable_reason?}`: a USD balance divided by that model's fully priced historical rate, with the assumptions stated. `remaining` is the `balances[]` row's `remaining`. |
+| `configured_plan` | *optional; Anthropic only.* `{label?, multiplier?, provenance}` from `UTRAQUE_CLAUDE_PLAN` / `UTRAQUE_CLAUDE_PLAN_MULTIPLIER`. `provenance` is always `configured`: operator metadata, never provider-confirmed. |
+| `last_complete_snapshot` | *optional.* The retained complete measurement: `{measured_at?, source_freshness, quota?, history?, calibration?, conditional_remaining_token_estimates?}`. `measured_at` is the end of the attempt in which every section succeeded together. |
+
+`quota` (the live reading; its leg is the enclosing `provider`):
+
+| Field | Meaning |
+| --- | --- |
+| `collected_at` | When the reading was taken. |
+| `quotas[]` | *optional.* Rolling usage windows (Anthropic limits, Codex primary/secondary windows). DeepSeek reports none. |
+| `balances[]` | *optional.* Funds on hand only: DeepSeek's account balance, Codex workspace credits. Anthropic reports none. |
+| `spend_limits[]` | *optional.* Spending ceilings with consumption against them: one per Codex bucket that reports one, and Anthropic's extra usage. DeepSeek reports none. |
+| `plan` | *optional; Codex.* `{type}`, the account's plan. |
+| `reset_credits` | *optional; Codex.* `{available_count}`. |
+| `available` | *optional; DeepSeek.* The account's `is_available` flag. |
+
+`quotas[]` rows:
+
+| Field | Meaning |
+| --- | --- |
+| `id` | `bucket[:slot][:scope]`, unique within the reading for every provider. `:slot` is appended when the provider splits a bucket into slots (Codex: `codex:primary`, `codex:secondary`); `:scope` is `:model=<id>:surface=<id>` (each label by id, or display name when it has no id) when the window is scoped (Anthropic: `weekly_all:model=claude-opus-5:surface=code`). Anthropic ids are the same as in schema 1. |
+| `bucket` | The upstream identity the id is derived from: Codex's `limitId`, Anthropic's limit kind (or legacy window key such as `five_hour`). |
+| `kind` | Utraque's own vocabulary for what the window is, the same for every provider: `session` (the short rolling window: Anthropic `session`/`five_hour`, Codex `primary`), `weekly` (the long window over all models: Anthropic `weekly_all`/`seven_day`, Codex `secondary`), `weekly_scoped` (a weekly window limited to one model or surface: Anthropic `weekly_scoped`, any weekly row carrying a `scope`, and the legacy `seven_day_opus`/`seven_day_sonnet`/`seven_day_oauth_apps`), or `other` (anything the table does not place, such as the legacy `cinder_cove`). The mapping is by upstream kind or group on Anthropic and by slot position on Codex, not by duration; nothing is lost, because `bucket` keeps the upstream value verbatim. |
+| `name` | *optional; Codex.* The bucket's `limitName`. |
+| `group` | *optional; Anthropic.* The upstream limit group. |
+| `slot` | *optional; Codex.* `primary` or `secondary`. |
+| `used_percent`, `unit` | Utilisation on the `percent_0_100` scale. |
+| `duration_seconds` | *optional.* The window length when known. |
+| `resets_at` | *optional.* When the window resets. |
+| `scope` | *optional; Anthropic.* `{model?: {id?, display_name?}, surface?: {id?, display_name?}}`. |
+| `active` | *optional; Anthropic.* The upstream `is_active` flag. |
+| `plan` | *optional; Codex.* `{type}` for this window. |
+| `reached_type` | *optional; Codex.* The upstream `rateLimitReachedType`. |
+
+`balances[]` rows — money on hand, always spendable:
+
+| Field | Meaning |
+| --- | --- |
+| `kind` | `account_balance` (DeepSeek: `remaining` is the sum of `parts`) or `workspace_credits` (Codex: `remaining` is never broken down). |
+| `limit_id` | *optional; Codex.* The bucket the credits belong to — the paired `quotas[].bucket`. |
+| `currency` | *optional; DeepSeek.* Three-letter code, `USD` or `CNY`. |
+| `amount_unit` | `currency` (DeepSeek) or `credits` (Codex). |
+| `remaining` | *optional.* The funds on hand. |
+| `parts[]` | *optional; DeepSeek.* `{name, amount}`: `granted` and `topped_up`. |
+| `available`, `unlimited` | *optional; Codex.* The upstream `hasCredits` and `unlimited` flags. |
+
+`spend_limits[]` rows — a ceiling and consumption against it. Codex and
+Anthropic report different subsets, so every field is optional and absent
+means "not reported":
+
+| Field | Meaning |
+| --- | --- |
+| `limit_id` | Codex: the bucket (the paired `quotas[].bucket`). Absent for Anthropic, whose extra usage is account-wide. |
+| `enabled` | Anthropic: the `is_enabled` flag. |
+| `limit`, `used`, `amount_unit` | The ceiling and consumption, in `provider_units`. Codex: `individualLimit`'s `limit`/`used`; Anthropic: `monthly_limit`/`used_credits`. |
+| `currency` | Anthropic: the extra-usage currency. |
+| `used_percent`, `unit` | Consumption on the `percent_0_100` scale. |
+| `resets_at` | Codex: when the ceiling's window resets. |
+| `reached` | Codex: the independent `spendControlReached` flag. A bucket can report this without a `limit`, or a `limit` without this. |
+
+`history`:
+
+| Field | Meaning |
+| --- | --- |
+| `started_at`, `finished_at` | The `ccusage` run. |
+| `collector` | `ccusage`. |
+| `coverage` | Always `local_only`; this is not whole-account coverage. |
+| `cost_basis` | Always `calculated_api_reference_usd`: ccusage's API-list-price references, not subscription charges or prepaid deductions. |
+| `tool_version` | *optional.* The resolved `ccusage` version. |
+| `invocation_mode` | `bunx` or `native`. |
+| `unit_prices_available`, `unit_price_unavailable_reason` | Always `false` / `ccusage_does_not_report_unit_prices`: per-model effective rates are weighted historical observations and remain unavailable when any included usage is unpriced. |
+| `seven_days`, `thirty_days` | `{since, until, models[]}` aggregates for this provider. |
+| `models[]` rows | `{log_source, model, provider, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, total_tokens, cost_usd, cost_status, historical_effective_usd_per_token, unit_price_unavailable_reason?}`. `log_source` is the ccusage agent label of the local log the rows came from (`claude`, `codex` or `opencode`) and never names a provider; `provider` is the leg inferred from the model name. |
+| `blocks[]` | Claude-log session blocks that touched this provider, in `ccusage`'s own row shape; their `source` is the agent label and is always `claude`. |
+| `issues[]` | `ccusage` sections that were missing, `{section, code, missing, message}`; `null` when there were none. |
+
+`reference_prices`:
+
+| Field | Meaning |
+| --- | --- |
+| `catalog` | `models.dev`. |
+| `observed_at`, `stale` | When the catalog was read; `stale: true` when this is the last good snapshot after a failed refresh. |
+| `unit` | `usd_per_million_tokens`. |
+| `models[]` | `{model, input, output, cache_read?, cache_write?, eligible}`. Model ids are exact author-catalog ids. |
+| `assumptions[]` | *optional.* `cache_write_5m` and `base_tier` state which source price was selected. |
+
+`eligible` is derived by the report, not by the catalog: `true` identifies
+current selectable candidates — the held live Codex routing catalog (or its
+startup seed), the built-in current Claude fallback list, and the two
+DeepSeek routes when configured. A model seen in local history is included
+with `eligible: false` when it is no longer in that candidate set, which
+keeps old usage interpretable without making a retired cheap model the
+estimate target. The Claude candidate flag therefore reflects the fallback
+list rather than any credential-scoped live Anthropic catalog. The `codex`
+section carries the OpenAI API list prices that models.dev labels `openai`.
+The public catalog read carries no provider or caller credential; utraque
+caps it at 8 MiB and five seconds, coalesces concurrent reads, revalidates
+its five-minute cache with ETag, and reports a catalog failure under the
+`reference_prices` section without blocking quota or history collection.
+
+### Vocabularies
+
+Every closed value set the document uses, from the typed constants in the
+source (a test fails when this list and the constants drift):
+
+- `status`: `ok`, `partial`, `error`.
+- `errors[].section`: `quota`, `history`, `reference_prices`.
+- `errors[].code`: raised by the report itself — `unavailable`,
+  `credential_unavailable` (no credential was supplied for the reader),
+  `configuration_error` (the reader is not configured),
+  `account_scope_changed` and `account_scope_unverified` (the Codex
+  credential's account changed, or could not be re-read, between collection
+  start and end); carried unchanged from the quota readers — `unauthorized`,
+  `rate_limited`, `invalid_response`, `response_too_large`, `timeout`,
+  `unsupported_protocol` (plus `configuration_error`, `credential_unavailable`
+  and `unavailable` with the same meanings); from the history collector —
+  `invalid_request`, `command_failed`, `timeout`, `canceled`, `output_limit`,
+  `incompatible_tool_output`; from the reference-price reader —
+  `configuration_error`, `unavailable`, `timeout`, `response_too_large`,
+  `invalid_response`. The set is open on the reader side: a new reader code
+  arrives with its value unchanged.
+- `unavailable_reason` (on `calibration`):
+  `paired_quota_measurement_unavailable`, `cached_measurement_expired`,
+  `quota_window_reset_after_collection`; (on
+  `conditional_remaining_token_estimates[]`): `unsupported_balance_currency`
+  (not USD), `historical_effective_rate_unavailable` (no fully priced rate for
+  the model), `invalid_balance_decimal`.
+- `quotas[].kind`: `session`, `weekly`, `weekly_scoped`, `other`.
+- `balances[].kind`: `account_balance`, `workspace_credits`.
+
+### Abbreviated example
+
+```json
+{
+  "schema_version": 2,
+  "generated_at": "2026-09-11T12:00:00Z",
+  "collection_started_at": "2026-09-11T11:59:58Z",
+  "collection_ended_at": "2026-09-11T12:00:00Z",
+  "providers": [
+    {
+      "provider": "codex",
+      "status": "ok",
+      "last_attempt": "2026-09-11T12:00:00Z",
+      "last_success": "2026-09-11T12:00:00Z",
+      "source_freshness": {"cached": false, "stale": false, "age_seconds": 0},
+      "errors": [],
+      "quota": {
+        "collected_at": "2026-09-11T12:00:00Z",
+        "quotas": [
+          {"id": "codex:primary", "bucket": "codex", "kind": "session", "name": "Codex", "slot": "primary", "used_percent": 25, "unit": "percent_0_100", "duration_seconds": 18000, "resets_at": "2026-09-11T14:00:00Z", "plan": {"type": "plus"}},
+          {"id": "codex:secondary", "bucket": "codex", "kind": "weekly", "name": "Codex", "slot": "secondary", "used_percent": 40, "unit": "percent_0_100", "duration_seconds": 604800, "resets_at": "2026-09-18T12:00:00Z", "plan": {"type": "plus"}}
+        ],
+        "balances": [
+          {"kind": "workspace_credits", "limit_id": "codex", "amount_unit": "credits", "remaining": "12.50", "available": true, "unlimited": false}
+        ],
+        "spend_limits": [
+          {"limit_id": "codex", "limit": "50.00", "used": "12.25", "amount_unit": "provider_units", "used_percent": 24.5, "unit": "percent_0_100", "resets_at": "2026-09-18T12:00:00Z", "reached": false}
+        ],
+        "plan": {"type": "plus"}
+      },
+      "history": {
+        "collector": "ccusage",
+        "coverage": "local_only",
+        "cost_basis": "calculated_api_reference_usd",
+        "unit_prices_available": false,
+        "unit_price_unavailable_reason": "ccusage_does_not_report_unit_prices",
+        "thirty_days": {"since": "2026-08-13T00:00:00Z", "until": "2026-09-11T00:00:00Z", "models": [
+          {"log_source": "claude", "model": "gpt-5.6-sol", "provider": "codex", "total_tokens": 120000, "cost_usd": 1.2, "cost_status": "available", "historical_effective_usd_per_token": 0.00001}
+        ]}
+      },
+      "reference_prices": {
+        "catalog": "models.dev",
+        "observed_at": "2026-09-11T12:00:00Z",
+        "unit": "usd_per_million_tokens",
+        "models": [{"model": "gpt-5.6-sol", "input": 4, "output": 20, "cache_read": 0.4, "eligible": true}],
+        "assumptions": ["base_tier"]
+      }
+    }
+  ]
+}
+```
+
+### Schema 1 (deprecated)
+
+Schema version 1 is served at `GET /utraque/providers/v1` and, byte for byte
+the same, at its original path `GET /v1/utraque/providers`. Both are
+frozen: no key, value or ordering changes, and both will be removed once
+clients have migrated. The two `/v1` documents are rendered from the same
+cached collection as schema 2.
+
+The field-by-field mapping from schema 1 to schema 2:
+
+| Schema 1 | Schema 2 |
+| --- | --- |
+| `providers[].quota_after` | `providers[].quota`. The one live reading was never "after" anything; the name was a holdover from a discontinued before/after bracket. |
+| `providers[].quota_before`, `providers[].paired_measurement` | Removed; the collector never produced them. `calibration.unavailable_reason` (`paired_quota_measurement_unavailable`) already says why no bracketed measurement exists. Same removal inside `last_complete_snapshot`. |
+| `errors[].section: "quota_after"` | `errors[].section: "quota"`. |
+| `quota_after.source` | Removed; it duplicated `providers[].provider`. |
+| `history.source` (`ccusage`) | `history.collector`. |
+| `seven_days.models[].source`, `thirty_days.models[].source`, `unattributed_history[].source` (`claude`/`codex`/`opencode`) | `log_source`. `history.blocks[].source` is unchanged (it is `ccusage`'s own row and always `claude`). |
+| `reference_prices.source` (`models.dev`) | `reference_prices.catalog`. |
+| `configured_plan.source` (`configured`) | `configured_plan.provenance`. |
+| `quotas[].id` | Same rule on Anthropic (unchanged ids). On Codex, the two rows that shared the bare bucket id (`codex`, disambiguated only by `slot`) are now `codex:primary` and `codex:secondary`. |
+| *(no equivalent)* | `quotas[].bucket`: the upstream identity the id is built from. |
+| `quotas[].kind` | Schema 1 carried the upstream value verbatim on Anthropic (`session`, `weekly_all`, `five_hour`, …), left it empty on Codex windows, and used `spend_control` for the Codex ceiling row. Schema 2's `kind` is the closed `session`/`weekly`/`weekly_scoped`/`other` vocabulary for every provider; the upstream value is `bucket`. |
+| `quotas[]` row with `kind: "spend_control"` (id `<bucket>:spend_control`) | Removed; it was one of three renderings of the Codex bucket's `individualLimit`. Its `used_percent` and `resets_at` are `spend_limits[].used_percent` / `resets_at`. |
+| `balances[]` row with `kind: "spend_control"` | Removed; `total` was a ceiling, not funds. Its `total` is `spend_limits[].limit` and its `components[{name: "used"}]` is `spend_limits[].used`. |
+| `balances[].total` | `balances[].remaining` (now always money on hand). |
+| `balances[].components` | `balances[].parts`. |
+| `balances[].scope_id` | `balances[].limit_id`; the value was always a Codex limit bucket, never a scope. |
+| `spend_controls[]` (`{scope_id, reached}`) | Removed; `reached` is `spend_limits[].reached` on the row whose `limit_id` matches. |
+| `extra_usage` (Anthropic: `{enabled, monthly_limit, used_credits, amount_unit, used_percent, unit, currency}`) | Removed; it is the `spend_limits[]` row with no `limit_id`, with `monthly_limit` → `limit` and `used_credits` → `used`. |
+| `conditional_remaining_token_estimates[].balance` | `remaining`. |
+| `providers[].last_success` | Same key, different scope. Schema 1: set only when *this* attempt had a successful section, omitted on a failed attempt. Schema 2: cross-attempt memory, kept through failed attempts. |
+| `providers[].last_attempt` | Same key. Schema 1: this collection's end, except that a quota rate-limit error with a recorded real upstream attempt moved it to that attempt time, which could predate `collection_started_at`. Schema 2: always the most recent collection end for the provider; the real upstream attempt stays on `errors[].attempted_at`, which both schemas carry. |
+| `last_complete_snapshot.last_success` | `last_complete_snapshot.measured_at`. |
+| `schema_version: 1` | `schema_version: 2`. |
+
+Everything not listed — `generated_at`, the collection bounds,
+`history_range`, `status`, `source_freshness`, `errors[]` apart from the
+section value, `calibration`, `reference_prices.models[]`, `plan`,
+`reset_credits`, `available`, and the per-row window fields — is the same in
+both schemas.
 
 ## The model picker (merged `/v1/models`)
 

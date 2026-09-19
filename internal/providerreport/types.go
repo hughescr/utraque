@@ -1,5 +1,11 @@
 // Package providerreport assembles live provider quota observations and local
 // ccusage history into a loopback-only, cache-safe reporting document.
+//
+// One collection serves two documents. Report is schema 1: its types are the
+// schema-1 wire shape, it is what the collector builds and the cache holds,
+// and it is frozen (deprecated: remove once clients migrate). ReportV2
+// (v2.go) is schema 2, projected from the cached Report and the Handler's
+// cross-attempt memory at serve time.
 package providerreport
 
 import (
@@ -13,7 +19,12 @@ import (
 	"github.com/hughescr/utraque/internal/usagehistory"
 )
 
-const SchemaVersion = 1
+// SchemaVersionV1 and SchemaVersionV2 are the schema_version values of the
+// two documents Handler serves.
+const (
+	SchemaVersionV1 = 1
+	SchemaVersionV2 = 2
+)
 
 // Status is a provider's outcome for one collection attempt: ok when the
 // quota and history sections are both present and Errors is empty, partial
@@ -32,11 +43,17 @@ const (
 type Section string
 
 const (
-	// SectionQuota is the Section value for the live quota reading. Its value
-	// is the schema-v1 "quota_after" spelling, a holdover from the
-	// discontinued before/after bracket measurement; the Go field it reports
-	// on is ProviderReport.Quota. Keep the value until schema v2.
+	// SectionQuota is the Section value for the live quota reading as the
+	// collector records it and schema 1 serves it: the "quota_after"
+	// spelling is a holdover from the discontinued before/after bracket
+	// measurement. The Go field it reports on is ProviderReport.Quota. The
+	// schema-2 renderer rewrites it to SectionQuotaV2.
+	//
+	// deprecated: remove with schema 1 (making SectionQuotaV2's value the
+	// collector's own), once clients migrate.
 	SectionQuota Section = "quota_after"
+	// SectionQuotaV2 is the schema-2 spelling of SectionQuota.
+	SectionQuotaV2 Section = "quota"
 	// SectionHistory is the Section value for local ccusage history.
 	SectionHistory Section = "history"
 	// SectionReferencePrices is the Section value for the public models.dev
@@ -129,6 +146,9 @@ type ReferencePriceReader interface {
 	Read(context.Context) (referenceprice.Snapshot, error)
 }
 
+// Report is the schema-1 document and the collector's output. Its JSON form
+// is frozen: the wire tests pin its bytes. The schema-2 document is a
+// projection of it (renderV2).
 type Report struct {
 	SchemaVersion       int              `json:"schema_version"`
 	GeneratedAt         time.Time        `json:"generated_at"`
@@ -159,34 +179,43 @@ type ProviderReport struct {
 	// upstream is stamped with the earlier attempt that started the
 	// cooldown) — both cases are covered, not only the suppressed-read one.
 	// The same timestamp is also carried on the quota ReportError as
-	// AttemptedAt, so a reader need not infer which meaning applies.
+	// AttemptedAt, so a reader need not infer which meaning applies. This is
+	// the schema-1 value; schema 2 serves the Handler's cross-attempt memory
+	// instead (providerMemory).
 	LastAttempt time.Time `json:"last_attempt"`
 	// LastSuccess means "at least one section (quota or history) succeeded in
 	// this collection attempt" — it is set whenever Status is StatusOK or
 	// StatusPartial, not only on a fully-successful attempt (report.go's
 	// buildProvider). Contrast ProviderSnapshot.LastSuccess below, which is
-	// a stricter predicate.
+	// a stricter predicate. This is the schema-1, per-attempt value; schema
+	// 2 serves the Handler's cross-attempt memory instead (providerMemory).
 	LastSuccess     *time.Time    `json:"last_success,omitempty"`
 	SourceFreshness Freshness     `json:"source_freshness"`
 	Errors          []ReportError `json:"errors"`
 	// QuotaBefore and Paired are never assigned by the current collector —
 	// buildProvider only ever sets Quota, and markCodexUnavailable
-	// (handler.go) explicitly nils all three. Their JSON names are kept
-	// as-is for schema v1 compatibility; see Quota.
+	// (handler.go) explicitly nils all three. They exist only so the
+	// schema-1 JSON keeps its quota_before and paired_measurement keys;
+	// schema 2 has neither. See Quota.
+	//
+	// deprecated: remove with schema 1, once clients migrate.
 	QuotaBefore *providerquota.Observation `json:"quota_before,omitempty"`
 	// Quota is the only one of the three quota fields the current collector
-	// assigns (report.go's buildProvider). Its JSON key "quota_after" is a
-	// holdover from a discontinued before/after bracket measurement and is
-	// kept for schema v1 compatibility; the matching ReportError.Section
-	// value is SectionQuota.
-	Quota           *providerquota.Observation `json:"quota_after,omitempty"`
-	Paired          *PairedMeasurement         `json:"paired_measurement,omitempty"`
-	History         *HistorySummary            `json:"history,omitempty"`
-	ReferencePrices *PriceSnapshot             `json:"reference_prices,omitempty"`
-	Calibration     *Calibration               `json:"calibration,omitempty"`
-	Remaining       []RemainingEstimate        `json:"conditional_remaining_token_estimates,omitempty"`
-	ConfiguredPlan  *ConfiguredPlan            `json:"configured_plan,omitempty"`
-	LastComplete    *ProviderSnapshot          `json:"last_complete_snapshot,omitempty"`
+	// assigns (report.go's buildProvider). Its schema-1 JSON key
+	// "quota_after" is a holdover from a discontinued before/after bracket
+	// measurement; schema 2 serves it as "quota". The matching
+	// ReportError.Section value is SectionQuota (SectionQuotaV2 at schema 2).
+	Quota *providerquota.Observation `json:"quota_after,omitempty"`
+	// Paired: see QuotaBefore.
+	//
+	// deprecated: remove with schema 1, once clients migrate.
+	Paired          *PairedMeasurement  `json:"paired_measurement,omitempty"`
+	History         *HistorySummary     `json:"history,omitempty"`
+	ReferencePrices *PriceSnapshot      `json:"reference_prices,omitempty"`
+	Calibration     *Calibration        `json:"calibration,omitempty"`
+	Remaining       []RemainingEstimate `json:"conditional_remaining_token_estimates,omitempty"`
+	ConfiguredPlan  *ConfiguredPlan     `json:"configured_plan,omitempty"`
+	LastComplete    *ProviderSnapshot   `json:"last_complete_snapshot,omitempty"`
 	discardPrevious bool
 }
 
@@ -205,12 +234,17 @@ type ProviderSnapshot struct {
 	// QuotaBefore and Paired are copied straight from the source
 	// ProviderReport and are likewise never non-nil in practice; see
 	// ProviderReport.QuotaBefore.
+	//
+	// deprecated: remove with schema 1, once clients migrate.
 	QuotaBefore *providerquota.Observation `json:"quota_before,omitempty"`
 	Quota       *providerquota.Observation `json:"quota_after,omitempty"`
-	Paired      *PairedMeasurement         `json:"paired_measurement,omitempty"`
-	History     *HistorySummary            `json:"history,omitempty"`
-	Calibration *Calibration               `json:"calibration,omitempty"`
-	Remaining   []RemainingEstimate        `json:"conditional_remaining_token_estimates,omitempty"`
+	// Paired: see QuotaBefore.
+	//
+	// deprecated: remove with schema 1, once clients migrate.
+	Paired      *PairedMeasurement  `json:"paired_measurement,omitempty"`
+	History     *HistorySummary     `json:"history,omitempty"`
+	Calibration *Calibration        `json:"calibration,omitempty"`
+	Remaining   []RemainingEstimate `json:"conditional_remaining_token_estimates,omitempty"`
 }
 
 type Freshness struct {
@@ -238,6 +272,8 @@ type ReportError struct {
 // each row's routing eligibility attached. Field order matches the source
 // snapshot so the JSON is unchanged.
 type PriceSnapshot struct {
+	// Source is the catalog the prices came from ("models.dev"). Schema 2
+	// serves it as "catalog".
 	Source      string     `json:"source"`
 	ObservedAt  time.Time  `json:"observed_at"`
 	Stale       bool       `json:"stale,omitempty"`
@@ -256,6 +292,10 @@ type PriceRow struct {
 	Eligible bool `json:"eligible"`
 }
 
+// PairedMeasurement is the schema-1 shape of a before/after quota bracket
+// the collector no longer performs; nothing constructs it.
+//
+// deprecated: remove with schema 1, once clients migrate.
 type PairedMeasurement struct {
 	StartedAt time.Time                 `json:"started_at"`
 	EndedAt   time.Time                 `json:"ended_at"`
@@ -264,8 +304,10 @@ type PairedMeasurement struct {
 }
 
 type HistorySummary struct {
-	StartedAt                  time.Time                   `json:"started_at"`
-	FinishedAt                 time.Time                   `json:"finished_at"`
+	StartedAt  time.Time `json:"started_at"`
+	FinishedAt time.Time `json:"finished_at"`
+	// Source is the collector that produced the history ("ccusage"). Schema
+	// 2 serves it as "collector".
 	Source                     string                      `json:"source"`
 	Coverage                   string                      `json:"coverage"`
 	CostBasis                  string                      `json:"cost_basis"`
@@ -286,6 +328,9 @@ type PeriodSummary struct {
 }
 
 type ModelStats struct {
+	// Source is the ccusage agent label of the local log the rows came from
+	// ("claude", "codex", "opencode"), never a provider. Schema 2 serves it
+	// as "log_source".
 	Source                      string                  `json:"source"`
 	Model                       string                  `json:"model"`
 	Provider                    leg.ID                  `json:"provider"`
@@ -312,8 +357,11 @@ type Calibration struct {
 }
 
 type RemainingEstimate struct {
-	Model              string            `json:"model"`
-	Currency           string            `json:"currency"`
+	Model    string `json:"model"`
+	Currency string `json:"currency"`
+	// Balance is the funds-on-hand figure the estimate divides
+	// (providerquota.Balance.Total). Schema 2 serves it as "remaining", the
+	// same key the schema-2 balances[] row uses.
 	Balance            string            `json:"balance"`
 	Tokens             *float64          `json:"tokens,omitempty"`
 	HistoricalUSDToken *float64          `json:"historical_effective_usd_per_token,omitempty"`
@@ -324,5 +372,8 @@ type RemainingEstimate struct {
 type ConfiguredPlan struct {
 	Label      string   `json:"label,omitempty"`
 	Multiplier *float64 `json:"multiplier,omitempty"`
-	Source     string   `json:"source"`
+	// Source says where the plan came from: always "configured" (the
+	// operator's UTRAQUE_CLAUDE_PLAN settings), never a provider. Schema 2
+	// serves it as "provenance".
+	Source string `json:"source"`
 }
