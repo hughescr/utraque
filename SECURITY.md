@@ -39,12 +39,13 @@ local process that can reach that port can spend the configured Codex
 subscription or DeepSeek prepaid balance. Anthropic forwarding still requires
 the caller to supply its own usable Anthropic bearer credential.
 
-An unauthenticated loopback process can also call `/v1/utraque/providers`. Its
-response can disclose locally recorded model and token history and the live
-quota or balance data available from credentials supplied to the request or
-configured in the process. A missing credential or unavailable source produces
-an unavailable or partial section; it does not expose data that utraque could
-not collect.
+An unauthenticated loopback process can also call the provider report
+(`/utraque/providers/v2`, `/utraque/providers/v1`, or the deprecated alias
+`/v1/utraque/providers`). Its response can disclose locally recorded model
+and token history and the live quota or balance data available from
+credentials supplied to the request or configured in the process. A missing
+credential or unavailable source produces an unavailable or partial section;
+it does not expose data that utraque could not collect.
 
 This is a deliberate default for a single-user machine, not a claim that it is
 safe everywhere.
