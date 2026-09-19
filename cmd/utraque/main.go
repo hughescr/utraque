@@ -865,24 +865,27 @@ func (o *codexObserver) unknownEvents() map[string]any {
 	}
 }
 
+// catalogStateValue is a value of /healthz's codex_catalog.state.
+type catalogStateValue string
+
 // Values of /healthz's codex_catalog.state. They exist because "models: 0" on
 // its own is several different situations wearing one face, and only some of
 // them are worth acting on.
 const (
 	// catalogCold: nothing has tried to read the catalog yet.
-	catalogCold = "cold"
+	catalogCold catalogStateValue = "cold"
 	// catalogWarming: the startup fetch is in flight.
-	catalogWarming = "warming"
+	catalogWarming catalogStateValue = "warming"
 	// catalogLoaded: a catalog is held and it names models.
-	catalogLoaded = "loaded"
+	catalogLoaded catalogStateValue = "loaded"
 	// catalogEmpty: a fetch SUCCEEDED and the backend listed nothing. This is
 	// the one that must never be confused with a failure.
-	catalogEmpty = "empty"
+	catalogEmpty catalogStateValue = "empty"
 	// catalogFailed: the last attempt errored; last_error says how.
-	catalogFailed = "failed"
+	catalogFailed catalogStateValue = "failed"
 	// catalogUnavailable: no attempt is possible — no `codex login` on this
 	// machine, or a credential not in a state worth spending a refresh on.
-	catalogUnavailable = "unavailable"
+	catalogUnavailable catalogStateValue = "unavailable"
 )
 
 // catalogState records WHY the catalog looks the way it does. The catalog
@@ -890,7 +893,7 @@ const (
 // something last tried to fill it.
 type catalogState struct {
 	mu      sync.Mutex
-	state   string
+	state   catalogStateValue
 	err     string
 	at      time.Time
 	nowFn   func() time.Time
@@ -901,7 +904,7 @@ func newCatalogState() *catalogState {
 	return &catalogState{state: catalogCold, nowFn: time.Now}
 }
 
-func (s *catalogState) mark(state, err string) {
+func (s *catalogState) mark(state catalogStateValue, err string) {
 	if s == nil {
 		return
 	}
@@ -931,7 +934,7 @@ func (s *catalogState) unavailable(reason string) { s.mark(catalogUnavailable, r
 
 // read returns the recorded state, the last error message, and how long ago the
 // last attempt was (negative when there has been none).
-func (s *catalogState) read() (state, err string, age time.Duration) {
+func (s *catalogState) read() (state catalogStateValue, err string, age time.Duration) {
 	if s == nil {
 		return catalogCold, "", -1
 	}
@@ -962,10 +965,10 @@ type healthReporter struct {
 }
 
 func (h *healthReporter) extra(context.Context) map[string]any {
-	codex := map[string]any{"status": auth.StateMissing}
+	codex := map[string]any{"status": string(auth.StateMissing)}
 	if h.auth != nil {
 		st := h.auth.Peek()
-		codex["status"] = st.State
+		codex["status"] = string(st.State)
 		if st.HasExpiry {
 			// Whole seconds; may be negative for an already-expired token. The
 			// token value itself is never included.
@@ -1047,7 +1050,7 @@ func (h *healthReporter) catalogHealth() map[string]any {
 	case loaded && n == 0:
 		state = catalogEmpty
 	}
-	info["state"] = state
+	info["state"] = string(state)
 	if lastErr != "" {
 		info["last_error"] = lastErr
 	}

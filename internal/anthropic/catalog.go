@@ -71,6 +71,14 @@ type Credential struct {
 	Authorization string
 	// APIKey is the raw x-api-key header value.
 	APIKey string
+}
+
+// RequestOptions holds caller-provided Anthropic protocol negotiation values.
+//
+// They deliberately do not participate in the catalog cache key: callers with
+// the same credential but different versions share one cache entry, which is
+// existing behavior.
+type RequestOptions struct {
 	// Beta holds the anthropic-beta values, each preserved as its own entry so
 	// they are re-sent as separate header lines rather than re-joined.
 	Beta []string
@@ -78,22 +86,31 @@ type Credential struct {
 	Version string
 }
 
-// CredentialFromRequest lifts the caller's credential headers off r. It copies;
-// nothing references r afterwards.
+// CredentialFromRequest lifts the caller's authentication headers off r. It
+// copies; nothing references r afterwards.
 func CredentialFromRequest(r *http.Request) Credential {
 	if r == nil {
 		return Credential{}
 	}
-	var c Credential
-	c.Authorization = strings.TrimSpace(r.Header.Get("Authorization"))
-	c.APIKey = strings.TrimSpace(r.Header.Get("X-Api-Key"))
-	c.Version = strings.TrimSpace(r.Header.Get("Anthropic-Version"))
+	return Credential{
+		Authorization: strings.TrimSpace(r.Header.Get("Authorization")),
+		APIKey:        strings.TrimSpace(r.Header.Get("X-Api-Key")),
+	}
+}
+
+// RequestOptionsFromRequest lifts the caller's protocol negotiation headers
+// off r. It copies; nothing references r afterwards.
+func RequestOptionsFromRequest(r *http.Request) RequestOptions {
+	if r == nil {
+		return RequestOptions{}
+	}
+	o := RequestOptions{Version: strings.TrimSpace(r.Header.Get("Anthropic-Version"))}
 	for _, v := range r.Header.Values("Anthropic-Beta") {
 		if v = strings.TrimSpace(v); v != "" {
-			c.Beta = append(c.Beta, v)
+			o.Beta = append(o.Beta, v)
 		}
 	}
-	return c
+	return o
 }
 
 // Present reports whether the credential can authenticate an upstream read.
@@ -110,22 +127,22 @@ func (c Credential) cacheKey() string {
 	return hex.EncodeToString(sum[:])
 }
 
-// apply writes the credential onto an outbound request.
-func (c Credential) apply(req *http.Request) {
+// apply writes the credential and request options onto an outbound request.
+func (c Credential) apply(req *http.Request, options RequestOptions) {
 	switch {
 	case c.Authorization != "":
 		req.Header.Set("Authorization", c.Authorization)
 	case c.APIKey != "":
 		req.Header.Set("X-Api-Key", c.APIKey)
 	}
-	version := c.Version
+	version := options.Version
 	if version == "" {
 		version = DefaultAnthropicVersion
 	}
 	req.Header.Set("Anthropic-Version", version)
 	// Repeated anthropic-beta values stay separate header lines, never re-joined
 	// — the same rule the passthrough leg follows.
-	for _, v := range c.Beta {
+	for _, v := range options.Beta {
 		req.Header.Add("Anthropic-Beta", v)
 	}
 	req.Header.Set("Accept", "application/json")
@@ -149,8 +166,9 @@ type catalogPage struct {
 // Catalog is the read side internal/discovery depends on.
 type Catalog interface {
 	// Models returns Anthropic's own model list, read with the caller's
-	// credential. It returns ErrNoCredential when cred cannot authenticate.
-	Models(ctx context.Context, cred Credential) ([]CatalogModel, error)
+	// credential and request options. It returns ErrNoCredential when cred cannot
+	// authenticate.
+	Models(ctx context.Context, cred Credential, options RequestOptions) ([]CatalogModel, error)
 }
 
 // CatalogOption configures a CatalogClient.
@@ -278,7 +296,7 @@ func NewCatalog(baseURL string, tr transport.Transport, opts ...CatalogOption) (
 func (c *CatalogClient) BaseURL() string { return c.base.String() }
 
 // Models implements Catalog.
-func (c *CatalogClient) Models(ctx context.Context, cred Credential) ([]CatalogModel, error) {
+func (c *CatalogClient) Models(ctx context.Context, cred Credential, options RequestOptions) ([]CatalogModel, error) {
 	if !cred.Present() {
 		return nil, ErrNoCredential
 	}
@@ -287,7 +305,7 @@ func (c *CatalogClient) Models(ctx context.Context, cred Credential) ([]CatalogM
 		return models, err
 	}
 
-	models, err := c.fetch(ctx, cred)
+	models, err := c.fetch(ctx, cred, options)
 	if err != nil {
 		c.rememberFailure(key, err)
 		return nil, err
@@ -361,7 +379,7 @@ func (c *CatalogClient) ResetCache() {
 	c.credKey = ""
 }
 
-func (c *CatalogClient) fetch(ctx context.Context, cred Credential) ([]CatalogModel, error) {
+func (c *CatalogClient) fetch(ctx context.Context, cred Credential, options RequestOptions) ([]CatalogModel, error) {
 	target := *c.base
 	target.Path = c.base.Path + CatalogPath
 	target.RawQuery = url.Values{"limit": {fmt.Sprint(DefaultCatalogLimit)}}.Encode()
@@ -370,7 +388,7 @@ func (c *CatalogClient) fetch(ctx context.Context, cred Credential) ([]CatalogMo
 	if err != nil {
 		return nil, apierr.Wrap(err, apierr.TypeAPI, "anthropic catalog: build request")
 	}
-	cred.apply(req)
+	cred.apply(req, options)
 
 	resp, err := c.tr.Client().Do(req)
 	if err != nil {

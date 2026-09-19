@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -307,7 +308,7 @@ func TestEveryEmittedIDPassesTheFilterAndRoutesBack(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			loadRegistry(t)
 			h := mustHandler(t, tc.opts)
-			resp := h.Models(t.Context(), testCred)
+			resp := h.Models(t.Context(), testCred, anthropic.RequestOptions{})
 
 			if len(resp.Data) == 0 {
 				t.Fatal("no rows emitted; this test proves nothing")
@@ -339,7 +340,7 @@ func TestEmittedCodexIDsCarryTheRightUpstreamSlug(t *testing.T) {
 		Codex:       codexOK(),
 		Alias:       discovery.AliasOptions{Strategy: discovery.AliasEffortVariants},
 	})
-	h.Models(t.Context(), testCred)
+	h.Models(t.Context(), testCred, anthropic.RequestOptions{})
 
 	for _, tc := range []struct {
 		id       string
@@ -377,7 +378,7 @@ func TestRegistrationIsRebuiltEachTime(t *testing.T) {
 		CatalogMode: discovery.CatalogModeStatic,
 		Codex:       codexOK(),
 	})
-	resp := h.Models(t.Context(), testCred)
+	resp := h.Models(t.Context(), testCred, anthropic.RequestOptions{})
 	if len(reg.PickerIDs()) == 0 {
 		t.Fatal("no picker routes registered")
 	}
@@ -402,7 +403,7 @@ func TestRegistrationIsRebuiltEachTime(t *testing.T) {
 		Codex:       codexOK(),
 		Alias:       discovery.AliasOptions{Strategy: discovery.AliasOff},
 	})
-	off.Models(t.Context(), testCred)
+	off.Models(t.Context(), testCred, anthropic.RequestOptions{})
 	if got := reg.PickerIDs(); len(got) != 0 {
 		t.Errorf("picker routes = %v, want none after everything was turned off", got)
 	}
@@ -475,7 +476,7 @@ func TestAliasStrategies(t *testing.T) {
 				Codex:       codexOK(),
 				Alias:       tc.alias,
 			})
-			resp := h.Models(t.Context(), testCred)
+			resp := h.Models(t.Context(), testCred, anthropic.RequestOptions{})
 
 			for _, want := range tc.want {
 				if !hasID(resp, want) {
@@ -497,7 +498,7 @@ func TestCodexRowsLeadWithTheHighestPriorityModel(t *testing.T) {
 		CatalogMode: discovery.CatalogModeStatic,
 		Codex:       codexOK(),
 	})
-	resp := h.Models(t.Context(), testCred)
+	resp := h.Models(t.Context(), testCred, anthropic.RequestOptions{})
 
 	var codexIDs []string
 	for _, m := range resp.Data {
@@ -524,7 +525,7 @@ func TestRollingAliasPrecedesPinnedAlias(t *testing.T) {
 		CatalogMode: discovery.CatalogModeStatic,
 		Codex:       codexOK(),
 	})
-	resp := h.Models(t.Context(), testCred)
+	resp := h.Models(t.Context(), testCred, anthropic.RequestOptions{})
 
 	rolling, pinned := -1, -1
 	for i, m := range resp.Data {
@@ -549,7 +550,7 @@ func TestCodexDisplayNamesAreUseful(t *testing.T) {
 		CatalogMode: discovery.CatalogModeStatic,
 		Codex:       codexOK(),
 	})
-	resp := h.Models(t.Context(), testCred)
+	resp := h.Models(t.Context(), testCred, anthropic.RequestOptions{})
 
 	if got, want := displayOf(resp, "anthropic-compat.sol"), "GPT-5.6-Sol (sol)"; got != want {
 		t.Errorf("display for the rolling row = %q, want %q", got, want)
@@ -591,7 +592,7 @@ func TestHiddenModelsAreNotAdvertisedByDefault(t *testing.T) {
 		CatalogMode: discovery.CatalogModeStatic,
 		Codex:       codexOK(),
 	})
-	resp := h.Models(t.Context(), testCred)
+	resp := h.Models(t.Context(), testCred, anthropic.RequestOptions{})
 
 	for _, m := range resp.Data {
 		if strings.Contains(m.ID, "spark") {
@@ -607,7 +608,7 @@ func TestIncludeHiddenOffersHiddenModelsAndTheyStillRoute(t *testing.T) {
 		Codex:       codexOK(),
 		Alias:       discovery.AliasOptions{IncludeHidden: true},
 	})
-	resp := h.Models(t.Context(), testCred)
+	resp := h.Models(t.Context(), testCred, anthropic.RequestOptions{})
 
 	// The registry never saw the hidden slug, so it is offered raw — and the
 	// picker-route registration is the only thing that makes it resolve.
@@ -659,7 +660,7 @@ func TestDeepSeekRowsAppearOnlyWhenConfiguredAndSurviveRestart(t *testing.T) {
 		DeepSeek:    true,
 		Registry:    reg,
 	})
-	resp := h.Models(t.Context(), testCred)
+	resp := h.Models(t.Context(), testCred, anthropic.RequestOptions{})
 	for _, id := range []string{"anthropic-compat.deepseek-flash", "anthropic-compat.deepseek-v4-pro"} {
 		if !hasID(resp, id) {
 			t.Errorf("configured catalog missing %q: %v", id, ids(resp))
@@ -674,7 +675,7 @@ func TestDeepSeekRowsAppearOnlyWhenConfiguredAndSurviveRestart(t *testing.T) {
 	}
 
 	off := mustHandler(t, discovery.Options{CatalogMode: discovery.CatalogModeStatic})
-	offResp := off.Models(t.Context(), testCred)
+	offResp := off.Models(t.Context(), testCred, anthropic.RequestOptions{})
 	for _, id := range ids(offResp) {
 		if strings.Contains(id, "deepseek") {
 			t.Errorf("unconfigured catalog advertised %q", id)
@@ -704,7 +705,7 @@ func TestNoOneMRowIsEverEmitted(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := mustHandler(t, tc.opts)
-			resp := h.Models(t.Context(), testCred)
+			resp := h.Models(t.Context(), testCred, anthropic.RequestOptions{})
 			if len(resp.Data) == 0 {
 				t.Fatal("no rows emitted; this test proves nothing")
 			}
@@ -726,16 +727,20 @@ func TestNoOneMRowIsEverEmitted(t *testing.T) {
 
 func TestUpstreamCatalogIsReadWithTheClientsOwnCredential(t *testing.T) {
 	loadRegistry(t)
-	var gotAuth, gotVersion, gotLimit atomic.Value
+	var gotAuth, gotVersion, gotLimit, gotBetas atomic.Value
 	cat, hits := fakeAnthropic(t, func(w http.ResponseWriter, r *http.Request) {
 		gotAuth.Store(r.Header.Get("Authorization"))
 		gotVersion.Store(r.Header.Get("Anthropic-Version"))
 		gotLimit.Store(r.URL.Query().Get("limit"))
+		gotBetas.Store(r.Header.Values("Anthropic-Beta"))
 		upstreamModels(anthropic.CatalogModel{ID: "claude-opus-9", DisplayName: "Opus 9"})(w, r)
 	})
 
 	h := mustHandler(t, discovery.Options{Anthropic: cat, Codex: codexOK()})
-	resp := h.Models(t.Context(), testCred)
+	// A version that differs from DefaultAnthropicVersion proves the
+	// caller's own value is forwarded rather than defaulted.
+	opts := anthropic.RequestOptions{Version: "2024-01-01", Beta: []string{"oauth-2025-04-20", "context-1m-2025-08-07"}}
+	resp := h.Models(t.Context(), testCred, opts)
 
 	if hits.Load() != 1 {
 		t.Fatalf("upstream hits = %d, want 1", hits.Load())
@@ -743,11 +748,14 @@ func TestUpstreamCatalogIsReadWithTheClientsOwnCredential(t *testing.T) {
 	if got := gotAuth.Load(); got != testCred.Authorization {
 		t.Errorf("Authorization = %v, want the client's own header verbatim", got)
 	}
-	if got := gotVersion.Load(); got != anthropic.DefaultAnthropicVersion {
-		t.Errorf("Anthropic-Version = %v, want %q", got, anthropic.DefaultAnthropicVersion)
+	if got := gotVersion.Load(); got != opts.Version {
+		t.Errorf("Anthropic-Version = %v, want %q", got, opts.Version)
 	}
 	if got := gotLimit.Load(); got != "1000" {
 		t.Errorf("limit = %v, want 1000", got)
+	}
+	if got := gotBetas.Load(); !reflect.DeepEqual(got, opts.Beta) {
+		t.Errorf("Anthropic-Beta = %v, want %v as separate values", got, opts.Beta)
 	}
 	if !hasID(resp, "claude-opus-9") {
 		t.Errorf("upstream model missing from the merge; ids = %v", ids(resp))
@@ -765,7 +773,7 @@ func TestNoCredentialSkipsTheUpstreamReadEntirely(t *testing.T) {
 	))
 	h := mustHandler(t, discovery.Options{Anthropic: cat})
 
-	resp := h.Models(t.Context(), anthropic.Credential{})
+	resp := h.Models(t.Context(), anthropic.Credential{}, anthropic.RequestOptions{})
 	if hits.Load() != 0 {
 		t.Errorf("upstream was contacted %d times without a credential", hits.Load())
 	}
@@ -783,7 +791,7 @@ func TestUpstreamFailureFallsBackToStaticAndIsNegativeCached(t *testing.T) {
 	h := mustHandler(t, discovery.Options{Anthropic: cat})
 
 	for i := range 3 {
-		resp := h.Models(t.Context(), testCred)
+		resp := h.Models(t.Context(), testCred, anthropic.RequestOptions{})
 		if !hasID(resp, "claude-opus-5") {
 			t.Fatalf("call %d: static fallback missing; ids = %v", i, ids(resp))
 		}
@@ -806,7 +814,7 @@ func TestUpstreamModeOffersNothingWhenUpstreamFails(t *testing.T) {
 		Anthropic:   cat,
 		Codex:       codexOK(),
 	})
-	resp := h.Models(t.Context(), testCred)
+	resp := h.Models(t.Context(), testCred, anthropic.RequestOptions{})
 
 	for _, m := range resp.Data {
 		if !strings.HasPrefix(m.ID, "anthropic-compat.") {
@@ -825,7 +833,7 @@ func TestStaticModeNeverContactsUpstream(t *testing.T) {
 	))
 	h := mustHandler(t, discovery.Options{CatalogMode: discovery.CatalogModeStatic, Anthropic: cat})
 
-	resp := h.Models(t.Context(), testCred)
+	resp := h.Models(t.Context(), testCred, anthropic.RequestOptions{})
 	if hits.Load() != 0 {
 		t.Errorf("static mode contacted upstream %d times", hits.Load())
 	}
@@ -857,7 +865,7 @@ func TestDeadlineIsHonouredWithASlowUpstream(t *testing.T) {
 	})
 
 	start := time.Now()
-	resp := h.Models(t.Context(), testCred)
+	resp := h.Models(t.Context(), testCred, anthropic.RequestOptions{})
 	elapsed := time.Since(start)
 
 	if elapsed > time.Second {
@@ -890,7 +898,7 @@ func TestDeadlineIsHonouredWithASlowCodexCatalog(t *testing.T) {
 	})
 
 	start := time.Now()
-	resp := h.Models(t.Context(), testCred)
+	resp := h.Models(t.Context(), testCred, anthropic.RequestOptions{})
 	if elapsed := time.Since(start); elapsed > time.Second {
 		t.Errorf("Models took %s; the %s deadline was not enforced", elapsed, deadline)
 	}
@@ -980,7 +988,7 @@ func TestCodexFailureLeavesTheClaudeHalfIntact(t *testing.T) {
 		CatalogMode: discovery.CatalogModeStatic,
 		Codex:       codexFailing(),
 	})
-	resp := h.Models(t.Context(), testCred)
+	resp := h.Models(t.Context(), testCred, anthropic.RequestOptions{})
 	if !hasID(resp, "claude-opus-5") {
 		t.Errorf("Claude rows missing; ids = %v", ids(resp))
 	}
@@ -1016,7 +1024,7 @@ func TestDuplicateIDsAreEmittedOnce(t *testing.T) {
 		anthropic.CatalogModel{ID: "claude-opus-5", DisplayName: "Opus 5 (dup)"},
 	))
 	h := mustHandler(t, discovery.Options{Anthropic: cat})
-	resp := h.Models(t.Context(), testCred)
+	resp := h.Models(t.Context(), testCred, anthropic.RequestOptions{})
 
 	seen := 0
 	for _, m := range resp.Data {
@@ -1043,7 +1051,7 @@ func TestRowsFailingTheClientFilterAreDropped(t *testing.T) {
 		Anthropic:             cat,
 		StaticAnthropicModels: []anthropic.CatalogModel{},
 	})
-	resp := h.Models(t.Context(), testCred)
+	resp := h.Models(t.Context(), testCred, anthropic.RequestOptions{})
 
 	if hasID(resp, "gpt-4o") {
 		t.Error("served a row the client would discard on arrival")
@@ -1064,7 +1072,7 @@ func TestConcurrentModelsCallsAreSafe(t *testing.T) {
 	for range 8 {
 		go func() {
 			defer func() { done <- struct{}{} }()
-			if resp := h.Models(context.Background(), testCred); len(resp.Data) == 0 {
+			if resp := h.Models(context.Background(), testCred, anthropic.RequestOptions{}); len(resp.Data) == 0 {
 				t.Error("empty catalog under concurrency")
 			}
 		}()
@@ -1098,7 +1106,7 @@ func TestAdvertisedIDsSurviveAPickerTierReset(t *testing.T) {
 		},
 		Registry: reg,
 	})
-	resp := h.Models(t.Context(), testCred)
+	resp := h.Models(t.Context(), testCred, anthropic.RequestOptions{})
 	if len(resp.Data) == 0 {
 		t.Fatal("the merged catalog is empty")
 	}
@@ -1139,7 +1147,7 @@ func TestUnparseableEffortVariantsAreNotAdvertised(t *testing.T) {
 		Alias:       discovery.AliasOptions{Strategy: discovery.AliasEffortVariants},
 		Registry:    reg,
 	})
-	resp := h.Models(t.Context(), testCred)
+	resp := h.Models(t.Context(), testCred, anthropic.RequestOptions{})
 
 	if !hasID(resp, "anthropic-compat.sol-high") {
 		t.Errorf("the parseable effort row is missing; got %v", ids(resp))
@@ -1162,7 +1170,7 @@ func TestPickerRoutesGoToTheConfiguredRegistry(t *testing.T) {
 		Codex:       codexOK(),
 		Registry:    reg,
 	})
-	resp := h.Models(t.Context(), testCred)
+	resp := h.Models(t.Context(), testCred, anthropic.RequestOptions{})
 
 	var codexRows int
 	for _, id := range ids(resp) {

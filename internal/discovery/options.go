@@ -13,39 +13,45 @@ import (
 	"github.com/hughescr/utraque/internal/router"
 )
 
+// CatalogMode controls the Anthropic half of the merge.
+type CatalogMode string
+
 // Catalog modes for the Anthropic half of the merge.
 const (
 	// CatalogModeMerge (the default) reads Anthropic's own catalog with the
 	// caller's credential and unions it with the static list, so a model the
 	// upstream read omits is still offered. Upstream display names win.
-	CatalogModeMerge = "merge"
+	CatalogModeMerge CatalogMode = "merge"
 	// CatalogModeUpstream offers only what the upstream read returned. If that
 	// read fails there are no Claude rows at all — the honest answer when the
 	// operator has said "upstream is the only truth".
-	CatalogModeUpstream = "upstream"
+	CatalogModeUpstream CatalogMode = "upstream"
 	// CatalogModeStatic never contacts Anthropic; the static list is served as
 	// is. The fastest mode, and the one that cannot leak a picker open into an
 	// upstream request.
-	CatalogModeStatic = "static"
+	CatalogModeStatic CatalogMode = "static"
 )
+
+// AliasStrategy controls Codex alias emission in the merged catalog.
+type AliasStrategy string
 
 // Alias-emission strategies for the Codex half of the merge.
 const (
 	// AliasOff emits no Codex rows at all. The proxy still routes GPT names
 	// typed by hand or set in agent frontmatter; they just do not appear in the
 	// picker.
-	AliasOff = "off"
+	AliasOff AliasStrategy = "off"
 	// AliasTemplate (the default) emits the router's rolling and pinned aliases
 	// — "sol" and "sol-5.6" — through IDTemplate.
-	AliasTemplate = "template"
+	AliasTemplate AliasStrategy = "template"
 	// AliasEffortVariants emits everything AliasTemplate does, plus one row per
 	// reasoning effort the model supports ("sol-high", "sol-5.6-high"). Useful,
 	// and long: a five-effort model turns two rows into twelve.
-	AliasEffortVariants = "effort_variants"
+	AliasEffortVariants AliasStrategy = "effort_variants"
 	// AliasRaw emits one row per upstream slug ("gpt-5.6-sol") through
 	// IDTemplate, with no synthesised aliases. For when you want the picker to
 	// name exactly what Codex serves.
-	AliasRaw = "raw"
+	AliasRaw AliasStrategy = "raw"
 )
 
 // Defaults for the handler.
@@ -101,7 +107,7 @@ func (f CodexCatalogFunc) Models(ctx context.Context) ([]cschema.CatalogModel, e
 type AliasOptions struct {
 	// Strategy selects which names become picker rows. Empty means
 	// AliasTemplate.
-	Strategy string
+	Strategy AliasStrategy
 	// IDTemplate renders the emitted id. Placeholders: {alias}, {slug},
 	// {display}, {effort}. Empty means DefaultIDTemplate.
 	//
@@ -125,7 +131,7 @@ type AliasOptions struct {
 	IncludeHidden bool
 }
 
-func (a AliasOptions) strategy() string {
+func (a AliasOptions) strategy() AliasStrategy {
 	if a.Strategy == "" {
 		return AliasTemplate
 	}
@@ -155,7 +161,7 @@ type Options struct {
 	Deadline time.Duration
 
 	// CatalogMode is merge (default), upstream, or static.
-	CatalogMode string
+	CatalogMode CatalogMode
 
 	// Anthropic reads Anthropic's own catalog. Nil behaves like
 	// CatalogModeStatic for the Anthropic half.
@@ -197,7 +203,7 @@ func (o Options) deadline() time.Duration {
 	return o.Deadline
 }
 
-func (o Options) catalogMode() string {
+func (o Options) catalogMode() CatalogMode {
 	if o.CatalogMode == "" {
 		return CatalogModeMerge
 	}
@@ -211,23 +217,41 @@ func (o Options) staticModels() []anthropic.CatalogModel {
 	return o.StaticAnthropicModels
 }
 
+// valid reports whether m is a supported catalog policy.
+func (m CatalogMode) valid() bool {
+	switch m {
+	case CatalogModeMerge, CatalogModeUpstream, CatalogModeStatic:
+		return true
+	default:
+		return false
+	}
+}
+
+// valid reports whether s is a supported alias-emission policy.
+func (s AliasStrategy) valid() bool {
+	switch s {
+	case AliasOff, AliasTemplate, AliasEffortVariants, AliasRaw:
+		return true
+	default:
+		return false
+	}
+}
+
 // validate reports the first configuration problem.
 func (o Options) validate() error {
-	switch o.catalogMode() {
-	case CatalogModeMerge, CatalogModeUpstream, CatalogModeStatic:
-	default:
+	mode := o.catalogMode()
+	if !mode.valid() {
 		return fmt.Errorf("utraque/discovery: catalog_mode %q: want %s|%s|%s",
 			o.CatalogMode, CatalogModeMerge, CatalogModeUpstream, CatalogModeStatic)
 	}
 
 	strategy := o.Alias.strategy()
-	switch strategy {
-	case AliasOff:
-		return nil
-	case AliasTemplate, AliasEffortVariants, AliasRaw:
-	default:
+	if !strategy.valid() {
 		return fmt.Errorf("utraque/discovery: alias strategy %q: want %s|%s|%s|%s",
 			o.Alias.Strategy, AliasOff, AliasTemplate, AliasEffortVariants, AliasRaw)
+	}
+	if strategy == AliasOff {
+		return nil
 	}
 
 	tmpl := o.Alias.idTemplate()

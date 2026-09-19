@@ -856,3 +856,35 @@ func TestInvalidatedSetIsBounded(t *testing.T) {
 		t.Error("invalidated set was emptied entirely; the newest rejection must survive")
 	}
 }
+
+func TestPeekReportsStaleReason(t *testing.T) {
+	t.Run("expiring", func(t *testing.T) {
+		f := newFakeOAuth(t)
+		s, _ := newTestSource(t, f, authJSON{
+			access:    makeJWT(time.Now().Add(30 * time.Second)),
+			refresh:   "refresh-expiring",
+			accountID: "acct-expiring",
+		}.bytes())
+
+		st := s.Peek()
+		if st.State != StateStale || st.Reason != "expiring" {
+			t.Errorf("Peek() = %+v, want stale expiring", st)
+		}
+	})
+
+	t.Run("invalidated", func(t *testing.T) {
+		f := newFakeOAuth(t)
+		access := makeJWT(time.Now().Add(time.Hour))
+		s, _ := newTestSource(t, f, authJSON{
+			access:    access,
+			refresh:   "refresh-invalidated",
+			accountID: "acct-invalidated",
+		}.bytes())
+		s.Invalidate(Credential{AccessToken: access})
+
+		st := s.Peek()
+		if st.State != StateStale || st.Reason != "invalidated" {
+			t.Errorf("Peek() = %+v, want stale invalidated", st)
+		}
+	})
+}

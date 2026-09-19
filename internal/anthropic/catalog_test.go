@@ -43,13 +43,14 @@ func writeModels(w http.ResponseWriter, models ...anthropic.CatalogModel) {
 }
 
 func TestCatalogReadsTheModelList(t *testing.T) {
-	var gotPath, gotQuery, gotAuth, gotAccept atomic.Value
+	var gotPath, gotQuery, gotAuth, gotAccept, gotVersion atomic.Value
 	var gotBetas atomic.Value
 	c, hits := newCatalog(t, func(w http.ResponseWriter, r *http.Request) {
 		gotPath.Store(r.URL.Path)
 		gotQuery.Store(r.URL.RawQuery)
 		gotAuth.Store(r.Header.Get("Authorization"))
 		gotAccept.Store(r.Header.Get("Accept"))
+		gotVersion.Store(r.Header.Get("Anthropic-Version"))
 		gotBetas.Store(r.Header.Values("Anthropic-Beta"))
 		writeModels(w,
 			anthropic.CatalogModel{ID: "claude-opus-5", DisplayName: "Opus 5", Type: "model", CreatedAt: "2026-05-01"},
@@ -57,11 +58,9 @@ func TestCatalogReadsTheModelList(t *testing.T) {
 		)
 	})
 
-	cred := anthropic.Credential{
-		Authorization: fakeBearer,
-		Beta:          []string{"oauth-2025-04-20", "context-1m-2025-08-07"},
-	}
-	models, err := c.Models(t.Context(), cred)
+	cred := anthropic.Credential{Authorization: fakeBearer}
+	options := anthropic.RequestOptions{Beta: []string{"oauth-2025-04-20", "context-1m-2025-08-07"}}
+	models, err := c.Models(t.Context(), cred, options)
 	if err != nil {
 		t.Fatalf("Models: %v", err)
 	}
@@ -80,8 +79,12 @@ func TestCatalogReadsTheModelList(t *testing.T) {
 	if got := gotAccept.Load(); got != "application/json" {
 		t.Errorf("Accept = %v", got)
 	}
+	// options carries no Version, so the default must be sent.
+	if got := gotVersion.Load(); got != anthropic.DefaultAnthropicVersion {
+		t.Errorf("Anthropic-Version = %v, want %q when the caller supplied none", got, anthropic.DefaultAnthropicVersion)
+	}
 	// Repeated anthropic-beta values must stay separate header lines.
-	if got, want := gotBetas.Load(), cred.Beta; !reflect.DeepEqual(got, want) {
+	if got, want := gotBetas.Load(), options.Beta; !reflect.DeepEqual(got, want) {
 		t.Errorf("Anthropic-Beta = %v, want %v as separate values", got, want)
 	}
 
@@ -102,7 +105,7 @@ func TestCatalogSendsTheAPIKeyWhenThereIsNoBearer(t *testing.T) {
 		writeModels(w)
 	})
 
-	if _, err := c.Models(t.Context(), anthropic.Credential{APIKey: fakeAPIKey, Version: "2026-01-01"}); err != nil {
+	if _, err := c.Models(t.Context(), anthropic.Credential{APIKey: fakeAPIKey}, anthropic.RequestOptions{Version: "2026-01-01"}); err != nil {
 		t.Fatalf("Models: %v", err)
 	}
 	if got := gotKey.Load(); got != fakeAPIKey {
@@ -119,7 +122,7 @@ func TestCatalogSendsTheAPIKeyWhenThereIsNoBearer(t *testing.T) {
 func TestCatalogWithoutACredentialNeverContactsUpstream(t *testing.T) {
 	c, hits := newCatalog(t, func(w http.ResponseWriter, r *http.Request) { writeModels(w) })
 
-	_, err := c.Models(t.Context(), anthropic.Credential{})
+	_, err := c.Models(t.Context(), anthropic.Credential{}, anthropic.RequestOptions{})
 	if !errors.Is(err, anthropic.ErrNoCredential) {
 		t.Fatalf("err = %v, want ErrNoCredential", err)
 	}
@@ -150,11 +153,11 @@ func TestCatalogNegativeCachesFailuresAndExpiresThem(t *testing.T) {
 
 	cred := anthropic.Credential{Authorization: fakeBearer}
 
-	if _, err := c.Models(t.Context(), cred); err == nil {
+	if _, err := c.Models(t.Context(), cred, anthropic.RequestOptions{}); err == nil {
 		t.Fatal("expected the 401 to surface as an error")
 	}
 	for range 5 {
-		if _, err := c.Models(t.Context(), cred); err == nil {
+		if _, err := c.Models(t.Context(), cred, anthropic.RequestOptions{}); err == nil {
 			t.Fatal("expected the cached failure to keep surfacing")
 		}
 	}
@@ -172,7 +175,7 @@ func TestCatalogNegativeCachesFailuresAndExpiresThem(t *testing.T) {
 	// Past the window, it asks again — and recovers.
 	now = now.Add(61 * time.Second)
 	fail.Store(false)
-	models, err := c.Models(t.Context(), cred)
+	models, err := c.Models(t.Context(), cred, anthropic.RequestOptions{})
 	if err != nil {
 		t.Fatalf("after expiry: %v", err)
 	}
@@ -196,7 +199,7 @@ func TestCatalogCachesSuccessForTheTTL(t *testing.T) {
 
 	cred := anthropic.Credential{Authorization: fakeBearer}
 	for range 4 {
-		if _, err := c.Models(t.Context(), cred); err != nil {
+		if _, err := c.Models(t.Context(), cred, anthropic.RequestOptions{}); err != nil {
 			t.Fatalf("Models: %v", err)
 		}
 	}
@@ -205,7 +208,7 @@ func TestCatalogCachesSuccessForTheTTL(t *testing.T) {
 	}
 
 	now = now.Add(6 * time.Minute)
-	if _, err := c.Models(t.Context(), cred); err != nil {
+	if _, err := c.Models(t.Context(), cred, anthropic.RequestOptions{}); err != nil {
 		t.Fatalf("Models after TTL: %v", err)
 	}
 	if hits.Load() != 2 {
@@ -219,13 +222,13 @@ func TestCatalogCallersCannotMutateTheCache(t *testing.T) {
 	})
 	cred := anthropic.Credential{Authorization: fakeBearer}
 
-	first, err := c.Models(t.Context(), cred)
+	first, err := c.Models(t.Context(), cred, anthropic.RequestOptions{})
 	if err != nil {
 		t.Fatalf("Models: %v", err)
 	}
 	first[0].DisplayName = "tampered"
 
-	second, err := c.Models(t.Context(), cred)
+	second, err := c.Models(t.Context(), cred, anthropic.RequestOptions{})
 	if err != nil {
 		t.Fatalf("Models: %v", err)
 	}
@@ -242,7 +245,7 @@ func TestCatalogTreatsARedirectAsAFailure(t *testing.T) {
 		w.WriteHeader(http.StatusTemporaryRedirect)
 	})
 
-	_, err := c.Models(t.Context(), anthropic.Credential{Authorization: fakeBearer})
+	_, err := c.Models(t.Context(), anthropic.Credential{Authorization: fakeBearer}, anthropic.RequestOptions{})
 	if !errors.Is(err, anthropic.ErrRedirected) {
 		t.Fatalf("err = %v, want ErrRedirected", err)
 	}
@@ -253,7 +256,7 @@ func TestCatalogRejectsAMalformedBody(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"data": "not an array"`))
 	})
-	if _, err := c.Models(t.Context(), anthropic.Credential{Authorization: fakeBearer}); err == nil {
+	if _, err := c.Models(t.Context(), anthropic.Credential{Authorization: fakeBearer}, anthropic.RequestOptions{}); err == nil {
 		t.Fatal("expected a decode error")
 	}
 }
@@ -268,18 +271,19 @@ func TestCredentialFromRequest(t *testing.T) {
 	r.Header.Add("Anthropic-Beta", " context-1m-2025-08-07 ")
 
 	cred := anthropic.CredentialFromRequest(r)
+	options := anthropic.RequestOptionsFromRequest(r)
 	if cred.Authorization != fakeBearer {
 		t.Errorf("Authorization = %q, want trimmed %q", cred.Authorization, fakeBearer)
 	}
 	if cred.APIKey != fakeAPIKey {
 		t.Errorf("APIKey = %q", cred.APIKey)
 	}
-	if cred.Version != "2023-06-01" {
-		t.Errorf("Version = %q", cred.Version)
+	if options.Version != "2023-06-01" {
+		t.Errorf("Version = %q", options.Version)
 	}
 	want := []string{"oauth-2025-04-20", "context-1m-2025-08-07"}
-	if !reflect.DeepEqual(cred.Beta, want) {
-		t.Errorf("Beta = %v, want %v (empties dropped, values trimmed)", cred.Beta, want)
+	if !reflect.DeepEqual(options.Beta, want) {
+		t.Errorf("Beta = %v, want %v (empties dropped, values trimmed)", options.Beta, want)
 	}
 	if !cred.Present() {
 		t.Error("Present() = false")
@@ -288,8 +292,8 @@ func TestCredentialFromRequest(t *testing.T) {
 	if anthropic.CredentialFromRequest(nil).Present() {
 		t.Error("a nil request must not yield a present credential")
 	}
-	if (anthropic.Credential{Version: "2023-06-01"}).Present() {
-		t.Error("a version alone is not a credential")
+	if options := anthropic.RequestOptionsFromRequest(nil); options.Version != "" || len(options.Beta) != 0 {
+		t.Errorf("nil request options = %+v, want empty", options)
 	}
 }
 
@@ -331,7 +335,7 @@ func TestCatalogDoesNotServeOneCallersListToAnother(t *testing.T) {
 	alice := anthropic.Credential{Authorization: "Bearer alice-token"}
 	bob := anthropic.Credential{Authorization: "Bearer bob-token"}
 
-	got, err := c.Models(t.Context(), alice)
+	got, err := c.Models(t.Context(), alice, anthropic.RequestOptions{})
 	if err != nil {
 		t.Fatalf("Models(alice): %v", err)
 	}
@@ -339,7 +343,7 @@ func TestCatalogDoesNotServeOneCallersListToAnother(t *testing.T) {
 		t.Fatalf("alice got %+v", got)
 	}
 
-	got, err = c.Models(t.Context(), bob)
+	got, err = c.Models(t.Context(), bob, anthropic.RequestOptions{})
 	if err != nil {
 		t.Fatalf("Models(bob): %v", err)
 	}
@@ -353,10 +357,32 @@ func TestCatalogDoesNotServeOneCallersListToAnother(t *testing.T) {
 	// The cache is one slot keyed on the credential, not a per-caller map: it
 	// holds only the most recent caller's answer, so alice re-fetches with her
 	// own credential rather than being handed bob's. Bounded, and never wrong.
-	if _, err := c.Models(t.Context(), alice); err != nil {
+	if _, err := c.Models(t.Context(), alice, anthropic.RequestOptions{}); err != nil {
 		t.Fatalf("Models(alice, again): %v", err)
 	}
 	if hits.Load() != 3 {
 		t.Errorf("hits = %d, want 3", hits.Load())
+	}
+}
+
+func TestCatalogCacheIgnoresRequestOptions(t *testing.T) {
+	var versions []string
+	c, hits := newCatalog(t, func(w http.ResponseWriter, r *http.Request) {
+		versions = append(versions, r.Header.Get("Anthropic-Version"))
+		writeModels(w, anthropic.CatalogModel{ID: "claude-opus-5"})
+	}, anthropic.WithCatalogTTL(time.Hour))
+
+	cred := anthropic.Credential{Authorization: fakeBearer}
+	if _, err := c.Models(t.Context(), cred, anthropic.RequestOptions{Version: "2023-06-01"}); err != nil {
+		t.Fatalf("first Models: %v", err)
+	}
+	if _, err := c.Models(t.Context(), cred, anthropic.RequestOptions{Version: "2024-01-01"}); err != nil {
+		t.Fatalf("second Models: %v", err)
+	}
+	if hits.Load() != 1 {
+		t.Errorf("hits = %d, want 1: request options must not split the credential cache", hits.Load())
+	}
+	if !reflect.DeepEqual(versions, []string{"2023-06-01"}) {
+		t.Errorf("upstream versions = %v, want only the first cache-miss request", versions)
 	}
 }

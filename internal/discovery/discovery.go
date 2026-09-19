@@ -83,7 +83,7 @@ const RouteName = "discovery"
 // Handler serves the merged catalog. It is safe for concurrent use.
 type Handler struct {
 	deadline time.Duration
-	mode     string
+	mode     CatalogMode
 	anth     anthropic.Catalog
 	static   []anthropic.CatalogModel
 	codex    CodexCatalog
@@ -157,7 +157,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// a picker open distinguishable from a request that failed to route at all.
 	obs.SummaryFrom(r.Context()).SetRoute(RouteName)
 
-	resp := h.Models(r.Context(), anthropic.CredentialFromRequest(r))
+	resp := h.Models(r.Context(), anthropic.CredentialFromRequest(r), anthropic.RequestOptionsFromRequest(r))
 	resp = applyLimit(resp, parseLimit(r.URL.Query().Get("limit")))
 
 	body, err := json.Marshal(resp)
@@ -187,7 +187,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 //
 // cred is the caller's own Anthropic credential, used only to read Anthropic's
 // catalog. utraque holds no Anthropic secret of its own.
-func (h *Handler) Models(ctx context.Context, cred anthropic.Credential) Response {
+func (h *Handler) Models(ctx context.Context, cred anthropic.Credential, options anthropic.RequestOptions) Response {
 	ctx, cancel := context.WithTimeout(ctx, h.deadline)
 	defer cancel()
 
@@ -201,7 +201,7 @@ func (h *Handler) Models(ctx context.Context, cred anthropic.Credential) Respons
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		anthModels = h.anthropicModels(ctx, cred)
+		anthModels = h.anthropicModels(ctx, cred, options)
 	}()
 	go func() {
 		defer wg.Done()
@@ -274,12 +274,12 @@ func (h *Handler) Models(ctx context.Context, cred anthropic.Credential) Respons
 
 // anthropicModels resolves the Anthropic half per the configured catalog mode,
 // falling back to the static list wherever upstream cannot answer.
-func (h *Handler) anthropicModels(ctx context.Context, cred anthropic.Credential) []anthropic.CatalogModel {
+func (h *Handler) anthropicModels(ctx context.Context, cred anthropic.Credential, options anthropic.RequestOptions) []anthropic.CatalogModel {
 	if h.mode == CatalogModeStatic || h.anth == nil {
 		return h.static
 	}
 
-	upstream, err := h.anth.Models(ctx, cred)
+	upstream, err := h.anth.Models(ctx, cred, options)
 	if err != nil {
 		switch {
 		case errors.Is(err, anthropic.ErrNoCredential):

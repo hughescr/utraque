@@ -367,7 +367,7 @@ func TestStartupWarmPopulatesTheCatalogAndDistinguishesTheZeroStates(t *testing.
 	if cat["models"] != float64(0) || cat["loaded"] != false {
 		t.Fatalf("expected an unpopulated catalog, got %v", cat)
 	}
-	if cat["state"] != catalogCold {
+	if cat["state"] != string(catalogCold) {
 		t.Errorf("state = %v, want %q before anything has tried", cat["state"], catalogCold)
 	}
 	if _, present := cat["last_error"]; present {
@@ -380,7 +380,7 @@ func TestStartupWarmPopulatesTheCatalogAndDistinguishesTheZeroStates(t *testing.
 	if n, _ := cat["models"].(float64); n != 2 {
 		t.Errorf("models = %v, want the 2 the fake backend serves: %v", cat["models"], cat)
 	}
-	if cat["state"] != catalogLoaded {
+	if cat["state"] != string(catalogLoaded) {
 		t.Errorf("state = %v, want %q", cat["state"], catalogLoaded)
 	}
 	if _, ok := cat["age_s"]; !ok {
@@ -399,7 +399,7 @@ func TestWarmFailureIsDistinguishableFromAnEmptyCatalog(t *testing.T) {
 
 	env.app.warmCatalog(context.Background())
 
-	cat := waitForCatalog(t, env, func(m map[string]any) bool { return m["state"] == catalogFailed })
+	cat := waitForCatalog(t, env, func(m map[string]any) bool { return m["state"] == string(catalogFailed) })
 	if cat["models"] != float64(0) || cat["loaded"] != false {
 		t.Errorf("a failed warm must not claim a catalog: %v", cat)
 	}
@@ -420,7 +420,7 @@ func TestEmptyCatalogIsNotAFailure(t *testing.T) {
 
 	env.app.warmCatalog(context.Background())
 
-	cat := waitForCatalog(t, env, func(m map[string]any) bool { return m["state"] == catalogEmpty })
+	cat := waitForCatalog(t, env, func(m map[string]any) bool { return m["state"] == string(catalogEmpty) })
 	if cat["models"] != float64(0) {
 		t.Errorf("models = %v, want 0: %v", cat["models"], cat)
 	}
@@ -438,7 +438,7 @@ func TestNoCredentialReportsUnavailableRatherThanFailed(t *testing.T) {
 	env.app.warmCatalog(context.Background())
 
 	cat := healthCatalog(t, env)
-	if cat["state"] != catalogUnavailable {
+	if cat["state"] != string(catalogUnavailable) {
 		t.Errorf("state = %v, want %q with no credential: %v", cat["state"], catalogUnavailable, cat)
 	}
 	if env.codex.catalog.Load() != 0 {
@@ -488,4 +488,16 @@ func waitForCatalog(t *testing.T, env *codexEnv, want func(map[string]any) bool)
 	}
 	t.Fatalf("codex_catalog never reached the expected state; last was %v", last)
 	return nil
+}
+
+func TestHealthReporterEmptyJSONIsUnchanged(t *testing.T) {
+	h := &healthReporter{catState: newCatalogState()}
+	got, err := json.Marshal(h.extra(t.Context()))
+	if err != nil {
+		t.Fatalf("marshal health: %v", err)
+	}
+	const want = `{"codex_auth":{"status":"missing"},"codex_catalog":{"loaded":false,"models":0,"state":"cold"},"codex_routing":{"families":["5.4","5.4-mini","5.5","luna","sol","terra"]},"trace":{"enabled":false}}`
+	if string(got) != want {
+		t.Errorf("health JSON = %s, want %s", got, want)
+	}
 }

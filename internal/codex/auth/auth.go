@@ -52,19 +52,22 @@ type Credential struct {
 	Exp         time.Time
 }
 
+// State is the credential state reported by Peek.
+type State string
+
 // Credential state names reported by Peek. They describe what a subsequent Get
 // would do, without disclosing any token material.
 const (
 	// StateOK: a usable credential comfortably before expiry; Get serves it
 	// from cache with no network.
-	StateOK = "ok"
+	StateOK State = "ok"
 	// StateStale: a credential that exists but is at/near expiry or was marked
 	// invalid; the next Get would refresh it over the network.
-	StateStale = "stale"
+	StateStale State = "stale"
 	// StateMissing: no usable credential — the file is absent, unreadable, or
 	// lacks the required account_id/access_token fields; the user must run
 	// `codex login`.
-	StateMissing = "missing"
+	StateMissing State = "missing"
 )
 
 // Status is the non-secret snapshot of the Codex credential that /healthz
@@ -72,7 +75,11 @@ const (
 // value — only the coarse state and, when known, the time until expiry.
 type Status struct {
 	// State is one of StateOK, StateStale, or StateMissing.
-	State string
+	State State
+	// Reason distinguishes the two StateStale paths: "expiring" for a
+	// credential at/near expiry and "invalidated" when upstream rejected it.
+	// It is empty for every other state.
+	Reason string
 	// ExpiresIn is the time until the access token expires. It is only
 	// meaningful when HasExpiry is true; it may be negative for an already
 	// expired token.
@@ -287,11 +294,11 @@ func (s *Source) Peek() Status {
 	}
 	switch {
 	case s.isInvalidated(cred.AccessToken):
-		st.State = StateStale
+		st.State, st.Reason = StateStale, "invalidated"
 	case s.fresh(cred):
 		st.State = StateOK
 	default:
-		st.State = StateStale
+		st.State, st.Reason = StateStale, "expiring"
 	}
 	return st
 }
