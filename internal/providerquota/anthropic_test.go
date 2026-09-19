@@ -52,7 +52,10 @@ func TestAnthropicReadModernAndRedactsScope(t *testing.T) {
 	if got.Quotas[0].UsedPercent != 4 || got.Quotas[0].Unit != PercentUnit || *got.Quotas[0].DurationSeconds != 5*60*60 {
 		t.Errorf("session quota = %+v", got.Quotas[0])
 	}
-	if got.Quotas[1].ID != "weekly_scoped:model=Fable" || got.Quotas[1].Scope.Model.DisplayName != "Fable" || got.Quotas[1].ResetsAt != nil {
+	if got.Quotas[0].Bucket != "session" || got.Quotas[0].Kind != "session" {
+		t.Errorf("session quota bucket/kind = %+v", got.Quotas[0])
+	}
+	if got.Quotas[1].ID != "weekly_scoped:model=Fable" || got.Quotas[1].Bucket != "weekly_scoped" || got.Quotas[1].Kind != "weekly_scoped" || got.Quotas[1].Scope.Model.DisplayName != "Fable" || got.Quotas[1].ResetsAt != nil {
 		t.Errorf("scoped quota = %+v", got.Quotas[1])
 	}
 	if got.ExtraUsage == nil || got.ExtraUsage.MonthlyLimit == nil || *got.ExtraUsage.MonthlyLimit != "100" || got.ExtraUsage.UsedCredits == nil || *got.ExtraUsage.UsedCredits != "100" || got.ExtraUsage.AmountUnit != "provider_units" {
@@ -101,10 +104,37 @@ func TestAnthropicLegacyMissingAndValidation(t *testing.T) {
 			if err != nil || len(got.Quotas) != tt.wantN {
 				t.Fatalf("got %+v, err %v", got, err)
 			}
-			if tt.name == "legacy" && got.Quotas[0].UsedPercent != 0 {
-				t.Errorf("real zero was not preserved")
+			if tt.name == "legacy" && (got.Quotas[0].UsedPercent != 0 || got.Quotas[0].Bucket != "five_hour" || got.Quotas[0].Kind != "five_hour") {
+				t.Errorf("legacy window = %+v", got.Quotas[0])
+			}
+			if len(got.SpendLimits) != 0 {
+				t.Errorf("spend limits without extra_usage = %+v", got.SpendLimits)
 			}
 		})
+	}
+}
+
+func TestAnthropicSpendLimitsMirrorExtraUsage(t *testing.T) {
+	full := readAnthropicBody(t, `{"limits":[],"extra_usage":{"is_enabled":true,"monthly_limit":100,"used_credits":25.5,"utilization":25.5,"currency":"USD"}}`)
+	if len(full.SpendLimits) != 1 || full.ExtraUsage == nil {
+		t.Fatalf("spend limits = %+v, extra usage = %+v", full.SpendLimits, full.ExtraUsage)
+	}
+	got := full.SpendLimits[0]
+	if got.LimitID != "" || got.Enabled == nil || !*got.Enabled || got.Limit == nil || *got.Limit != "100" || got.Used == nil || *got.Used != "25.5" ||
+		got.AmountUnit != "provider_units" || got.Currency != "USD" || got.UsedPercent == nil || *got.UsedPercent != 25.5 || got.ResetsAt != nil || got.Reached != nil {
+		t.Errorf("full extra usage = %+v", got)
+	}
+	if got.UsedPercent == full.ExtraUsage.UsedPercent {
+		t.Error("SpendLimit.UsedPercent aliases ExtraUsage.UsedPercent")
+	}
+
+	minimal := readAnthropicBody(t, `{"limits":[],"extra_usage":{"is_enabled":false}}`)
+	if len(minimal.SpendLimits) != 1 {
+		t.Fatalf("spend limits = %+v", minimal.SpendLimits)
+	}
+	got = minimal.SpendLimits[0]
+	if got.Enabled == nil || *got.Enabled || got.Limit != nil || got.Used != nil || got.AmountUnit != "" || got.Currency != "" || got.UsedPercent != nil {
+		t.Errorf("minimal extra usage = %+v", got)
 	}
 }
 

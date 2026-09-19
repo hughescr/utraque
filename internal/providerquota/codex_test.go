@@ -73,7 +73,7 @@ done
 	if len(source.invalidated) != 0 || got.Plan == nil || got.Plan.Type != "plus" || len(got.Quotas) != 3 || got.Quotas[2].UsedPercent != 0 {
 		t.Fatalf("observation = %+v, invalidated=%d", got, len(source.invalidated))
 	}
-	if got.Quotas[0].ID != "codex" || got.Quotas[0].Slot != "primary" || *got.Quotas[0].DurationSeconds != 300*60 {
+	if got.Quotas[0].ID != "codex" || got.Quotas[0].Bucket != "codex" || got.Quotas[0].Kind != "" || got.Quotas[0].Slot != "primary" || *got.Quotas[0].DurationSeconds != 300*60 {
 		t.Errorf("primary = %+v", got.Quotas[0])
 	}
 	if len(got.Balances) != 1 || got.Balances[0].Total != "12.50" || got.ResetCredits == nil || got.ResetCredits.AvailableCount != 2 {
@@ -206,7 +206,57 @@ func TestCodexSpendControlReachedPreservesTrueFalseAndMissing(t *testing.T) {
 	}
 }
 
+func TestCodexSpendLimitsMergeIndividualLimitAndReachedByBucket(t *testing.T) {
+	reached, clear := true, false
+	limit := &codexSpend{Limit: "50.00", Used: "12.25", RemainingPercent: floatPtr(75.5), ResetsAt: int64Ptr(1789732800)}
+	buckets := map[string]codexSnapshot{
+		"a_both":         {IndividualLimit: limit, SpendControlReached: &clear},
+		"b_reached_only": {SpendControlReached: &reached},
+		"c_limit_only":   {IndividualLimit: limit},
+		"d_neither":      {Primary: &codexWindow{UsedPercent: floatPtr(1)}},
+	}
+	var observation Observation
+	if err := normalizeCodexLimits(&observation, codexRateLimitsResponse{RateLimitsByID: &buckets}, fixedNow); err != nil {
+		t.Fatal(err)
+	}
+	if len(observation.SpendLimits) != 3 {
+		t.Fatalf("spend limits = %+v", observation.SpendLimits)
+	}
+	wantReset := time.Unix(1789732800, 0).UTC()
+	hasLimit := func(s SpendLimit) bool {
+		return s.Limit != nil && *s.Limit == "50.00" && s.Used != nil && *s.Used == "12.25" && s.AmountUnit == "provider_units" &&
+			s.UsedPercent != nil && *s.UsedPercent == 24.5 && s.ResetsAt != nil && s.ResetsAt.Equal(wantReset) && s.Enabled == nil && s.Currency == ""
+	}
+	if got := observation.SpendLimits[0]; got.LimitID != "a_both" || !hasLimit(got) || got.Reached == nil || *got.Reached {
+		t.Errorf("limit with reached flag = %+v", got)
+	}
+	if got := observation.SpendLimits[1]; got.LimitID != "b_reached_only" || got.Reached == nil || !*got.Reached || got.Limit != nil || got.Used != nil || got.UsedPercent != nil || got.ResetsAt != nil || got.AmountUnit != "" {
+		t.Errorf("reached without limit = %+v", got)
+	}
+	if got := observation.SpendLimits[2]; got.LimitID != "c_limit_only" || !hasLimit(got) || got.Reached != nil {
+		t.Errorf("limit without reached flag = %+v", got)
+	}
+	// The schema v1 fan-out is still produced alongside SpendLimits.
+	if len(observation.SpendControls) != 2 || len(observation.Balances) != 2 {
+		t.Errorf("v1 fan-out: spend controls = %+v, balances = %+v", observation.SpendControls, observation.Balances)
+	}
+	var spendQuotas int
+	for _, q := range observation.Quotas {
+		if q.Kind == QuotaKindSpendControl {
+			spendQuotas++
+			if q.ID != q.Bucket+":spend_control" || (q.Bucket != "a_both" && q.Bucket != "c_limit_only") {
+				t.Errorf("spend-control quota = %+v", q)
+			}
+		}
+	}
+	if spendQuotas != 2 {
+		t.Errorf("spend-control quotas = %d, want 2 in %+v", spendQuotas, observation.Quotas)
+	}
+}
+
 func floatPtr(v float64) *float64 { return &v }
+
+func int64Ptr(v int64) *int64 { return &v }
 
 func TestCodexSubprocessOutputBounds(t *testing.T) {
 	tests := []struct {

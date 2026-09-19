@@ -330,8 +330,15 @@ func normalizeCodexLimits(o *Observation, response codexRateLimitsResponse, now 
 		if !validNonemptyLabel(id) || item.s.LimitName != nil && !validLabel(*item.s.LimitName) || item.s.ReachedType != nil && !validLabel(*item.s.ReachedType) {
 			return quotaError(ProviderCodex, CodeInvalidData, false)
 		}
+		// spend collects the bucket's ceiling facts into one SpendLimit; the
+		// schema v1 fan-out (SpendControls, the spend_control Quota and
+		// Balance rows) is still populated alongside it — see
+		// Observation.SpendLimits.
+		var spend *SpendLimit
 		if item.s.SpendControlReached != nil {
 			o.SpendControls = append(o.SpendControls, SpendControl{LimitID: id, Reached: *item.s.SpendControlReached})
+			reached := *item.s.SpendControlReached
+			spend = &SpendLimit{LimitID: id, Reached: &reached}
 		}
 		for _, windowItem := range []struct {
 			slot   string
@@ -352,7 +359,7 @@ func normalizeCodexLimits(o *Observation, response codexRateLimitsResponse, now 
 			if err != nil {
 				return err
 			}
-			q := Quota{ID: id, Slot: slot, UsedPercent: *window.UsedPercent, Unit: PercentUnit, DurationSeconds: duration, ResetsAt: reset}
+			q := Quota{ID: id, Bucket: id, Slot: slot, UsedPercent: *window.UsedPercent, Unit: PercentUnit, DurationSeconds: duration, ResetsAt: reset}
 			if item.s.LimitName != nil {
 				q.Name = *item.s.LimitName
 			}
@@ -387,8 +394,17 @@ func normalizeCodexLimits(o *Observation, response codexRateLimitsResponse, now 
 				return err
 			}
 			used := 100 - *s.RemainingPercent
-			o.Quotas = append(o.Quotas, Quota{ID: id + ":spend_control", Kind: "spend_control", UsedPercent: used, Unit: PercentUnit, ResetsAt: reset})
+			o.Quotas = append(o.Quotas, Quota{ID: id + ":spend_control", Bucket: id, Kind: QuotaKindSpendControl, UsedPercent: used, Unit: PercentUnit, ResetsAt: reset})
 			o.Balances = append(o.Balances, Balance{Kind: "spend_control", LimitID: id, AmountUnit: "provider_units", Total: s.Limit, Components: []BalanceComponent{{Name: "used", Amount: s.Used}}})
+			if spend == nil {
+				spend = &SpendLimit{LimitID: id}
+			}
+			limit, usedAmount := s.Limit, s.Used
+			spend.Limit, spend.Used, spend.AmountUnit = &limit, &usedAmount, "provider_units"
+			spend.UsedPercent, spend.ResetsAt = &used, reset
+		}
+		if spend != nil {
+			o.SpendLimits = append(o.SpendLimits, *spend)
 		}
 	}
 	if response.RateLimitReset != nil {

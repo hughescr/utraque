@@ -160,6 +160,10 @@ func (c *AnthropicClient) Read(ctx context.Context, oauthToken string) (Observat
 			return Observation{}, err
 		}
 		o.ExtraUsage = extra
+		// Schema v1 keeps ExtraUsage on the wire; SpendLimits carries the
+		// same facts in the provider-neutral shape — see
+		// Observation.SpendLimits.
+		o.SpendLimits = append(o.SpendLimits, spendLimitFromExtraUsage(extra))
 	}
 	return o, nil
 }
@@ -172,7 +176,7 @@ func normalizeAnthropicWindow(id string, duration int64, w *anthropicWindow, now
 	if err != nil {
 		return Quota{}, err
 	}
-	q := Quota{ID: id, Kind: id, UsedPercent: *w.Utilization, Unit: PercentUnit, ResetsAt: reset}
+	q := Quota{ID: id, Bucket: id, Kind: QuotaKind(id), UsedPercent: *w.Utilization, Unit: PercentUnit, ResetsAt: reset}
 	if duration > 0 {
 		q.DurationSeconds = &duration
 	}
@@ -187,7 +191,7 @@ func normalizeAnthropicLimit(l anthropicLimit, index int, now time.Time) (Quota,
 	if err != nil {
 		return Quota{}, err
 	}
-	q := Quota{ID: l.Kind, Kind: l.Kind, Group: l.Group, UsedPercent: *l.Percent, Unit: PercentUnit, ResetsAt: reset, Active: l.IsActive}
+	q := Quota{ID: l.Kind, Bucket: l.Kind, Kind: QuotaKind(l.Kind), Group: l.Group, UsedPercent: *l.Percent, Unit: PercentUnit, ResetsAt: reset, Active: l.IsActive}
 	var duration int64
 	switch {
 	case l.Kind == "session" || l.Group == "session":
@@ -297,4 +301,17 @@ func normalizeAnthropicExtra(e *anthropicExtra) (*ExtraUsage, error) {
 		result.Currency = *e.Currency
 	}
 	return result, nil
+}
+
+// spendLimitFromExtraUsage projects an already-validated ExtraUsage into the
+// provider-neutral SpendLimit shape. Anthropic's extra usage is account-wide,
+// so LimitID stays empty; it reports no reset time and no reached flag.
+func spendLimitFromExtraUsage(e *ExtraUsage) SpendLimit {
+	enabled := e.Enabled
+	result := SpendLimit{Enabled: &enabled, Limit: e.MonthlyLimit, Used: e.UsedCredits, AmountUnit: e.AmountUnit, Currency: e.Currency}
+	if e.UsedPercent != nil {
+		percent := *e.UsedPercent
+		result.UsedPercent = &percent
+	}
+	return result
 }

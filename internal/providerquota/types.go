@@ -40,19 +40,33 @@ type Observation struct {
 	// several different accounting equations applies — see the Balance doc.
 	// Anthropic never populates Balances.
 	Balances []Balance `json:"balances,omitempty"`
-	// SpendControls is populated only by Codex (codex.go:334), one entry per
+	// SpendControls is populated only by Codex (codex.go:339), one entry per
 	// bucket that reports the upstream spendControlReached flag. Nothing in
 	// the tree reads it today: its former reader, providerreport's DeepSeek
 	// remaining-value estimator, was removed because DeepSeek never populates
-	// this field. It is emitted in the report JSON as-is.
+	// this field. It is emitted in the report JSON as-is. The same flag is
+	// also carried by SpendLimits.Reached; this slice is retained for schema
+	// v1 and goes away when SpendLimits is serialised at v2.
 	SpendControls []SpendControl `json:"spend_controls,omitempty"`
+	// SpendLimits is the single home for "a ceiling with consumption": one
+	// entry per Codex bucket that reports individualLimit and/or
+	// spendControlReached (codex.go:338-341,399-407), and one entry for
+	// Anthropic's extra_usage block (anthropic.go:157-167). DeepSeek never
+	// populates it. It is not serialised until schema v2; until then the
+	// same facts are still fanned out into the schema v1 shapes — Codex into
+	// Quotas (Kind QuotaKindSpendControl), Balances (Kind "spend_control")
+	// and SpendControls, Anthropic into ExtraUsage — and those must keep
+	// being populated so the report JSON is unchanged.
+	SpendLimits []SpendLimit `json:"-"`
 	// Plan is populated only by Codex, from the account's plan type
 	// (codex.go:245).
 	Plan *PlanInfo `json:"plan,omitempty"`
 	// ExtraUsage is populated only by Anthropic, from its extra_usage block.
+	// The same facts are also carried by SpendLimits; this field is retained
+	// for schema v1 and goes away when SpendLimits is serialised at v2.
 	ExtraUsage *ExtraUsage `json:"extra_usage,omitempty"`
 	// ResetCredits is populated only by Codex, from rateLimitResetCredits
-	// (codex.go:398).
+	// (codex.go:414).
 	ResetCredits *ResetCredits `json:"reset_credits,omitempty"`
 	// Available is populated only by DeepSeek, from its balance payload's
 	// Available flag (deepseek.go:87). Do not confuse with Balance.Available,
@@ -69,72 +83,93 @@ type PlanInfo struct {
 	Type string `json:"type"`
 }
 
+// QuotaKind is the vocabulary of Quota.Kind. It is open at the wire boundary:
+// Anthropic rows carry the upstream-supplied limit kind verbatim (per-limit
+// path) or the fixed legacy window id (legacy path), neither of which this
+// package enumerates. The constants below are the values utraque itself
+// mints; a QuotaKind that is none of them came from upstream. Codex's
+// primary/secondary window rows leave Kind empty.
+type QuotaKind string
+
+const (
+	// QuotaKindSpendControl marks the Codex entry derived from a bucket's
+	// individualLimit (codex.go:397).
+	QuotaKindSpendControl QuotaKind = "spend_control"
+)
+
 type Quota struct {
 	// ID's identity contract differs by provider. On Anthropic it is a
 	// fully-qualified window id: Kind (always non-empty — checked at
-	// anthropic.go:183), with a scope suffix appended when the window is
-	// scoped (anthropic.go:190,210, anthropicScopeSuffix). On Codex it is a
+	// anthropic.go:187), with a scope suffix appended when the window is
+	// scoped (anthropic.go:194,214, anthropicScopeSuffix). On Codex it is a
 	// bucket id (the upstream limitId, or the map key when absent) shared by
 	// the primary and secondary window rows for the same bucket, which Slot
 	// disambiguates
-	// (codex.go:355); the derived spend-control entry reuses that bucket id
-	// with a ":spend_control" suffix (codex.go:390).
+	// (codex.go:362); the derived spend-control entry reuses that bucket id
+	// with a ":spend_control" suffix (codex.go:397).
 	ID string `json:"id"`
+	// Bucket is the upstream identity the ID is derived from, without any
+	// slot or scope decoration: on Codex the limitId (or the map key when
+	// absent — codex.go:326-329,362,397), on Anthropic the wire limit kind
+	// (anthropic.go:194) or the legacy window key (anthropic.go:179). It is
+	// not serialised until schema v2 exposes it as quotas[].bucket.
+	Bucket string `json:"-"`
 	// Name is populated only by Codex, from the upstream limitName
-	// (codex.go:357).
+	// (codex.go:364).
 	Name string `json:"name,omitempty"`
-	// Kind's value space differs by producer: on Anthropic's legacy window
-	// path (no "limits" in the payload) it is set to the same fixed internal
-	// id as ID, one of "five_hour", "seven_day", "seven_day_oauth_apps",
-	// "seven_day_opus", "seven_day_sonnet", or "cinder_cove"
-	// (anthropic.go:139-146,175); on Anthropic's newer per-limit path it is
-	// the upstream limit kind verbatim, e.g. "weekly_all"/"weekly_scoped"/
-	// "session" (anthropic.go:190) — the upstream value space is not
-	// enumerated by this package, only "session" and "weekly*"/group
-	// "weekly" are given special handling (anthropic.go:193-196); on Codex's
-	// primary/secondary window rows it is left empty (codex.go:355); on
-	// Codex's derived spend-control entry it is the utraque-invented literal
-	// "spend_control" (codex.go:390).
-	Kind string `json:"kind,omitempty"`
+	// Kind's value space differs by producer — see QuotaKind. On Anthropic's
+	// legacy window path (no "limits" in the payload) it is set to the same
+	// fixed internal id as ID, one of "five_hour", "seven_day",
+	// "seven_day_oauth_apps", "seven_day_opus", "seven_day_sonnet", or
+	// "cinder_cove" (anthropic.go:139-146,179); on Anthropic's newer
+	// per-limit path it is the upstream limit kind verbatim, e.g.
+	// "weekly_all"/"weekly_scoped"/"session" (anthropic.go:194) — the
+	// upstream value space is not enumerated by this package, only "session"
+	// and "weekly*"/group "weekly" are given special handling
+	// (anthropic.go:197-200); on Codex's primary/secondary window rows it is
+	// left empty (codex.go:362); on Codex's derived spend-control entry it is
+	// QuotaKindSpendControl (codex.go:397). The JSON value is the plain
+	// string.
+	Kind QuotaKind `json:"kind,omitempty"`
 	// Group is populated only by Anthropic's per-limit path, from the
-	// upstream group (anthropic.go:190).
+	// upstream group (anthropic.go:194).
 	Group string `json:"group,omitempty"`
 	// Slot is populated only by Codex, "primary" or "secondary", and is what
 	// disambiguates the two window rows that share one bucket ID
-	// (codex.go:355).
+	// (codex.go:362).
 	Slot string `json:"slot,omitempty"`
 	// UsedPercent is populated by every producer: Anthropic's legacy window
-	// (anthropic.go:175) and per-limit (anthropic.go:190) paths, and Codex's
-	// primary/secondary window rows (codex.go:355) and derived
-	// spend-control entry (codex.go:390, computed as 100 minus the upstream
+	// (anthropic.go:179) and per-limit (anthropic.go:194) paths, and Codex's
+	// primary/secondary window rows (codex.go:362) and derived
+	// spend-control entry (codex.go:397, computed as 100 minus the upstream
 	// remaining percent).
 	UsedPercent float64 `json:"used_percent"`
 	// Unit is always PercentUnit ("percent_0_100"); every producer of a
-	// Quota sets it that way (anthropic.go:175,190; codex.go:355,390).
+	// Quota sets it that way (anthropic.go:179,194; codex.go:362,397).
 	Unit string `json:"unit"`
 	// DurationSeconds is populated by Anthropic's legacy window path from a
 	// fixed table keyed by window id (anthropic.go:139-144) and by
 	// Anthropic's per-limit path from a fixed table keyed by Kind/Group
-	// (anthropic.go:192-197, left unset when neither matches); by Codex's
+	// (anthropic.go:196-201, left unset when neither matches); by Codex's
 	// primary/secondary window rows from the upstream windowDurationMinutes
-	// (codex.go:347,355). Left unset on Codex's derived spend-control entry.
+	// (codex.go:354,362). Left unset on Codex's derived spend-control entry.
 	DurationSeconds *int64 `json:"duration_seconds,omitempty"`
 	// ResetsAt is populated by every producer that has a reset time:
-	// Anthropic's legacy window and per-limit paths (anthropic.go:171,186)
+	// Anthropic's legacy window and per-limit paths (anthropic.go:175,190)
 	// and Codex's primary/secondary window rows and derived spend-control
-	// entry (codex.go:351,385-390), all from an upstream reset timestamp.
+	// entry (codex.go:358,392-397), all from an upstream reset timestamp.
 	ResetsAt *time.Time `json:"resets_at,omitempty"`
 	// Scope is populated only by Anthropic's per-limit path, when the
-	// upstream limit carries a model/surface scope (anthropic.go:203-210).
+	// upstream limit carries a model/surface scope (anthropic.go:207-214).
 	Scope *Scope `json:"scope,omitempty"`
 	// Active is populated only by Anthropic's per-limit path, from the
-	// upstream isActive flag (anthropic.go:190).
+	// upstream isActive flag (anthropic.go:194).
 	Active *bool `json:"active,omitempty"`
 	// Plan is populated only by Codex, per window, from the upstream
-	// planType (codex.go:360).
+	// planType (codex.go:367).
 	Plan *PlanInfo `json:"plan,omitempty"`
 	// ReachedType is populated only by Codex, from the upstream
-	// rateLimitReachedType (codex.go:363).
+	// rateLimitReachedType (codex.go:370).
 	ReachedType string `json:"reached_type,omitempty"`
 }
 
@@ -154,9 +189,9 @@ type ScopeLabel struct {
 //
 //   - DeepSeek, Kind "account_balance" (deepseek.go:93-101): Total is the sum
 //     of Components (granted + topped_up) and is spendable — money on hand.
-//   - Codex, Kind "workspace_credits" (codex.go:371-376): Total is spendable
+//   - Codex, Kind "workspace_credits" (codex.go:378-383): Total is spendable
 //     with no Components — also money on hand, but never broken down.
-//   - Codex, Kind "spend_control" (codex.go:391): Total is a ceiling (the
+//   - Codex, Kind "spend_control" (codex.go:398): Total is a ceiling (the
 //     upstream spend limit), not money on hand, and the "used" Components
 //     entry is consumption against that ceiling, not a component of Total.
 //
@@ -165,12 +200,12 @@ type ScopeLabel struct {
 type Balance struct {
 	// Kind selects the accounting equation for this row: "account_balance"
 	// (DeepSeek, deepseek.go:93), "workspace_credits" (Codex,
-	// codex.go:371), or "spend_control" (Codex, codex.go:391) — see the
+	// codex.go:378), or "spend_control" (Codex, codex.go:398) — see the
 	// type doc above.
 	Kind string `json:"kind"`
 	// LimitID is populated only by Codex, both for "workspace_credits" and
 	// "spend_control" rows, from the upstream limitId — the same bucket id as
-	// the paired Quota.ID (codex.go:371,391). DeepSeek never sets it. The
+	// the paired Quota.ID (codex.go:378,398). DeepSeek never sets it. The
 	// JSON key is still "scope_id" for schema v1 compatibility, although the
 	// value is a limit bucket id and never refers to a Scope.
 	LimitID string `json:"scope_id,omitempty"`
@@ -180,27 +215,27 @@ type Balance struct {
 	Currency string `json:"currency,omitempty"`
 	// AmountUnit is populated by every producer with a fixed literal, not an
 	// upstream value: "currency" (DeepSeek, deepseek.go:95), "credits"
-	// (Codex workspace_credits, codex.go:371), or "provider_units" (Codex
-	// spend_control, codex.go:391).
+	// (Codex workspace_credits, codex.go:378), or "provider_units" (Codex
+	// spend_control, codex.go:398).
 	AmountUnit string `json:"amount_unit,omitempty"`
 	// Total is populated by DeepSeek (deepseek.go:96, the upstream
-	// total_balance), Codex workspace_credits (codex.go:373-376, the
+	// total_balance), Codex workspace_credits (codex.go:380-383, the
 	// upstream credits balance, optional — omitted when upstream omits it),
-	// and Codex spend_control (codex.go:391, the upstream spend limit). See
+	// and Codex spend_control (codex.go:398, the upstream spend limit). See
 	// the type doc above for what Total means under each Kind.
 	Total string `json:"total,omitempty"`
 	// Components is populated by DeepSeek, always exactly "granted" and
 	// "topped_up" (deepseek.go:97-100), and by Codex spend_control, always
-	// exactly one "used" entry (codex.go:391). Codex workspace_credits never
+	// exactly one "used" entry (codex.go:398). Codex workspace_credits never
 	// sets it.
 	Components []BalanceComponent `json:"components,omitempty"`
 	// Available is populated only by Codex workspace_credits, from the
-	// upstream hasCredits flag (codex.go:371). Do not confuse with
+	// upstream hasCredits flag (codex.go:378). Do not confuse with
 	// Observation.Available, which is a separate, DeepSeek-only top-level
 	// flag. Neither DeepSeek nor Codex spend_control sets this field.
 	Available *bool `json:"available,omitempty"`
 	// Unlimited is populated only by Codex workspace_credits, from the
-	// upstream unlimited flag (codex.go:371). Neither DeepSeek nor Codex
+	// upstream unlimited flag (codex.go:378). Neither DeepSeek nor Codex
 	// spend_control sets this field.
 	Unlimited *bool `json:"unlimited,omitempty"`
 }
@@ -212,45 +247,90 @@ type BalanceComponent struct {
 
 // SpendControl preserves the backend's independent per-bucket restriction
 // state. A missing backend flag produces no entry; Reached=false is retained.
-// Populated only by Codex (codex.go:334, from spendControlReached); no Go code
+// Populated only by Codex (codex.go:339, from spendControlReached); no Go code
 // reads it back — see Observation.SpendControls.
 type SpendControl struct {
 	// LimitID is the same bucket id used for the paired Quota/Balance rows
-	// for that bucket (codex.go:334). The JSON key is still "scope_id" for
+	// for that bucket (codex.go:339). The JSON key is still "scope_id" for
 	// schema v1 compatibility.
 	LimitID string `json:"scope_id"`
-	// Reached is the upstream spendControlReached flag verbatim (codex.go:334).
+	// Reached is the upstream spendControlReached flag verbatim (codex.go:339).
 	Reached bool `json:"reached"`
+}
+
+// SpendLimit is a spending ceiling with consumption against it — the one
+// shape for what Codex reports per bucket as individualLimit plus
+// spendControlReached, and Anthropic reports account-wide as extra_usage.
+// The two payloads carry different subsets of these facts (Codex has a reset
+// time and a reached flag but no enabled flag or currency; Anthropic the
+// reverse), so every provider-dependent field is a pointer whose nil means
+// "not reported". Amounts stay in the provider's decimal representation. Not
+// serialised until schema v2 — see Observation.SpendLimits.
+type SpendLimit struct {
+	// LimitID is the Codex bucket id, the same value as the paired
+	// Quota.Bucket, Balance.LimitID and SpendControl.LimitID
+	// (codex.go:341,400). Empty on Anthropic, whose extra usage is
+	// account-wide and tied to no bucket.
+	LimitID string
+	// Enabled is Anthropic's is_enabled flag (anthropic.go:274). Codex never
+	// reports it.
+	Enabled *bool
+	// Limit is the ceiling: Codex individualLimit.limit (codex.go:403),
+	// Anthropic monthly_limit when present (anthropic.go:278-287).
+	Limit *string
+	// Used is consumption against Limit: Codex individualLimit.used
+	// (codex.go:403), Anthropic used_credits when present
+	// (anthropic.go:278-287).
+	Used *string
+	// AmountUnit is the fixed literal "provider_units" whenever Limit or
+	// Used is set (codex.go:403; anthropic.go:288); empty otherwise.
+	AmountUnit string
+	// Currency is Anthropic's currency when present and valid
+	// (anthropic.go:297-301). Codex never reports one.
+	Currency string
+	// UsedPercent is on the PercentUnit scale: Codex 100 minus
+	// individualLimit.remainingPercent (codex.go:396,404), Anthropic
+	// utilization when present (anthropic.go:290-295).
+	UsedPercent *float64
+	// ResetsAt is Codex individualLimit.resetsAt (codex.go:392,404).
+	// Anthropic never reports one.
+	ResetsAt *time.Time
+	// Reached is Codex spendControlReached when present (codex.go:340-341). It
+	// is independent of Limit/Used: a bucket can report either fact without
+	// the other. Anthropic never reports it.
+	Reached *bool
 }
 
 // ExtraUsage retains only the documented, non-identifying fields returned by
 // Anthropic. Amounts remain in the provider's original decimal representation.
 // Every field is populated only by Anthropic's normalizeAnthropicExtra
-// (anthropic.go:266-296); no other provider sets ExtraUsage at all.
+// (anthropic.go:270-300); no other provider sets ExtraUsage at all. The same
+// facts are also projected into a SpendLimit (spendLimitFromExtraUsage); this
+// shape is retained for schema v1.
 type ExtraUsage struct {
-	// Enabled is the upstream is_enabled flag verbatim (anthropic.go:270);
+	// Enabled is the upstream is_enabled flag verbatim (anthropic.go:274);
 	// required, always set.
 	Enabled bool `json:"enabled"`
 	// MonthlyLimit is set when upstream's monthly_limit is present and
-	// decimal (anthropic.go:274,276-283); AmountUnit is then also set to
+	// decimal (anthropic.go:278,280-287); AmountUnit is then also set to
 	// "provider_units".
 	MonthlyLimit *string `json:"monthly_limit,omitempty"`
 	// UsedCredits is set when upstream's used_credits is present and decimal
-	// (anthropic.go:274,276-283); AmountUnit is then also set to
+	// (anthropic.go:278,280-287); AmountUnit is then also set to
 	// "provider_units".
 	UsedCredits *string `json:"used_credits,omitempty"`
 	// AmountUnit is set to the fixed literal "provider_units" whenever
-	// either MonthlyLimit or UsedCredits is set (anthropic.go:283); left
+	// either MonthlyLimit or UsedCredits is set (anthropic.go:288); left
 	// empty when neither upstream amount is present.
 	AmountUnit string `json:"amount_unit,omitempty"`
 	// UsedPercent is set when upstream's utilization is present
-	// (anthropic.go:285-289); Unit is then also set to PercentUnit.
+	// (anthropic.go:290-295); Unit is then also set to PercentUnit.
 	UsedPercent *float64 `json:"used_percent,omitempty"`
 	// Unit is set to the fixed literal PercentUnit ("percent_0_100") when
-	// UsedPercent is set (anthropic.go:289); left empty otherwise.
+	// UsedPercent is set (anthropic.go:295); left empty otherwise.
 	Unit string `json:"unit,omitempty"`
 	// Currency is set when upstream's currency is present and valid
-	// (anthropic.go:291-295).
+	// (anthropic.go:297-301).
 	Currency string `json:"currency,omitempty"`
 }
 
