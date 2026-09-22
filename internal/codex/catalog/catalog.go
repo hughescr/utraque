@@ -322,10 +322,12 @@ func (c *Client) fetch(ctx context.Context, cred auth.Credential) (state, error)
 
 	switch resp.StatusCode {
 	case http.StatusNotModified:
-		if !hadPrev {
-			// 304 with nothing cached is a protocol surprise (we would only
-			// send If-None-Match with a held etag). Treat as unusable.
-			return state{}, apierr.API("codex catalog returned 304 with no cached catalog to reuse")
+		if !hadPrev || prevEtag == "" {
+			// 304 to an unconditional request is a protocol surprise: we only
+			// send If-None-Match with a held etag. A 304 with no validator
+			// offered is not a legitimate conditional response, so treat it as
+			// unusable rather than reuse a list the request did not validate.
+			return state{}, apierr.API("codex catalog returned 304 to a request that offered no cached catalog to reuse")
 		}
 		ns := state{models: prevModels, etag: prevEtag, fetchedAt: c.now(), loaded: true}
 		c.commit(ns)

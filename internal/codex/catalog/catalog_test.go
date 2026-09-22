@@ -1,10 +1,12 @@
 package catalog_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -581,6 +583,69 @@ func TestDiskCacheIgnoredOnClientVersionMismatch(t *testing.T) {
 	if got := fake.callCount(); got != 1 {
 		t.Errorf("expected exactly one network fetch, got %d", got)
 	}
+}
+
+// Test304ToUnconditionalRequestIsRejected: a 304 is only reusable when the
+// request offered a validator. After a no-ETag 200, the next request is
+// unconditional, and a 304 to it must not quietly keep the held list.
+func Test304ToUnconditionalRequestIsRejected(t *testing.T) {
+	var calls atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(cschema.ModelsResponse{Models: []cschema.CatalogModel{solModel()}})
+			return
+		}
+		w.WriteHeader(http.StatusNotModified)
+	}))
+	t.Cleanup(srv.Close)
+
+	logs := &syncBuffer{}
+	clk := newClock()
+	c := catalog.New(catalog.Options{
+		BaseURL: srv.URL, HTTPClient: srv.Client(), TTL: 60 * time.Second, Now: clk.now,
+		Logger: slog.New(slog.NewTextHandler(logs, nil)),
+	})
+	if _, err := c.Models(context.Background(), fakeCred()); err != nil {
+		t.Fatalf("cold Models: %v", err)
+	}
+	clk.advance(120 * time.Second)
+	if _, err := c.Models(context.Background(), fakeCred()); err != nil {
+		t.Fatalf("stale Models: %v", err)
+	}
+	// The revalidation has finished handling the 304 once it has either
+	// committed it (Age is fresh again: the bug) or given up on it (the
+	// background-failure warning: the fix). Waiting for either, rather than
+	// sleeping, makes both outcomes deterministic.
+	const failed = "codex catalog background revalidation failed"
+	eventually(t, 2*time.Second, func() bool {
+		return c.Age() < 60*time.Second || strings.Contains(logs.String(), failed)
+	})
+	if age := c.Age(); age < 60*time.Second {
+		t.Errorf("Age = %s after a 304 to an unconditional request; the held list was wrongly re-stamped fresh", age)
+	}
+	if !strings.Contains(logs.String(), failed) {
+		t.Errorf("the 304 was not reported as a failed revalidation; logs:\n%s", logs.String())
+	}
+}
+
+// syncBuffer is a log sink the test can read while the background
+// revalidation goroutine is still writing to it.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
 
 // TestDiskCacheIgnoredWhenFetchedAtInFuture proves a future-dated fetched_at
