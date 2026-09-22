@@ -378,6 +378,12 @@ func (t *Translator) result() Result {
 // Run drives the translation of r into sink until a terminus, an error, or ctx
 // cancellation. See Translator for the three failure modes and their return
 // contract.
+//
+// If r is an io.Closer, Run closes it while its reader goroutine may still be
+// blocked in Read, then joins that goroutine. Close must therefore be safe to
+// call concurrently with Read and must make that Read return. A raw
+// *http.Response.Body does not promise this on its own; the Codex responses
+// stream does.
 func (t *Translator) Run(ctx context.Context, r io.Reader, sink Sink) (Result, error) {
 	t.reset()
 
@@ -400,7 +406,8 @@ func (t *Translator) Run(ctx context.Context, r io.Reader, sink Sink) (Result, e
 	}()
 
 	// finish tears the reader goroutine down before returning: cancel unblocks a
-	// pending frame send, closing the reader unblocks a pending Read, and the
+	// pending frame send, closing the reader unblocks a pending Read (which is
+	// why Run requires a Close that is safe concurrently with Read), and the
 	// join guarantees no goroutine outlives the call.
 	finish := func(err error) (Result, error) {
 		cancel()

@@ -37,6 +37,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/hughescr/utraque/internal/apierr"
@@ -205,7 +206,17 @@ func (c *Client) StreamResponse(ctx context.Context, cred auth.Credential, req *
 		return nil, err
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+Path, bytes.NewReader(body))
+	// Each attempt owns its request context. Only a successful stream hands the
+	// cancel to its body (see streamBody); every other return releases it here.
+	reqCtx, cancel := context.WithCancel(ctx)
+	handedOff := false
+	defer func() {
+		if !handedOff {
+			cancel()
+		}
+	}()
+
+	httpReq, err := http.NewRequestWithContext(reqCtx, http.MethodPost, c.baseURL+Path, bytes.NewReader(body))
 	if err != nil {
 		return nil, apierr.Wrap(err, apierr.TypeAPI, "codex responses: build request")
 	}
@@ -254,11 +265,12 @@ func (c *Client) StreamResponse(ctx context.Context, cred auth.Credential, req *
 	// classification, which recognises the challenge markers AND parses the
 	// structured error body.
 	if resp.StatusCode == http.StatusOK && isStreamContentType(resp.Header.Get(headerContentType)) {
+		handedOff = true
 		return &Response{
 			Status:     resp.StatusCode,
 			Header:     resp.Header.Clone(),
 			RateLimits: rl,
-			Body:       &streamBody{rc: resp.Body},
+			Body:       &streamBody{rc: resp.Body, cancel: cancel, proto: resp.ProtoMajor},
 		}, nil
 	}
 
@@ -385,18 +397,72 @@ func readBounded(r io.Reader, max int64) []byte {
 	return b
 }
 
-// streamBody makes Close idempotent so a leg that closes on both the happy path
-// and a deferred cleanup cannot double-close the upstream connection.
+// streamBody is the upstream SSE body. Close is idempotent, and it is safe to
+// call while another goroutine is blocked in Read: the stream translator does
+// exactly that when it finishes a stream early, then waits for its reader. Close
+// always cancels this request's own context first, which ends the request
+// without touching the caller's context, and never waits for more upstream
+// bytes. How it then reaches the transport body depends on the protocol.
+//
+// HTTP/1: Close never touches the net/http body while a Read on it is in
+// flight. The cancel makes the transport abandon the connection, which ends the
+// Read; Close waits for that Read to return and only then closes the body. A raw
+// HTTP/1 response body does not survive a concurrent Close on Go 1.27.0/1.27.1:
+// a body closed during a pending Read that then reaches end-of-body strands the
+// Read until the pooled connection idles out (90s), because both wait on one
+// per-connection handshake that releases only one of them. This relies on the
+// transport ending a body Read when its request context is cancelled, as
+// net/http does; a RoundTripper that ignored the context would make Close wait
+// for more upstream bytes. The trade-off is that an HTTP/1 connection closed
+// before end-of-body is not reused, as on Go 1.26 and earlier; a body read to
+// EOF first still is.
+//
+// HTTP/2: Close closes the body straight away, even during a Read. Both HTTP/2
+// clients in use (net/http's and x/net/http2 behind uTLS) support that: closing
+// breaks the stream's read pipe, which ends the Read at once. Waiting for the
+// Read instead would be unsafe, because on cancellation both write RST_STREAM
+// before they break the pipe, so a peer that has stopped reading would hold the
+// Read, and Close with it, until that write went through.
 type streamBody struct {
-	rc   io.ReadCloser
+	rc     io.ReadCloser
+	cancel context.CancelFunc
+	proto  int // resp.ProtoMajor; anything below 2 is joined as HTTP/1
+
+	mu     sync.Mutex // HTTP/1 only: held for the whole of each rc.Read, and around rc.Close
+	closed atomic.Bool
+
 	once sync.Once
 	err  error
 }
 
-func (b *streamBody) Read(p []byte) (int, error) { return b.rc.Read(p) }
+// joinsRead reports whether Close must wait out an in-flight Read before it
+// closes the transport body (HTTP/1), rather than closing it directly (HTTP/2).
+func (b *streamBody) joinsRead() bool { return b.proto < 2 }
+
+func (b *streamBody) Read(p []byte) (int, error) {
+	if b.joinsRead() {
+		b.mu.Lock()
+		defer b.mu.Unlock()
+	}
+	if b.closed.Load() {
+		return 0, http.ErrBodyReadAfterClose
+	}
+	return b.rc.Read(p)
+}
 
 func (b *streamBody) Close() error {
-	b.once.Do(func() { b.err = b.rc.Close() })
+	b.once.Do(func() {
+		// cancel must precede b.mu.Lock: on HTTP/1 it is what ends a Read
+		// holding b.mu. On HTTP/2 it also lets the transport body's Close
+		// return without waiting for the stream's own cleanup.
+		b.cancel()
+		if b.joinsRead() {
+			b.mu.Lock()
+			defer b.mu.Unlock()
+		}
+		b.closed.Store(true)
+		b.err = b.rc.Close()
+	})
 	return b.err
 }
 
