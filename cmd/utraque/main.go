@@ -148,9 +148,6 @@ func run(ctx context.Context, getenv func(string) string, stderr io.Writer) erro
 	if err != nil {
 		return err
 	}
-	if err := resolveCodexClientVersion(ctx, &cfg); err != nil {
-		return err
-	}
 
 	log, err := obs.NewLogger(stderr, cfg.SlogLevel(), cfg.Log.Format)
 	if err != nil {
@@ -158,6 +155,14 @@ func run(ctx context.Context, getenv func(string) string, stderr io.Writer) erro
 	}
 	slog.SetDefault(log)
 	warnDeprecatedEnv(log, getenv)
+
+	// Startup discovery still fails fast when there is no version at all. The
+	// probe it returns (nil for an explicit override) keeps the version current
+	// for the catalog after that; see codexVersionProbe.
+	versionProbe, err := resolveCodexClientVersion(ctx, &cfg, log)
+	if err != nil {
+		return err
+	}
 
 	// Two cancellation sources feed one context: SIGINT/SIGTERM from the
 	// operator or launchd, and the idle timer's self-exit. Either one starts
@@ -196,7 +201,7 @@ func run(ctx context.Context, getenv func(string) string, stderr io.Writer) erro
 		return err
 	}
 
-	a, err := newApp(cfg, log, timer, tracer)
+	a, err := newApp(cfg, log, timer, tracer, versionProbe.versionFunc())
 	if err != nil {
 		_ = launchd.CloseAll(lns)
 		return err
@@ -272,7 +277,7 @@ func (a *app) warmCatalog(ctx context.Context) {
 //
 // activity may be nil, which disables idle accounting.
 func newServer(cfg config.Config, log *slog.Logger, activity server.ActivityTracker) (*server.Server, error) {
-	a, err := newApp(cfg, log, activity, nil)
+	a, err := newApp(cfg, log, activity, nil, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -283,8 +288,10 @@ func newServer(cfg config.Config, log *slog.Logger, activity server.ActivityTrac
 // separate from run so tests can drive the exact wiring production uses against
 // a fake upstream.
 //
-// tracer may be nil, which disables per-request trace dumps.
-func newApp(cfg config.Config, log *slog.Logger, activity server.ActivityTracker, tracer *obs.Tracer) (*app, error) {
+// tracer may be nil, which disables per-request trace dumps. clientVersion may
+// be nil, which pins the catalog to cfg.Codex.ClientVersion (an explicit
+// override, or a test); otherwise it is consulted before every catalog fetch.
+func newApp(cfg config.Config, log *slog.Logger, activity server.ActivityTracker, tracer *obs.Tracer, clientVersion catalog.ClientVersionFunc) (*app, error) {
 	trOpts := transport.Options{
 		// Bound only the pre-first-byte wait. There is deliberately no overall
 		// client timeout: an SSE stream may legitimately run for many minutes.
@@ -367,12 +374,17 @@ func newApp(cfg config.Config, log *slog.Logger, activity server.ActivityTracker
 	// serve no GPT rows and per-request effort clamping would stay stuck on the
 	// compiled-in seed. The constructor copies the client and re-imposes both its
 	// no-redirect policy and its own fetch timeout.
+	//
+	// cfg.Codex.ClientVersion is the startup version; clientVersion, when set,
+	// re-resolves it before each fetch so a Codex CLI upgrade is picked up
+	// without a restart.
 	cat := catalog.New(catalog.Options{
-		BaseURL:       cfg.Codex.BaseURL,
-		CacheFile:     cfg.Codex.CacheFile,
-		ClientVersion: cfg.Codex.ClientVersion,
-		HTTPClient:    codexTr.Client(),
-		Logger:        log,
+		BaseURL:           cfg.Codex.BaseURL,
+		CacheFile:         cfg.Codex.CacheFile,
+		ClientVersion:     cfg.Codex.ClientVersion,
+		ClientVersionFunc: clientVersion,
+		HTTPClient:        codexTr.Client(),
+		Logger:            log,
 	})
 
 	// routing.alias_overrides, applied before anything loads a catalog, since
@@ -1100,6 +1112,14 @@ func (h *healthReporter) catalogHealth() map[string]any {
 		state = catalogEmpty
 	}
 	info["state"] = string(state)
+	// The client_version the catalog sends, which decides which models the
+	// backend lists. Read from the catalog, never re-resolved, so a health
+	// poll still starts no subprocess. Omitted when none is known.
+	if h.cat != nil {
+		if v := h.cat.ClientVersion(); v != "" {
+			info["client_version"] = v
+		}
+	}
 	if lastErr != "" {
 		info["last_error"] = lastErr
 	}

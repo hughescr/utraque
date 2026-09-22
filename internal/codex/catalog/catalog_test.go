@@ -585,9 +585,132 @@ func TestDiskCacheIgnoredOnClientVersionMismatch(t *testing.T) {
 	}
 }
 
+// TestClientVersionChangeForcesUnconditionalFetch pins the cache keying: an
+// ETag validates the list the backend served to ONE client version. The fake
+// here keeps answering 304 to the old validator after its list has grown,
+// which is what makes offering that validator under a new version the bug —
+// the old version's list would be kept and stamped fresh.
+func TestClientVersionChangeForcesUnconditionalFetch(t *testing.T) {
+	cases := []struct {
+		name        string
+		next        string // what ClientVersionFunc reports for the revalidation
+		wantQuery   string
+		wantINM     string
+		wantModels  int
+		wantVersion string
+	}{
+		{name: "version changed", next: "0.155.0", wantQuery: "0.155.0", wantINM: "", wantModels: 2, wantVersion: "0.155.0"},
+		{name: "version unchanged", next: "0.155.0-alpha.9", wantQuery: "0.155.0-alpha.9", wantINM: `W/"v1"`, wantModels: 1, wantVersion: "0.155.0-alpha.9"},
+		{name: "func reports nothing", next: "", wantQuery: "0.155.0-alpha.9", wantINM: `W/"v1"`, wantModels: 1, wantVersion: "0.155.0-alpha.9"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := newFakeCatalog(t, []cschema.CatalogModel{solModel()}, `W/"v1"`)
+			srv := httptest.NewServer(fake)
+			t.Cleanup(srv.Close)
+
+			var version atomic.Value
+			version.Store("0.155.0-alpha.9")
+			clk := newClock()
+			cachePath := filepath.Join(t.TempDir(), "utraque-models_cache.json")
+			c := catalog.New(catalog.Options{
+				BaseURL: srv.URL, HTTPClient: srv.Client(), TTL: 60 * time.Second, Now: clk.now,
+				CacheFile: cachePath, ClientVersion: "0.155.0-alpha.9",
+				ClientVersionFunc: func(context.Context) string { return version.Load().(string) },
+			})
+			if _, err := c.Models(context.Background(), fakeCred()); err != nil {
+				t.Fatalf("cold Models: %v", err)
+			}
+
+			fake.set([]cschema.CatalogModel{solModel(), terraModel()}, `W/"v1"`, true)
+			version.Store(tc.next)
+			clk.advance(120 * time.Second)
+			if _, err := c.Models(context.Background(), fakeCred()); err != nil {
+				t.Fatalf("stale Models: %v", err)
+			}
+			eventually(t, 2*time.Second, func() bool { return fake.callCount() >= 2 && c.Age() < 60*time.Second })
+
+			fake.mu.Lock()
+			inm, query := fake.lastINM, fake.gotClientVersion
+			fake.mu.Unlock()
+			if query != tc.wantQuery {
+				t.Errorf("client_version = %q, want %q", query, tc.wantQuery)
+			}
+			if inm != tc.wantINM {
+				t.Errorf("If-None-Match = %q, want %q", inm, tc.wantINM)
+			}
+			if m, err := c.Models(context.Background(), fakeCred()); err != nil || len(m) != tc.wantModels {
+				t.Errorf("models = %d (err %v), want %d", len(m), err, tc.wantModels)
+			}
+			if got := c.ClientVersion(); got != tc.wantVersion {
+				t.Errorf("ClientVersion() = %q, want %q", got, tc.wantVersion)
+			}
+			// The disk write follows the in-memory commit; wait for the one this
+			// revalidation made (its fetched_at), not the cold fetch's.
+			eventually(t, 2*time.Second, func() bool {
+				b, err := os.ReadFile(cachePath)
+				var cache cschema.Cache
+				return err == nil && json.Unmarshal(b, &cache) == nil &&
+					cache.FetchedAt.Equal(clk.now()) && cache.ClientVersion == tc.wantVersion
+			})
+		})
+	}
+}
+
+// TestClientVersionFuncRunsOnlyForAFetch: the version source may stat a file
+// or start a subprocess, so it is consulted once per fetch and never by a
+// fresh read, a disk-cache load, or the read-only accessors /healthz uses.
+func TestClientVersionFuncRunsOnlyForAFetch(t *testing.T) {
+	clk := newClock()
+	cachePath := filepath.Join(t.TempDir(), "utraque-models_cache.json")
+	cache := cschema.Cache{ClientVersion: "0.155.0", ETag: `W/"d"`, FetchedAt: clk.now(), Models: []cschema.CatalogModel{solModel()}}
+	b, _ := json.Marshal(cache)
+	if err := os.WriteFile(cachePath, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fake := newFakeCatalog(t, []cschema.CatalogModel{solModel()}, `W/"v1"`)
+	srv := httptest.NewServer(fake)
+	t.Cleanup(srv.Close)
+
+	var calls atomic.Int64
+	c := catalog.New(catalog.Options{
+		BaseURL: srv.URL, HTTPClient: srv.Client(), TTL: 60 * time.Second, Now: clk.now,
+		CacheFile: cachePath, ClientVersion: "0.155.0",
+		ClientVersionFunc: func(context.Context) string { calls.Add(1); return "0.155.0" },
+	})
+
+	c.Snapshot()
+	c.Age()
+	if got := c.ClientVersion(); got != "0.155.0" {
+		t.Errorf("ClientVersion() = %q, want the seed", got)
+	}
+	for range 3 {
+		if _, err := c.Models(context.Background(), fakeCred()); err != nil {
+			t.Fatalf("fresh Models: %v", err)
+		}
+	}
+	if got := calls.Load(); got != 0 {
+		t.Errorf("ClientVersionFunc called %d times with no fetch, want 0", got)
+	}
+
+	clk.advance(120 * time.Second)
+	if _, err := c.Models(context.Background(), fakeCred()); err != nil {
+		t.Fatalf("stale Models: %v", err)
+	}
+	eventually(t, 2*time.Second, func() bool {
+		b, err := os.ReadFile(cachePath)
+		var cache cschema.Cache
+		return fake.callCount() == 1 && err == nil && json.Unmarshal(b, &cache) == nil && cache.FetchedAt.Equal(clk.now())
+	})
+	if got := calls.Load(); got != 1 {
+		t.Errorf("ClientVersionFunc called %d times for one fetch, want 1", got)
+	}
+}
+
 // Test304ToUnconditionalRequestIsRejected: a 304 is only reusable when the
-// request offered a validator. After a no-ETag 200, the next request is
-// unconditional, and a 304 to it must not quietly keep the held list.
+// request offered a validator. After a no-ETag 200 (or a client version
+// change) the request is unconditional, and a 304 to it must not quietly keep
+// the held list.
 func Test304ToUnconditionalRequestIsRejected(t *testing.T) {
 	var calls atomic.Int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

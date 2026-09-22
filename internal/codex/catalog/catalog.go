@@ -15,6 +15,16 @@
 //   - ETag: every fetch sends If-None-Match, so an unchanged catalog comes back
 //     304 and the held models are reused (only fetched_at advances).
 //
+// The snapshot is keyed by client_version as well as by time. The backend
+// gates which models it lists on the client_version query parameter, so a
+// catalog, and the ETag that validates it, describe the list for ONE client
+// version. Each snapshot records the version it was fetched with. A fetch
+// under a different version sends no If-None-Match, so a 304 can never
+// revalidate the old version's list under the new one, and the disk cache is
+// ignored on load when its client_version differs. The version itself is
+// resolved before every fetch (Options.ClientVersionFunc), so a Codex CLI
+// upgrade while utraque runs reaches the next revalidation.
+//
 // An optional on-disk cache lets a cold start serve the last-known catalog
 // before the first successful fetch. Its file shape is interoperable with the
 // Codex CLI's own models_cache.json, but utraque keeps its OWN file and never
@@ -93,12 +103,23 @@ type Options struct {
 	// ClientVersion is sent as the client_version query parameter on every
 	// models request — the real endpoint 400s the request outright without it
 	// ("client_version" reported as a missing required query field) — and is
-	// also recorded in the on-disk cache for interop/debugging. It is NOT
-	// defaulted here: production startup discovers config.Codex.ClientVersion
-	// from the configured Codex executable (or accepts its explicit override)
-	// before constructing this client. A caller that builds Options directly
-	// must set it if the query parameter matters to what it is asserting.
+	// also recorded in the on-disk cache, which is keyed by it. It is NOT
+	// defaulted here. With no ClientVersionFunc it is the fixed version for the
+	// life of the client (an explicit override, or a test). With one, it is
+	// only the seed: the version the disk cache is checked against and the one
+	// /healthz reports before the first fetch. A caller that builds Options
+	// directly must set it if the query parameter matters to what it is
+	// asserting.
 	ClientVersion string
+	// ClientVersionFunc, when set, re-resolves the client version before every
+	// fetch, so an upgraded Codex CLI is noticed without restarting utraque.
+	// Production passes a discoverer that stats the Codex executable and only
+	// re-runs `codex --version` when the file changed. It is called with the
+	// fetch's context, at most once per fetch (fetches are collapsed by
+	// singleflight), and never from /healthz. An empty result keeps the version
+	// already in use, so a failed re-discovery never fails a fetch. It must be
+	// safe for concurrent use.
+	ClientVersionFunc ClientVersionFunc
 	// HTTPClient performs the fetch. Defaults to a client with a modest
 	// timeout. Tests inject one aimed at a fake server.
 	HTTPClient *http.Client
@@ -108,15 +129,19 @@ type Options struct {
 	Logger *slog.Logger
 }
 
+// ClientVersionFunc reports the Codex client version the next fetch should
+// send. See Options.ClientVersionFunc for the contract.
+type ClientVersionFunc func(ctx context.Context) string
+
 // Client is a caching catalog fetcher. It is safe for concurrent use.
 type Client struct {
-	baseURL       string
-	cacheFile     string
-	ttl           time.Duration
-	clientVersion string
-	http          *http.Client
-	now           func() time.Time
-	log           *slog.Logger
+	baseURL   string
+	cacheFile string
+	ttl       time.Duration
+	versionFn ClientVersionFunc
+	http      *http.Client
+	now       func() time.Time
+	log       *slog.Logger
 
 	// group collapses concurrent fetches (foreground + background) into one.
 	group singleflight.Group
@@ -124,17 +149,23 @@ type Client struct {
 	// revalidation at a time.
 	refreshing atomic.Bool
 
-	mu        sync.RWMutex
-	st        state
-	diskTried bool
+	mu sync.RWMutex
+	st state
+	// clientVersion is the version in use: the seed from Options, replaced by
+	// each non-empty ClientVersionFunc result. Guarded by mu.
+	clientVersion string
+	diskTried     bool
 }
 
-// state is the in-memory snapshot.
+// state is the in-memory snapshot. clientVersion is the version it was fetched
+// with (or the disk cache recorded): its etag validates the model list for
+// that version only.
 type state struct {
-	models    []cschema.CatalogModel
-	etag      string
-	fetchedAt time.Time
-	loaded    bool
+	models        []cschema.CatalogModel
+	etag          string
+	clientVersion string
+	fetchedAt     time.Time
+	loaded        bool
 }
 
 const defaultHTTPTimeout = 30 * time.Second
@@ -147,6 +178,7 @@ func New(opts Options) *Client {
 		baseURL:       opts.BaseURL,
 		cacheFile:     opts.CacheFile,
 		ttl:           opts.TTL,
+		versionFn:     opts.ClientVersionFunc,
 		clientVersion: opts.ClientVersion,
 		http:          opts.HTTPClient,
 		now:           opts.Now,
@@ -245,6 +277,40 @@ func (c *Client) Snapshot() (models int, age time.Duration, loaded bool) {
 	return len(c.st.models), c.now().Sub(c.st.fetchedAt), true
 }
 
+// ClientVersion reports the client_version the catalog is using: the one its
+// most recent fetch sent, or, before any fetch, the seed from Options. Like
+// Snapshot it never fetches and never re-resolves the version, so /healthz can
+// read it for free.
+func (c *Client) ClientVersion() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.clientVersion
+}
+
+// resolveClientVersion asks ClientVersionFunc, when there is one, for the
+// version the next fetch should send and records it as the version in use. An
+// empty answer keeps the version already in use.
+func (c *Client) resolveClientVersion(ctx context.Context) string {
+	if c.versionFn != nil {
+		if v := c.versionFn(ctx); v != "" {
+			c.mu.Lock()
+			c.clientVersion = v
+			c.mu.Unlock()
+			return v
+		}
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.clientVersion
+}
+
+// versionsDiffer reports whether a held snapshot's client version rules it out
+// under the version in use. Only a difference between two KNOWN versions
+// counts, so a version-less cache (a test fixture, an old file) still loads.
+func versionsDiffer(held, current string) bool {
+	return held != "" && current != "" && held != current
+}
+
 // revalidateAsync launches at most one background fetch. Its result is stored
 // on success and simply logged (never fatal) on failure — the caller already
 // has a stale-but-usable snapshot.
@@ -278,11 +344,27 @@ func (c *Client) fetchShared(ctx context.Context, cred auth.Credential) (state, 
 // fetch performs one conditional GET and commits the result. On 304 it reuses
 // the held models; on 200 it replaces them.
 func (c *Client) fetch(ctx context.Context, cred auth.Credential) (state, error) {
+	// Re-resolve first: an upgraded Codex CLI must reach THIS request, not the
+	// one after it.
+	clientVersion := c.resolveClientVersion(ctx)
+
 	c.mu.RLock()
 	prevEtag := c.st.etag
 	prevModels := c.st.models
+	prevVersion := c.st.clientVersion
 	hadPrev := c.st.loaded
 	c.mu.RUnlock()
+
+	// The held etag validates the list the backend served to prevVersion. The
+	// backend gates models on client_version, so under a new version that
+	// validator must not be offered: a 304 would keep the old version's list
+	// (the one missing whatever the upgrade unlocked) and stamp it fresh.
+	if hadPrev && prevEtag != "" && versionsDiffer(prevVersion, clientVersion) {
+		c.log.Debug("codex client version changed since the held catalog was fetched; fetching it unconditionally",
+			slog.String("cache_client_version", prevVersion),
+			slog.String("client_version", clientVersion))
+		prevEtag = ""
+	}
 
 	// client_version is a REQUIRED query parameter, not a header: the real
 	// endpoint 400s the request outright without it (observed live: "field
@@ -295,7 +377,7 @@ func (c *Client) fetch(ctx context.Context, cred auth.Credential) (state, error)
 		return state{}, apierr.Wrap(err, apierr.TypeAPI, "codex catalog: parse request URL")
 	}
 	q := reqURL.Query()
-	q.Set(queryClientVer, c.clientVersion)
+	q.Set(queryClientVer, clientVersion)
 	reqURL.RawQuery = q.Encode()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL.String(), nil)
@@ -324,12 +406,12 @@ func (c *Client) fetch(ctx context.Context, cred auth.Credential) (state, error)
 	case http.StatusNotModified:
 		if !hadPrev || prevEtag == "" {
 			// 304 to an unconditional request is a protocol surprise: we only
-			// send If-None-Match with a held etag. A 304 with no validator
-			// offered is not a legitimate conditional response, so treat it as
-			// unusable rather than reuse a list the request did not validate.
+			// send If-None-Match with a held etag, and never across a client
+			// version change. Treat it as unusable rather than reuse a list
+			// the request did not validate.
 			return state{}, apierr.API("codex catalog returned 304 to a request that offered no cached catalog to reuse")
 		}
-		ns := state{models: prevModels, etag: prevEtag, fetchedAt: c.now(), loaded: true}
+		ns := state{models: prevModels, etag: prevEtag, clientVersion: prevVersion, fetchedAt: c.now(), loaded: true}
 		c.commit(ns)
 		c.log.Debug("codex catalog not modified", slog.Int("models", len(prevModels)))
 		return ns, nil
@@ -349,10 +431,11 @@ func (c *Client) fetch(ctx context.Context, cred auth.Credential) (state, error)
 		// wrongly mark the new body fresh. No ETag simply means the next fetch is
 		// unconditional.
 		etag := resp.Header.Get("ETag")
-		ns := state{models: parsed.Models, etag: etag, fetchedAt: c.now(), loaded: true}
+		ns := state{models: parsed.Models, etag: etag, clientVersion: clientVersion, fetchedAt: c.now(), loaded: true}
 		c.commit(ns)
 		c.log.Info("fetched codex catalog",
 			slog.Int("models", len(parsed.Models)),
+			slog.String("client_version", clientVersion),
 			obs.HashAttr("account", cred.AccountID))
 		return ns, nil
 
@@ -423,11 +506,14 @@ func (c *Client) ensureDiskLoaded() {
 	if len(cache.Models) == 0 && cache.FetchedAt.IsZero() {
 		return // nothing useful
 	}
-	// A cache written by a different client version may describe a different
-	// protocol/catalog shape; ignore it and re-fetch rather than serve a list a
-	// client upgrade may have invalidated. (Only gate when both versions are
-	// known, so a version-less test cache still loads.)
-	if cache.ClientVersion != "" && c.clientVersion != "" && cache.ClientVersion != c.clientVersion {
+	// A cache written under a different client version describes a different
+	// list — the backend gates models on client_version — so ignore it and
+	// re-fetch rather than serve a list a client upgrade may have invalidated.
+	// This compares against the version in use (the seed, before any fetch),
+	// deliberately without calling ClientVersionFunc: this runs under mu and
+	// from /healthz, and neither may start a subprocess. A version change that
+	// lands after this load is still caught, by fetch dropping the etag.
+	if versionsDiffer(cache.ClientVersion, c.clientVersion) {
 		c.log.Debug("ignoring codex catalog disk cache from a different client version",
 			slog.String("cache_client_version", cache.ClientVersion),
 			slog.String("client_version", c.clientVersion))
@@ -441,11 +527,16 @@ func (c *Client) ensureDiskLoaded() {
 			slog.Time("fetched_at", cache.FetchedAt))
 		return
 	}
+	heldVersion := cache.ClientVersion
+	if heldVersion == "" {
+		heldVersion = c.clientVersion
+	}
 	c.st = state{
-		models:    cache.Models,
-		etag:      cache.ETag,
-		fetchedAt: cache.FetchedAt,
-		loaded:    true,
+		models:        cache.Models,
+		etag:          cache.ETag,
+		clientVersion: heldVersion,
+		fetchedAt:     cache.FetchedAt,
+		loaded:        true,
 	}
 	c.log.Debug("loaded codex catalog from disk cache",
 		slog.Int("models", len(cache.Models)),
@@ -460,7 +551,7 @@ func (c *Client) writeDisk(ns state) {
 		return
 	}
 	cache := cschema.Cache{
-		ClientVersion: c.clientVersion,
+		ClientVersion: ns.clientVersion,
 		ETag:          ns.etag,
 		FetchedAt:     ns.fetchedAt,
 		Models:        ns.models,

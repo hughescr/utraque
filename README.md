@@ -439,10 +439,31 @@ This is the whole surface.
 | `UTRAQUE_CODEX_TRANSPORT` | `auto` | `auto` \| `std` \| `utls`. See *Transport* below. A typo is a startup error, never a silent fallback. |
 | `UTRAQUE_CODEX_CLIENT_VERSION` | detected from `UTRAQUE_CODEX_EXECUTABLE --version` | Sent as the `client_version` query parameter on every model-catalog request. Discovery is bounded and requires `codex-cli <semantic-version>` on stdout; startup fails if discovery cannot supply a real version, because stale versions can hide newly released models. Set this explicitly to bypass executable discovery. |
 
-The discovered Codex version is fixed for the life of the utraque process. A
-Codex CLI upgrade is reflected the next time utraque starts; an explicit
-`UTRAQUE_CODEX_CLIENT_VERSION` bypasses discovery and remains in force until the
-override is changed or removed.
+The discovered Codex version follows Codex CLI upgrades without a restart.
+Before each model-catalog fetch, utraque stats the Codex executable — its
+`PATH` lookup, symlink target, size, modification time and inode — and re-runs
+`--version` only when one of those changed, or when an hour has passed since
+the last run (a backstop for an install whose visible file does not change on
+upgrade). A changed version is logged once at INFO (`codex client version
+changed`, with `previous_client_version` and `client_version`), and the next
+catalog fetch is unconditional: the held ETag validated the list served to the
+old version, so it is not offered, and the new version's list replaces it. If
+re-discovery fails at runtime, the last good version stays in use, a WARN line
+says why, and the fetch goes ahead.
+
+The check rides on catalog revalidation, which is demand-driven, so there is
+no fixed deadline. The catalog is only re-fetched when something reads it
+after its five-minute TTL has lapsed — an inference request on a GPT route or
+a model-picker open — and that first stale read still returns the old list
+while the refresh runs in the background; the read after it sees the new one.
+An idle daemon keeps the old list until such a read arrives. An install whose
+visible file does not change on upgrade (a wrapper script that runs a package
+runner, say) is only re-checked by the hourly backstop, so its new version can
+take up to an hour longer to reach the catalog. (Before this, the version was discovered once at startup and a CLI
+upgrade needed a utraque restart.) An explicit `UTRAQUE_CODEX_CLIENT_VERSION`
+bypasses discovery entirely — the executable is never run or even stat'ed for
+it — and remains in force until the override is changed or removed.
+`/healthz` reports the version in use as `codex_catalog.client_version`.
 
 ### Routing
 
@@ -469,7 +490,7 @@ These settings feed the loopback-only provider report, served at
 | `UTRAQUE_CCUSAGE_EXECUTABLE` | *(none)* | Direct path to an installed native `ccusage` binary. When set, this takes precedence over the package runner. Homebrew users can set `/opt/homebrew/bin/ccusage` after `brew install ccusage`. Utraque never downloads or updates it. |
 | `UTRAQUE_CCUSAGE_RUNNER` | `bunx` | Package runner used when no native executable is set. |
 | `UTRAQUE_CCUSAGE_VERSION` | `latest` | `ccusage` package version requested through the runner. The resolved version is recorded in each report. |
-| `UTRAQUE_CODEX_EXECUTABLE` | `codex` | Codex executable queried once at startup for the model-catalog client version, then used for the report's isolated, short-lived app-server query. It uses the same credential source as inference. Under launchd, configure an absolute path because its `PATH` is intentionally narrow. |
+| `UTRAQUE_CODEX_EXECUTABLE` | `codex` | Codex executable queried at startup for the model-catalog client version, and re-queried when it changes on disk (see `UTRAQUE_CODEX_CLIENT_VERSION` above); also used for the report's isolated, short-lived app-server query. It uses the same credential source as inference. Under launchd, configure an absolute path because its `PATH` is intentionally narrow. |
 | `UTRAQUE_PROVIDER_REPORT_CACHE_TTL` | `30s` | Lifetime of one coherent local-history and live-quota snapshot. Was `UTRAQUE_PROVIDER_CACHE_TTL`, which is still read as a deprecated alias for one release: it applies only when the new name is unset, and using it logs a WARN line naming both. |
 | `UTRAQUE_PROVIDER_REPORT_TIMEOUT` | `90s` | Overall deadline for an on-demand report collection. Was `UTRAQUE_PROVIDER_TIMEOUT`, a deprecated alias on the same terms. |
 | `UTRAQUE_CLAUDE_PLAN` | *(none)* | Optional operator-supplied Claude plan label. It is reported as configured metadata, not provider-confirmed data. |
@@ -916,7 +937,11 @@ reports process status, version and uptime, plus, for the Codex leg:
   `last_error`), `unavailable` (no `codex login` here), `warming`, or `cold`.
   The catalog is also warmed in the background at startup, so the count is a
   fact about the backend rather than a fact about whether anyone has used the
-  proxy yet.
+  proxy yet. `client_version` is the Codex client version the catalog sends
+  (e.g. `"client_version": "0.155.0"`), which decides which models the backend
+  lists; a stale one hides newly released models. It is read from the catalog,
+  so a health poll never runs the Codex executable, and it is omitted when no
+  version is known.
 - `codex_routing` — `bare_aliases`, the bare (rolling) aliases the router
   currently resolves: the quickest way to see whether the live catalog has
   been loaded or the compiled-in seed is still in force. (The key was

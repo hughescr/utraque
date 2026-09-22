@@ -108,7 +108,8 @@ copies the key. Keep the key file in place for the launchd agent; utraque reads
 it when launchd starts the process.
 
 Usage history runs `bunx ccusage@latest`, while live Codex quota uses `codex
-app-server` and model discovery runs `codex --version` once at startup. launchd
+app-server` and model discovery runs `codex --version` at startup and again
+whenever the executable changes on disk. launchd
 has a small system `PATH`, so record the executables you intend the service to
 use rather than relying on your interactive shell:
 
@@ -126,7 +127,15 @@ shell's `PATH` and stores the absolute path in `UTRAQUE_CCUSAGE_RUNNER` or
 when these options are omitted.
 
 A Codex CLI upgrade changes the automatically discovered catalog client version
-the next time utraque starts. An explicit `UTRAQUE_CODEX_CLIENT_VERSION`
+without restarting utraque: before each catalog fetch it stats the recorded
+`UTRAQUE_CODEX_EXECUTABLE` (following Homebrew's and npm's symlinks) and re-runs
+`--version` when the file changed. The new version is picked up on the next
+catalog revalidation after the five-minute TTL expires, which only happens when
+a GPT request or a picker open reads the catalog, so an idle daemon keeps the
+old list until then, and the first read after expiry still returns it while
+the refresh runs in the background. A wrapper script that does not itself
+change on upgrade is only re-checked hourly. `/healthz` shows the version in use as
+`codex_catalog.client_version`. An explicit `UTRAQUE_CODEX_CLIENT_VERSION`
 override bypasses discovery and does not track later CLI upgrades.
 
 #### Codex-free launchd hosts

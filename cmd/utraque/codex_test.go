@@ -322,7 +322,7 @@ func newCodexEnvOpts(t *testing.T, mutate func(*config.Config), opts codexEnvOpt
 
 	// newApp, not newServer: the app carries the startup catalog warm, which no
 	// test runs unless it asks for it by name.
-	a, err := newApp(cfg, log, nil, tracer)
+	a, err := newApp(cfg, log, nil, tracer, nil)
 	if err != nil {
 		t.Fatalf("newApp: %v", err)
 	}

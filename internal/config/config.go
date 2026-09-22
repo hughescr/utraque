@@ -238,14 +238,21 @@ type Codex struct {
 	// also recorded in utraque's own on-disk catalog cache. Not a secret — it
 	// is a Codex CLI version string. An empty value means production startup
 	// must discover it by running Executable --version; an explicit
-	// UTRAQUE_CODEX_CLIENT_VERSION bypasses discovery.
+	// UTRAQUE_CODEX_CLIENT_VERSION bypasses discovery, then and later.
+	//
+	// Startup writes a discovered version back here, so after that point this
+	// field alone no longer says whether the value was explicit. cmd/utraque
+	// records that before discovering (a nil version probe means explicit) and
+	// only a discovered version is re-resolved while the process runs.
 	ClientVersion string
 	// Executable is the Codex CLI binary. UTRAQUE_CODEX_EXECUTABLE. Startup
-	// runs it once (Executable --version) to discover ClientVersion when that
-	// is not set explicitly, so a missing or misconfigured value blocks
-	// startup in that case; the provider report later runs the same binary
-	// for its isolated, short-lived app-server query. Under launchd this
-	// should be an absolute path, because that PATH is intentionally narrow.
+	// runs it (Executable --version) to discover ClientVersion when that is
+	// not set explicitly, so a missing or misconfigured value blocks startup
+	// in that case. Afterwards it is stat'ed before each catalog fetch and
+	// re-run only when it changed on disk, so a Codex CLI upgrade reaches the
+	// catalog without a restart. The provider report runs the same binary for
+	// its isolated, short-lived app-server query. Under launchd this should
+	// be an absolute path, because that PATH is intentionally narrow.
 	Executable string
 }
 
@@ -751,8 +758,9 @@ func (c Config) Validate() error {
 	}
 	// ClientVersion may be empty here. It is the sentinel that tells production
 	// startup to discover the installed Codex CLI version before constructing
-	// the catalog client. Keeping discovery out of config makes Default and
-	// LoadFrom deterministic and free of subprocess side effects.
+	// the catalog client (and to keep re-resolving it afterwards). Keeping
+	// discovery out of config makes Default and LoadFrom deterministic and
+	// free of subprocess side effects.
 	// Both Codex endpoints must be plain https/http URLs with no embedded
 	// credentials — the same rule as the Anthropic base URL, since a
 	// misconfigured value is printed to stderr on failure.

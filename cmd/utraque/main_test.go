@@ -796,7 +796,7 @@ func TestHealthzReportsCodexAuthReasonWhenInvalidated(t *testing.T) {
 	cfg.Anthropic.BaseURL = upstream.URL
 	cfg.Codex.AuthFile = authPath
 	cfg.Codex.CacheFile = filepath.Join(dir, "utraque", "models_cache.json")
-	a, err := newApp(cfg, slog.New(slog.DiscardHandler), nil, nil)
+	a, err := newApp(cfg, slog.New(slog.DiscardHandler), nil, nil, nil)
 	if err != nil {
 		t.Fatalf("newApp: %v", err)
 	}

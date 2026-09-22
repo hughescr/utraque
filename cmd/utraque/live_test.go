@@ -193,7 +193,8 @@ func newLiveEnv(t *testing.T) *liveEnv {
 	if err != nil {
 		t.Fatalf("config.Load: %v", err)
 	}
-	if err := resolveCodexClientVersion(context.Background(), &cfg); err != nil {
+	versionProbe, err := resolveCodexClientVersion(context.Background(), &cfg, nil)
+	if err != nil {
 		t.Fatalf("resolve Codex client version: %v", err)
 	}
 	// The one deviation: keep utraque's own catalog cache out of the user's
@@ -207,7 +208,7 @@ func newLiveEnv(t *testing.T) *liveEnv {
 		t.Fatalf("obs.NewTracer: %v", err)
 	}
 
-	a, err := newApp(cfg, log, nil, tracer)
+	a, err := newApp(cfg, log, nil, tracer, versionProbe.versionFunc())
 	if err != nil {
 		t.Fatalf("newApp: %v", err)
 	}

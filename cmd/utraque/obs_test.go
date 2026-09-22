@@ -586,6 +586,29 @@ func TestStartupWarmPopulatesTheCatalogAndDistinguishesTheZeroStates(t *testing.
 	}
 }
 
+// codex_catalog.client_version is the version the catalog sends, which decides
+// what the backend lists. A stale one was the whole cause of a catalog missing
+// newly released models, so it is on /healthz from the start, not only after
+// a fetch — and absent, rather than an empty string, when none is known.
+func TestHealthzReportsTheCatalogClientVersion(t *testing.T) {
+	restoreRegistry(t)
+
+	bare := healthCatalog(t, newCodexEnv(t, nil))
+	if _, present := bare["client_version"]; present {
+		t.Errorf("no client version is configured, so none should be reported: %v", bare)
+	}
+
+	env := newCodexEnv(t, func(c *config.Config) { c.Codex.ClientVersion = "0.155.0" })
+	if cat := healthCatalog(t, env); cat["client_version"] != "0.155.0" {
+		t.Errorf("cold codex_catalog.client_version = %v, want the configured 0.155.0: %v", cat["client_version"], cat)
+	}
+	env.app.warmCatalog(context.Background())
+	cat := waitForCatalog(t, env, func(m map[string]any) bool { return m["loaded"] == true })
+	if cat["client_version"] != "0.155.0" {
+		t.Errorf("loaded codex_catalog.client_version = %v, want 0.155.0: %v", cat["client_version"], cat)
+	}
+}
+
 // A failed warm must be reported AS a failure, not as an empty catalog.
 func TestWarmFailureIsDistinguishableFromAnEmptyCatalog(t *testing.T) {
 	restoreRegistry(t)
