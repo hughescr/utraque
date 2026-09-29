@@ -353,7 +353,7 @@ func TestCodexModelWithoutCredentialReturns503(t *testing.T) {
 	}
 	// The error must report the resolved upstream slug, proving the alias
 	// registry ran rather than the name being passed through raw.
-	if !strings.Contains(ev.Error.Message, "gpt-5.6-sol") {
+	if !strings.Contains(ev.Error.Message, "gpt-6.1-sol") {
 		t.Errorf("message = %q, want it to name the resolved upstream slug", ev.Error.Message)
 	}
 	if n := hits.Load(); n != 0 {

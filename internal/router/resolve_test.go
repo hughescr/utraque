@@ -49,17 +49,23 @@ func TestResolve(t *testing.T) {
 		{name: "deepseek picker pro survives restart", model: "anthropic-compat.deepseek-v4-pro",
 			want: router.Decision{Backend: router.BackendDeepSeek, UpstreamModel: "deepseek-v4-pro", ClientModel: "anthropic-compat.deepseek-v4-pro", EffortSource: router.EffortSourceNone}},
 		{name: "bare codename sol", model: "sol",
-			want: router.Decision{Backend: router.BackendCodex, UpstreamModel: "gpt-5.6-sol", ClientModel: "sol", EffortSource: router.EffortSourceNone}},
+			want: router.Decision{Backend: router.BackendCodex, UpstreamModel: "gpt-6.1-sol", ClientModel: "sol", EffortSource: router.EffortSourceNone}},
+		{name: "bare codename astra", model: "astra",
+			want: router.Decision{Backend: router.BackendCodex, UpstreamModel: "gpt-6-astra", ClientModel: "astra", EffortSource: router.EffortSourceNone}},
 		{name: "bare codename terra", model: "terra",
 			want: router.Decision{Backend: router.BackendCodex, UpstreamModel: "gpt-5.6-terra", ClientModel: "terra", EffortSource: router.EffortSourceNone}},
 		{name: "bare codename luna", model: "luna",
-			want: router.Decision{Backend: router.BackendCodex, UpstreamModel: "gpt-5.6-luna", ClientModel: "luna", EffortSource: router.EffortSourceNone}},
+			want: router.Decision{Backend: router.BackendCodex, UpstreamModel: "gpt-6-luna", ClientModel: "luna", EffortSource: router.EffortSourceNone}},
 		{name: "codename case-insensitive", model: "SOL",
-			want: router.Decision{Backend: router.BackendCodex, UpstreamModel: "gpt-5.6-sol", ClientModel: "SOL", EffortSource: router.EffortSourceNone}},
+			want: router.Decision{Backend: router.BackendCodex, UpstreamModel: "gpt-6.1-sol", ClientModel: "SOL", EffortSource: router.EffortSourceNone}},
 		{name: "codename-version pinned", model: "sol-5.6",
 			want: router.Decision{Backend: router.BackendCodex, UpstreamModel: "gpt-5.6-sol", ClientModel: "sol-5.6", EffortSource: router.EffortSourceNone}},
+		{name: "codename-version pinned to the newest sol", model: "sol-6.1",
+			want: router.Decision{Backend: router.BackendCodex, UpstreamModel: "gpt-6.1-sol", ClientModel: "sol-6.1", EffortSource: router.EffortSourceNone}},
+		{name: "codename-version pinned to a whole-number version", model: "sol-6",
+			want: router.Decision{Backend: router.BackendCodex, UpstreamModel: "gpt-6-sol", ClientModel: "sol-6", EffortSource: router.EffortSourceNone}},
 		{name: "effort suffix on bare codename", model: "sol-high",
-			want: router.Decision{Backend: router.BackendCodex, UpstreamModel: "gpt-5.6-sol", ClientModel: "sol-high", Effort: "high", EffortSource: router.EffortSourceSuffix}},
+			want: router.Decision{Backend: router.BackendCodex, UpstreamModel: "gpt-6.1-sol", ClientModel: "sol-high", Effort: "high", EffortSource: router.EffortSourceSuffix}},
 		{name: "effort suffix on pinned codename-version", model: "sol-5.6-high",
 			want: router.Decision{Backend: router.BackendCodex, UpstreamModel: "gpt-5.6-sol", ClientModel: "sol-5.6-high", Effort: "high", EffortSource: router.EffortSourceSuffix}},
 		{name: "raw slug sol", model: "gpt-5.6-sol",
@@ -74,26 +80,25 @@ func TestResolve(t *testing.T) {
 			want: router.Decision{Backend: router.BackendCodex, UpstreamModel: "gpt-5.4", ClientModel: "gpt-5.4", EffortSource: router.EffortSourceNone}},
 		{name: "version+modifier slug 5.4-mini not misparsed as effort", model: "gpt-5.4-mini",
 			want: router.Decision{Backend: router.BackendCodex, UpstreamModel: "gpt-5.4-mini", ClientModel: "gpt-5.4-mini", EffortSource: router.EffortSourceNone}},
-		{name: "bare version+modifier alias without gpt- prefix", model: "5.4-mini",
-			want: router.Decision{Backend: router.BackendCodex, UpstreamModel: "gpt-5.4-mini", ClientModel: "5.4-mini", EffortSource: router.EffortSourceNone}},
+		{name: "retired bare version+modifier alias is not recognised", model: "5.4-mini", wantErr: true},
 		{name: "bare version alias without gpt- prefix", model: "5.5",
 			want: router.Decision{Backend: router.BackendCodex, UpstreamModel: "gpt-5.5", ClientModel: "5.5", EffortSource: router.EffortSourceNone}},
 		{name: "irregular raw slug codex-spark", model: "gpt-5.3-codex-spark",
 			want: router.Decision{Backend: router.BackendCodex, UpstreamModel: "gpt-5.3-codex-spark", ClientModel: "gpt-5.3-codex-spark", EffortSource: router.EffortSourceNone}},
 		{name: "picker variant bare", model: "anthropic-compat.sol",
-			want: router.Decision{Backend: router.BackendCodex, UpstreamModel: "gpt-5.6-sol", ClientModel: "anthropic-compat.sol", EffortSource: router.EffortSourceNone}},
+			want: router.Decision{Backend: router.BackendCodex, UpstreamModel: "gpt-6.1-sol", ClientModel: "anthropic-compat.sol", EffortSource: router.EffortSourceNone}},
 		{name: "picker variant pinned", model: "anthropic-compat.sol-5.6",
 			want: router.Decision{Backend: router.BackendCodex, UpstreamModel: "gpt-5.6-sol", ClientModel: "anthropic-compat.sol-5.6", EffortSource: router.EffortSourceNone}},
 		{name: "picker variant with effort suffix", model: "anthropic-compat.sol-high",
-			want: router.Decision{Backend: router.BackendCodex, UpstreamModel: "gpt-5.6-sol", ClientModel: "anthropic-compat.sol-high", Effort: "high", EffortSource: router.EffortSourceSuffix}},
+			want: router.Decision{Backend: router.BackendCodex, UpstreamModel: "gpt-6.1-sol", ClientModel: "anthropic-compat.sol-high", Effort: "high", EffortSource: router.EffortSourceSuffix}},
 		{name: "picker variant mixed case", model: "Anthropic-Compat.SOL-High",
-			want: router.Decision{Backend: router.BackendCodex, UpstreamModel: "gpt-5.6-sol", ClientModel: "Anthropic-Compat.SOL-High", Effort: "high", EffortSource: router.EffortSourceSuffix}},
+			want: router.Decision{Backend: router.BackendCodex, UpstreamModel: "gpt-6.1-sol", ClientModel: "Anthropic-Compat.SOL-High", Effort: "high", EffortSource: router.EffortSourceSuffix}},
 		{name: "unknown gpt-* slug falls through to raw Codex fallback", model: "gpt-6.0-nova",
 			want: router.Decision{Backend: router.BackendCodex, UpstreamModel: "gpt-6.0-nova", ClientModel: "gpt-6.0-nova", EffortSource: router.EffortSourceNone}},
 		{name: "unknown gpt-* slug with effort suffix and mixed case", model: "GPT-6.0-Nova-high",
 			want: router.Decision{Backend: router.BackendCodex, UpstreamModel: "gpt-6.0-nova", ClientModel: "GPT-6.0-Nova-high", Effort: "high", EffortSource: router.EffortSourceSuffix}},
 		{name: "whitespace trimmed", model: "  sol  ",
-			want: router.Decision{Backend: router.BackendCodex, UpstreamModel: "gpt-5.6-sol", ClientModel: "sol", EffortSource: router.EffortSourceNone}},
+			want: router.Decision{Backend: router.BackendCodex, UpstreamModel: "gpt-6.1-sol", ClientModel: "sol", EffortSource: router.EffortSourceNone}},
 		{name: "unknown model", model: "banana", wantErr: true},
 		{name: "unknown deepseek name is rejected instead of silently mapped upstream", model: "deepseek-v5-ultra", wantErr: true},
 		{name: "empty model", model: "", wantErr: true},
@@ -137,6 +142,21 @@ func TestUnknownModelMessage(t *testing.T) {
 	const want = `model "banana" not recognised; accepted model names: claude-*, anthropic-*, deepseek-flash, deepseek-v4-pro, gpt-*`
 	if apiErr.Message != want {
 		t.Errorf("404 message = %q, want %q", apiErr.Message, want)
+	}
+}
+
+// TestBareVersionModifierAlias keeps the "<version>-<modifier>" bare alias
+// covered now that the compiled-in catalog lists no modifier slug: a catalog
+// that does carry one must still expose it under its short name.
+func TestBareVersionModifierAlias(t *testing.T) {
+	r := router.NewRegistry()
+	r.LoadCatalog([]router.CatalogEntry{{Slug: "gpt-5.4"}, {Slug: "gpt-5.4-mini"}})
+
+	if u, ok := r.Resolve("5.4-mini"); !ok || u != "gpt-5.4-mini" {
+		t.Fatalf(`Resolve("5.4-mini") = (%q, %v), want ("gpt-5.4-mini", true)`, u, ok)
+	}
+	if u, ok := r.Resolve("5.4"); !ok || u != "gpt-5.4" {
+		t.Fatalf(`Resolve("5.4") = (%q, %v), want ("gpt-5.4", true)`, u, ok)
 	}
 }
 

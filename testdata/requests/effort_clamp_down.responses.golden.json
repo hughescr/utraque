@@ -1,5 +1,5 @@
 {
-  "model": "gpt-5.4",
+  "model": "gpt-5.5",
   "input": [
     {
       "type": "message",
@@ -18,7 +18,7 @@
   "include": [
     "reasoning.encrypted_content"
   ],
-  "prompt_cache_key": "utq-879ed0861a35fa9024f88ce26dc85456",
+  "prompt_cache_key": "utq-b65eccd6682ff549e2c3abf40288584e",
   "store": false,
   "stream": true
 }

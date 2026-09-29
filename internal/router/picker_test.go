@@ -144,7 +144,7 @@ func TestUnregisteredIDsFallThroughToTheGrammar(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
-	if dec.Backend != router.BackendCodex || dec.UpstreamModel != "gpt-5.6-sol" {
+	if dec.Backend != router.BackendCodex || dec.UpstreamModel != "gpt-6.1-sol" {
 		t.Errorf("decision = %+v", dec)
 	}
 }

@@ -11,7 +11,7 @@ models, and a prepaid DeepSeek API balance side by side.
 `utraque` is a local HTTP proxy you point Claude Code at. It routes by model
 name: pick an Anthropic model and the request goes to `api.anthropic.com`
 billed against your Claude Max subscription; pick an OpenAI GPT model
-(bare aliases `sol`, `terra`, `luna`) and the request goes to OpenAI billed
+(bare aliases `sol`, `terra`, `luna`, `astra`) and the request goes to OpenAI billed
 against your ChatGPT/Codex subscription; pick `deepseek-flash` or
 `deepseek-v4-pro` and the request uses your prepaid DeepSeek API key. All three
 backends are addressed by their own model names inside one Claude Code session.
@@ -230,8 +230,9 @@ model's window, so it is not an alternative to the variable above — the two do
 not overlap.
 
 One value covers every GPT route, and every model the live Codex catalog now
-lists reports the same window: 272,000 tokens for `gpt-5.6-sol`,
-`gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-5.5`, `gpt-5.4` and `gpt-5.4-mini`. Set
+lists reports the same window: 272,000 tokens for `gpt-6.1-sol`,
+`gpt-6-astra`, `gpt-6-sol`, `gpt-6-luna`, `gpt-5.6-sol`, `gpt-5.6-terra`,
+`gpt-5.6-luna` and `gpt-5.5`. Set
 `272000`, and leave it unset if you only use Claude models.
 
 If a narrower model ever reappears in the catalog, size this to the smallest
@@ -276,9 +277,9 @@ effort: high
 **2. At launch or in-session** — `claude --model terra-high`, or `/model` and
 type the name.
 
-Any of these name forms resolve: a bare alias (`sol`, `terra`, `luna`), a
-version pin (`sol-5.6`), an effort suffix (`sol-high`, `sol-5.6-ultra`), or the
-raw upstream slug (`gpt-5.6-sol`). Effort composes with any of them and is
+Any of these name forms resolve: a bare alias (`sol`, `terra`, `luna`, `astra`), a
+version pin (`sol-6.1`), an effort suffix (`sol-high`, `sol-6.1-ultra`), or the
+raw upstream slug (`gpt-6.1-sol`). Effort composes with any of them and is
 clamped to what that model actually supports.
 
 **3. The `/model` picker** — *not available if you took the required context
@@ -896,7 +897,7 @@ back, and the stateless design does not hold.
 
 ## Short model names
 
-Short names (`sol`, `sol-5.6`, `sol-high`) are derived from the model list the
+Short names (`sol`, `sol-6.1`, `sol-high`) are derived from the model list the
 Codex backend itself serves, not from a table compiled into the binary. Every
 successful catalog read — the per-request lookup that clamps reasoning effort,
 and a picker open — republishes them, so a codename OpenAI ships today starts
@@ -910,7 +911,7 @@ Anthropic globs, the DeepSeek ids, `gpt-*` and the bare aliases currently in
 force — so the reply says what would have worked:
 
 ```json
-{"type":"error","error":{"type":"not_found_error","message":"model \"banana\" not recognised; accepted model names: claude-*, anthropic-*, deepseek-flash, deepseek-v4-pro, gpt-*, 5.4, 5.4-mini, 5.5, luna, sol, terra"}}
+{"type":"error","error":{"type":"not_found_error","message":"model \"banana\" not recognised; accepted model names: claude-*, anthropic-*, deepseek-flash, deepseek-v4-pro, gpt-*, 5.5, astra, luna, sol, terra"}}
 ```
 
 (The message read "known route families" before the list was renamed: it
@@ -1354,9 +1355,9 @@ Four emission strategies, alias emission **on by default**:
 
 | Strategy | Emits |
 | --- | --- |
-| `template` (default) | The rolling and pinned aliases: `anthropic-compat.sol`, `anthropic-compat.sol-5.6` |
-| `effort_variants` | The above plus one row per supported reasoning effort: `anthropic-compat.sol-high`, `anthropic-compat.sol-5.6-ultra` |
-| `raw` | One row per raw upstream slug: `anthropic-compat.gpt-5.6-sol` |
+| `template` (default) | The rolling and pinned aliases: `anthropic-compat.sol`, `anthropic-compat.sol-6.1` |
+| `effort_variants` | The above plus one row per supported reasoning effort: `anthropic-compat.sol-high`, `anthropic-compat.sol-6.1-ultra` |
+| `raw` | One row per raw upstream slug: `anthropic-compat.gpt-6.1-sol` |
 | `off` | No Codex rows. GPT names still route when typed or set in agent frontmatter — they just don't appear in the picker. |
 
 An id template that could not produce a filter-passing id is rejected at

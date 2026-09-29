@@ -105,7 +105,7 @@ func TestRequestLineCarriesEveryField(t *testing.T) {
 		"path":             "/v1/messages",
 		"route":            "codex",
 		"client_model":     "sol-high",
-		"upstream_model":   "gpt-5.6-sol",
+		"upstream_model":   "gpt-6.1-sol",
 		"effort_requested": "high",
 		"effort_applied":   "high",
 		"stream":           true,
@@ -169,7 +169,7 @@ func TestRoutedRecordCarriesRouteAndRequestedEffort(t *testing.T) {
 	for key, want := range map[string]any{
 		"route":            "codex",
 		"client_model":     "sol-high",
-		"upstream_model":   "gpt-5.6-sol",
+		"upstream_model":   "gpt-6.1-sol",
 		"effort_requested": "high",
 		"effort_source":    "suffix",
 		"stream":           true,
@@ -714,7 +714,7 @@ func TestHealthReporterEmptyJSONIsUnchanged(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal health: %v", err)
 	}
-	const want = `{"codex_auth":{"state":"missing"},"codex_catalog":{"loaded":false,"models":0,"state":"cold"},"codex_routing":{"bare_aliases":["5.4","5.4-mini","5.5","luna","sol","terra"]},"deepseek":{"configured":false},"trace":{"enabled":false}}`
+	const want = `{"codex_auth":{"state":"missing"},"codex_catalog":{"loaded":false,"models":0,"state":"cold"},"codex_routing":{"bare_aliases":["5.5","astra","luna","sol","terra"]},"deepseek":{"configured":false},"trace":{"enabled":false}}`
 	if string(got) != want {
 		t.Errorf("health JSON = %s, want %s", got, want)
 	}

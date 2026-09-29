@@ -49,9 +49,11 @@ func lunaModel() cschema.CatalogModel {
 	}
 }
 
-func gpt54Model() cschema.CatalogModel {
+// gpt55Model tops out at xhigh: no max, no ultra. It is the model the
+// effort_clamp_down fixture asks for "ultra" on.
+func gpt55Model() cschema.CatalogModel {
 	return cschema.CatalogModel{
-		Slug:                    "gpt-5.4",
+		Slug:                    "gpt-5.5",
 		DefaultReasoningLevel:   string(effort.Medium),
 		DefaultReasoningSummary: "none",
 		SupportedReasoningLevels: levels(
@@ -94,8 +96,8 @@ var caseConfigs = map[string]caseCfg{
 		model: solModel(),
 	},
 	"effort_clamp_down": {
-		dec:   router.Decision{Backend: router.BackendCodex, UpstreamModel: "gpt-5.4", Effort: effort.Ultra, EffortSource: router.EffortSourceSuffix},
-		model: gpt54Model(),
+		dec:   router.Decision{Backend: router.BackendCodex, UpstreamModel: "gpt-5.5", Effort: effort.Ultra, EffortSource: router.EffortSourceSuffix},
+		model: gpt55Model(),
 	},
 }
 
@@ -192,7 +194,7 @@ func TestEffortMatrix(t *testing.T) {
 		{"catalog_default", none, solModel(), request.Options{},
 			effort.Low, router.EffortSourceCatalog, false},
 		// Clamp DOWN: ultra requested on a model topping out at xhigh.
-		{"clamp_down_to_xhigh", suffix(effort.Ultra), gpt54Model(), request.Options{},
+		{"clamp_down_to_xhigh", suffix(effort.Ultra), gpt55Model(), request.Options{},
 			effort.XHigh, router.EffortSourceSuffix, true},
 		// Clamp DOWN: ultra requested on luna (tops out at max).
 		{"clamp_down_to_max", suffix(effort.Ultra), lunaModel(), request.Options{},
@@ -605,7 +607,7 @@ func TestUnknownEffortClampsToFloor(t *testing.T) {
 		Messages: []aschema.Message{{Role: "user", Content: aschema.StringContent("hi")}},
 	}
 	dec := router.Decision{UpstreamModel: "m", Effort: "hgh", EffortSource: router.EffortSourceSuffix}
-	_, meta, err := request.Translate(req, dec, gpt54Model(), request.Options{})
+	_, meta, err := request.Translate(req, dec, gpt55Model(), request.Options{})
 	if err != nil {
 		t.Fatalf("translate: %v", err)
 	}

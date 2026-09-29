@@ -154,12 +154,14 @@ func NewRegistry() *Registry {
 // recorded from models_cache.json. Phase 3 replaces this *source*, not the
 // tiering logic, by calling LoadCatalog with live entries instead.
 var staticSlugs = []string{
+	"gpt-6.1-sol",
+	"gpt-6-astra",
+	"gpt-6-sol",
+	"gpt-6-luna",
 	"gpt-5.6-sol",
 	"gpt-5.6-terra",
 	"gpt-5.6-luna",
 	"gpt-5.5",
-	"gpt-5.4",
-	"gpt-5.4-mini",
 }
 
 // staticOverrides seeds alias overrides for slugs the grammar cannot parse:
@@ -339,7 +341,7 @@ func (r *Registry) Resolve(name string) (upstream string, ok bool) {
 }
 
 // BareAliases lists the known bare (rolling) alias names — e.g. "sol",
-// "spark", "5.4-mini" — sorted, for the unknown-model 404 message. Raw and
+// "terra", "5.5" — sorted, for the unknown-model 404 message. Raw and
 // pinned keys are deliberately excluded to keep that message short; the
 // wildcard patterns (claude-*, anthropic-*, gpt-*) are prepended by the
 // caller in resolve.go, not here.

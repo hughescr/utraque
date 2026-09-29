@@ -43,7 +43,7 @@ const codexBasePath = "/backend-api/codex"
 // levels stop at "ultra" with no "xhigh", which is what the effort-clamping
 // assertion below relies on.
 const fakeCatalogBody = `{"models":[
-  {"slug":"gpt-5.6-sol","display_name":"GPT-5.6-Sol","visibility":"list",
+  {"slug":"gpt-6.1-sol","display_name":"GPT-6.1-Sol","visibility":"list",
    "context_window":400000,"default_reasoning_level":"low","priority":10,
    "supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"high"},{"effort":"max"},{"effort":"ultra"}]},
   {"slug":"gpt-5.5","display_name":"GPT-5.5","visibility":"list",
@@ -423,7 +423,7 @@ func TestCodexStreamingProducesAnthropicSSE(t *testing.T) {
 		"Cache-Control":     "no-cache",
 		"X-Accel-Buffering": "no",
 		proxyhdr.Route:      "codex",
-		proxyhdr.Model:      "gpt-5.6-sol",
+		proxyhdr.Model:      "gpt-6.1-sol",
 	} {
 		if got := resp.Header.Get(header); got != want {
 			t.Errorf("%s = %q, want %q", header, got, want)
@@ -460,8 +460,8 @@ func TestCodexStreamingProducesAnthropicSSE(t *testing.T) {
 	// The model echoed back is the upstream slug the leg actually called, not
 	// the alias the caller wrote: the client records this verbatim in its own
 	// session log, so it has to name the model that really served the turn.
-	if start.Message.Model != "gpt-5.6-sol" {
-		t.Errorf("message_start.model = %q, want gpt-5.6-sol", start.Message.Model)
+	if start.Message.Model != "gpt-6.1-sol" {
+		t.Errorf("message_start.model = %q, want gpt-6.1-sol", start.Message.Model)
 	}
 	if start.Message.Role != "assistant" {
 		t.Errorf("message_start.role = %q, want assistant", start.Message.Role)
@@ -549,8 +549,8 @@ func TestCodexStreamingProducesAnthropicSSE(t *testing.T) {
 	if err := json.Unmarshal([]byte(body), &sent); err != nil {
 		t.Fatalf("decode upstream request %q: %v", body, err)
 	}
-	if sent.Model != "gpt-5.6-sol" {
-		t.Errorf("upstream model = %q, want gpt-5.6-sol", sent.Model)
+	if sent.Model != "gpt-6.1-sol" {
+		t.Errorf("upstream model = %q, want gpt-6.1-sol", sent.Model)
 	}
 	if sent.Instructions != "You are terse." {
 		t.Errorf("instructions = %q, want the client's system prompt verbatim", sent.Instructions)
@@ -655,7 +655,7 @@ func TestCodexNonStreamingReturnsMessagesResponse(t *testing.T) {
 	if msg.Type != "message" || msg.Role != "assistant" {
 		t.Errorf("type/role = %q/%q, want message/assistant", msg.Type, msg.Role)
 	}
-	if msg.Model != "gpt-5.6-sol" {
+	if msg.Model != "gpt-6.1-sol" {
 		t.Errorf("model = %q, want the upstream slug echoed back", msg.Model)
 	}
 	if msg.StopReason == nil || *msg.StopReason != "end_turn" {
@@ -751,8 +751,8 @@ func TestCodex429SurfacesRetryAfter(t *testing.T) {
 	if got := resp.Header.Get("x-codex-primary-used-percent"); got != "97.5" {
 		t.Errorf("x-codex-primary-used-percent = %q, want 97.5 forwarded", got)
 	}
-	if got := resp.Header.Get(proxyhdr.Model); got != "gpt-5.6-sol" {
-		t.Errorf("%s = %q, want gpt-5.6-sol", proxyhdr.Model, got)
+	if got := resp.Header.Get(proxyhdr.Model); got != "gpt-6.1-sol" {
+		t.Errorf("%s = %q, want gpt-6.1-sol", proxyhdr.Model, got)
 	}
 	ev := decodeEnvelope(t, resp)
 	if ev.Error.Type != string(apierr.TypeRateLimit) {
@@ -1176,8 +1176,8 @@ func TestAliasRepublishLogNamesTheBareAliases(t *testing.T) {
 func TestLiveCatalogRepublishesTheRouterAliases(t *testing.T) {
 	restoreRegistry(t)
 
-	// The static seed says sol is gpt-5.6-sol. This backend has retired that and
-	// serves gpt-5.7-sol instead.
+	// The static seed says sol is gpt-6.1-sol. This backend has retired that (and
+	// every other sol) and serves gpt-5.7-sol instead.
 	const rolled = `{"models":[
 	  {"slug":"gpt-5.7-sol","display_name":"GPT-5.7-Sol","visibility":"list","priority":10,
 	   "default_reasoning_level":"low",
@@ -1187,8 +1187,8 @@ func TestLiveCatalogRepublishesTheRouterAliases(t *testing.T) {
 	env := newCodexEnv(t, nil)
 	env.codex.catalogBody = rolled
 
-	if dec, err := router.Resolve("sol", ""); err != nil || dec.UpstreamModel != "gpt-5.6-sol" {
-		t.Fatalf("precondition: sol = %+v/%v, want the static seed gpt-5.6-sol", dec, err)
+	if dec, err := router.Resolve("sol", ""); err != nil || dec.UpstreamModel != "gpt-6.1-sol" {
+		t.Fatalf("precondition: sol = %+v/%v, want the static seed gpt-6.1-sol", dec, err)
 	}
 
 	// A picker open is one of the two paths that hold a live catalog.
