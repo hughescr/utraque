@@ -85,10 +85,11 @@ type rewriteReport struct {
 	// rewriteEffort).
 	Effort string
 	// InlineToolsHoisted names the tools tool_addition blocks defined inline
-	// that were moved into the top-level tools array, and ToolRemovalsDropped
-	// counts the tool_removal blocks dropped (see hoistToolChanges).
-	InlineToolsHoisted  []string
-	ToolRemovalsDropped int
+	// that were moved into the top-level tools array, and ToolsRemoved names the
+	// declared tools tool_removal blocks took out of it and nothing re-added (see
+	// hoistToolChanges).
+	InlineToolsHoisted []string
+	ToolsRemoved       []string
 }
 
 // rewriteRequest rewrites one request body for DeepSeek and reports what it
@@ -104,12 +105,12 @@ func rewriteRequest(raw []byte, canonical string, requested effort.Level) ([]byt
 	}
 	// Before rewriteContent, so a tool defined inline is declared by the time a
 	// tool_reference to it is checked.
-	hoisted, removals, err := hoistToolChanges(obj)
+	hoisted, removed, err := hoistToolChanges(obj)
 	if err != nil {
 		return nil, report, err
 	}
-	report.InlineToolsHoisted, report.ToolRemovalsDropped = hoisted, removals
-	if err := rewriteContent(obj, canonical, &report.Patterns); err != nil {
+	report.InlineToolsHoisted, report.ToolsRemoved = hoisted, removed
+	if err := rewriteContent(obj, canonical, removed, &report.Patterns); err != nil {
 		return nil, report, err
 	}
 	if report.Effort, err = rewriteEffort(obj, requested); err != nil {
@@ -164,9 +165,18 @@ func rejectUnsupportedFields(obj map[string]json.RawMessage) error {
 
 // rewriteContent mutates obj in place: it rewrites the system prompt and each
 // message's content (rewriteContentValue) and the tool schemas (rewriteTools),
-// recording the schema changes in report.
-func rewriteContent(obj map[string]json.RawMessage, canonical string, report *toolschema.Report) error {
+// recording the schema changes in report. removed names the tools a
+// tool_removal block took out of the tools array: history may still hold a
+// tool_reference to one (it was discovered before it was removed), which is kept
+// as text like any other, so removal does not turn old history into a 400.
+func rewriteContent(obj map[string]json.RawMessage, canonical string, removed []string, report *toolschema.Report) error {
 	toolSchemas := declaredToolSchemas(obj["tools"])
+	if len(removed) > 0 && toolSchemas == nil {
+		toolSchemas = make(map[string]struct{}, len(removed))
+	}
+	for _, name := range removed {
+		toolSchemas[name] = struct{}{}
+	}
 	referencedTools := make(map[string]struct{})
 	if raw := obj["system"]; len(raw) > 0 {
 		rewritten, changed, err := rewriteContentValue(raw, canonical, "system", toolSchemas, referencedTools, false)

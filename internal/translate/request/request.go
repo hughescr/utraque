@@ -196,11 +196,12 @@ type Metadata struct {
 	DroppedImages []string
 	// InlineToolsHoisted names, in conversation order, the tools that
 	// tool_addition blocks defined inline and that were moved into the
-	// Responses tools array.
+	// Responses tools array (a tool removed afterwards is not listed).
 	InlineToolsHoisted []string
-	// ToolRemovalsIgnored counts tool_removal blocks, which the Responses API
-	// cannot express; the removed tool stays declared.
-	ToolRemovalsIgnored int
+	// ToolsRemoved names the declared tools that tool_removal blocks took out of
+	// the Responses tools array and nothing re-added. Their earlier tool_use and
+	// tool_result blocks stay in the input.
+	ToolsRemoved []string
 	// Patterns records, per tool schema node, each "pattern" keyword that was
 	// translated for backend compatibility or dropped with its text folded
 	// into the node's description (see toolschema.Report).
@@ -260,9 +261,10 @@ func Translate(req *aschema.MessagesRequest, dec router.Decision, model cschema.
 	// definition) belong in the Responses tools array, which has no per-turn
 	// form: without them the model is told nothing about the tool and can never
 	// call it. They follow the tools the request declared, in conversation order.
-	// A removal has no Responses equivalent, and the tool stays declared: earlier
-	// turns may still call it, and the client answers a call to a gone tool with
-	// an error result of its own.
+	// A removal takes its tool out of the tools array: the array advertises the
+	// tools active after every change, applied in message order, and a tool a
+	// later block re-adds is back in it. Earlier tool_use and tool_result blocks
+	// for a removed tool stay in the history as they were.
 	//
 	// A malformed change (unknown target, nameless definition, a reference to a
 	// tool nothing declares) is refused, as on the DeepSeek leg: dropping it
@@ -271,17 +273,16 @@ func Translate(req *aschema.MessagesRequest, dec router.Decision, model cschema.
 	if err != nil {
 		return nil, Metadata{}, fmt.Errorf("%w: %v", ErrToolChange, err)
 	}
-	tools := req.Tools
-	if len(changes.Added) > 0 {
-		tools = append(append(make([]aschema.Tool, 0, len(req.Tools)+len(changes.Added)), req.Tools...), changes.Added...)
-		for _, t := range changes.Added {
-			meta.InlineToolsHoisted = append(meta.InlineToolsHoisted, t.Name)
-		}
-	}
-	meta.ToolRemovalsIgnored = changes.Removals
+	tools := changes.Tools
+	meta.InlineToolsHoisted = changes.Hoisted
+	meta.ToolsRemoved = changes.Removed
 
 	out.Tools, meta.Patterns = translateTools(tools)
 	out.ToolChoice = translateToolChoice(req.ToolChoice)
+	if len(tools) == 0 && len(changes.Removed) > 0 {
+		// Every tool was removed: a tool_choice over no tools would be refused.
+		out.ToolChoice = nil
+	}
 
 	disabled, names := disableParallel(tools, opts.mutatingSet())
 	clientDisableParallel := req.ToolChoice != nil && req.ToolChoice.DisableParallelToolUse
@@ -502,12 +503,11 @@ func translateMessages(messages []aschema.Message) (messagesResult, error) {
 				}
 
 			case aschema.BlockToolAddition, aschema.BlockToolRemoval:
-				// Tool changes emit no input item. Inline definitions were hoisted
-				// into the tools array by Translate (aschema.ResolveToolChanges, which
-				// has already refused any malformed block); a
-				// reference addition names a tool the request already declares; a
-				// removal cannot be expressed. Skipped here on purpose, not by
-				// falling through as an unknown type.
+				// Tool changes emit no input item. Translate has already applied them
+				// to the tools array (aschema.ResolveToolChanges, which also refused
+				// any malformed block): inline definitions were hoisted in, removed
+				// tools left out. Skipped here on purpose, not by falling through as
+				// an unknown type.
 
 			default:
 				// Unknown block types are skipped rather than fatal — an input

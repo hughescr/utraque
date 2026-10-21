@@ -70,8 +70,9 @@ func TestToolAdditionFixtureIsHoisted(t *testing.T) {
 	if want := []string{"mcp__tickets__create_ticket", "mcp__tickets__comment"}; !reflect.DeepEqual(report.InlineToolsHoisted, want) {
 		t.Errorf("InlineToolsHoisted = %v, want %v", report.InlineToolsHoisted, want)
 	}
-	if report.ToolRemovalsDropped != 1 {
-		t.Errorf("ToolRemovalsDropped = %d, want 1", report.ToolRemovalsDropped)
+	// The fixture removes a tool nothing declares, which changes nothing.
+	if len(report.ToolsRemoved) != 0 {
+		t.Errorf("ToolsRemoved = %v, want none", report.ToolsRemoved)
 	}
 	// The hoisted definition arrives whole, schema included.
 	if !strings.Contains(string(got.Tools[2].InputSchema), `"urgent"`) {
@@ -132,11 +133,66 @@ func TestToolChangeEdgeCases(t *testing.T) {
 			t.Errorf("tools = %v", got.toolNames())
 		}
 	})
-	t.Run("a removal alone is dropped and the tool stays declared", func(t *testing.T) {
+	t.Run("a removal takes the tool out of the tools array", func(t *testing.T) {
+		got, report, _ := rewriteBody(t, head+`"tools":[{"name":"keep","input_schema":{"type":"object"}},{"name":"gone","input_schema":{"type":"object"}}],"messages":[`+user+`,`+
+			system(`{"type":"tool_removal","tool":{"type":"tool_reference","name":"gone"}}`)+`]}`)
+		if !reflect.DeepEqual(got.toolNames(), []string{"keep"}) || len(got.Messages) != 1 || !reflect.DeepEqual(report.ToolsRemoved, []string{"gone"}) {
+			t.Errorf("tools %v, messages %d, removed %v", got.toolNames(), len(got.Messages), report.ToolsRemoved)
+		}
+	})
+	t.Run("a removal of a tool nothing declares changes nothing", func(t *testing.T) {
 		got, report, _ := rewriteBody(t, head+`"tools":[{"name":"keep","input_schema":{"type":"object"}}],"messages":[`+user+`,`+
-			system(`{"type":"tool_removal","tool":{"type":"tool_reference","name":"keep"}}`)+`]}`)
-		if !reflect.DeepEqual(got.toolNames(), []string{"keep"}) || len(got.Messages) != 1 || report.ToolRemovalsDropped != 1 {
-			t.Errorf("tools %v, messages %d, removals %d", got.toolNames(), len(got.Messages), report.ToolRemovalsDropped)
+			system(`{"type":"tool_removal","tool":{"type":"tool_reference","name":"ghost"}}`)+`]}`)
+		if !reflect.DeepEqual(got.toolNames(), []string{"keep"}) || len(report.ToolsRemoved) != 0 {
+			t.Errorf("tools %v, removed %v", got.toolNames(), report.ToolsRemoved)
+		}
+	})
+	t.Run("removing every tool drops tools and tool_choice", func(t *testing.T) {
+		_, report, out := rewriteBody(t, head+`"tool_choice":{"type":"auto"},"tools":[{"name":"only","input_schema":{"type":"object"}}],"messages":[`+user+`,`+
+			system(`{"type":"tool_removal","tool":{"type":"tool_reference","name":"only"}}`)+`]}`)
+		if strings.Contains(out, `"tools"`) || strings.Contains(out, "tool_choice") || !reflect.DeepEqual(report.ToolsRemoved, []string{"only"}) {
+			t.Errorf("removed %v, body %s", report.ToolsRemoved, out)
+		}
+	})
+	t.Run("a tool removed and re-added by reference is declared, in its place, and not deferred", func(t *testing.T) {
+		got, report, _ := rewriteBody(t, head+`"tools":[{"name":"a","input_schema":{"type":"object"}},{"name":"b","defer_loading":true,"input_schema":{"type":"object"}},{"name":"c","input_schema":{"type":"object"}}],"messages":[`+user+`,`+
+			system(`{"type":"tool_removal","tool":{"type":"tool_reference","name":"b"}}`)+`,`+
+			system(def("late"), `{"type":"tool_addition","tool":{"type":"tool_reference","name":"b"}}`)+`]}`)
+		if !reflect.DeepEqual(got.toolNames(), []string{"a", "b", "c", "late"}) || len(report.ToolsRemoved) != 0 {
+			t.Errorf("tools %v, removed %v", got.toolNames(), report.ToolsRemoved)
+		}
+		for _, tool := range got.Tools {
+			if tool.DeferLoading != nil {
+				t.Errorf("%s is still deferred after being re-added", tool.Name)
+			}
+		}
+	})
+	t.Run("a tool removed and re-added by definition takes the new definition", func(t *testing.T) {
+		got, _, out := rewriteBody(t, head+`"tools":[{"name":"a","description":"old","input_schema":{"type":"object"}}],"messages":[`+user+`,`+
+			system(`{"type":"tool_removal","tool":{"type":"tool_reference","name":"a"}}`, def("a"))+`]}`)
+		if !reflect.DeepEqual(got.toolNames(), []string{"a"}) || strings.Contains(out, `"old"`) {
+			t.Errorf("tools %v, body %s", got.toolNames(), out)
+		}
+	})
+	t.Run("a removed inline tool is not hoisted", func(t *testing.T) {
+		got, report, _ := rewriteBody(t, head+`"messages":[`+user+`,`+
+			system(def("x"), `{"type":"tool_removal","tool":{"type":"tool_reference","name":"x"}}`)+`]}`)
+		if len(got.toolNames()) != 0 || len(report.InlineToolsHoisted) != 0 || !reflect.DeepEqual(report.ToolsRemoved, []string{"x"}) {
+			t.Errorf("tools %v, hoisted %v, removed %v", got.toolNames(), report.InlineToolsHoisted, report.ToolsRemoved)
+		}
+	})
+	t.Run("history keeps a call to a removed tool and a tool_reference to it", func(t *testing.T) {
+		got, _, out := rewriteBody(t, head+`"tools":[{"name":"ToolSearch","input_schema":{"type":"object"}},{"name":"found","defer_loading":true,"input_schema":{"type":"object"}}],"messages":[`+user+`,`+
+			`{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"ToolSearch","input":{}}]},`+
+			`{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":[{"type":"tool_reference","tool_name":"found"}]}]},`+
+			`{"role":"assistant","content":[{"type":"tool_use","id":"t2","name":"found","input":{}}]},`+
+			`{"role":"user","content":[{"type":"tool_result","tool_use_id":"t2","content":"done"}]},`+
+			system(`{"type":"tool_removal","tool":{"type":"tool_reference","name":"found"}}`)+`]}`)
+		if !reflect.DeepEqual(got.toolNames(), []string{"ToolSearch"}) {
+			t.Errorf("tools = %v, want [ToolSearch]", got.toolNames())
+		}
+		if !strings.Contains(out, `"name":"found"`) || !strings.Contains(out, "done") || !strings.Contains(out, "tool available") {
+			t.Errorf("history lost the removed tool's call, result or reference: %s", out)
 		}
 	})
 

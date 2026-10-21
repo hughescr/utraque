@@ -130,21 +130,28 @@ defines a tool inline, `{"type":"tool_addition","tool":{"type":"tool_reference",
 announces one the request already declares, and
 `{"type":"tool_removal","tool":{"type":"tool_reference","name":"x"}}` retires one.
 Neither the Responses API nor DeepSeek's endpoint has a per-turn tool list, so
-the GPT and DeepSeek legs both do the same thing: an inline definition moves into
-the top-level `tools` array, after the declared tools and in conversation order
-(the first declaration of a name wins); a reference addition just needs its tool
-declared, and on DeepSeek loses its `defer_loading` flag; a removal is dropped and
-the tool stays declared, because earlier turns may still hold calls to it and the
-client answers a call to a tool it removed with an error result of its own. The
-blocks leave the message, and a system message left empty is dropped. Both legs
-check each block by the same rules, on `/v1/messages` and `count_tokens` alike,
-and answer a `400` naming the block rather than a silently missing tool for: an
+the GPT and DeepSeek legs both do the same thing: they advertise upstream the
+tools that are active once every block has been applied in message order. An
+inline definition moves into the top-level `tools` array, after the declared
+tools and in conversation order (while a name is active its first declaration
+wins); a reference addition just needs its tool known, and on DeepSeek loses its
+`defer_loading` flag; a removal takes the tool out of the `tools` array. Earlier
+`tool_use` and `tool_result` blocks for a removed tool stay in the history. A
+removed tool stays known, so a later reference addition brings it back where it
+was declared, and a later definition brings it back with that new definition;
+a removal of a tool nothing declares is accepted and changes nothing, and a
+reference addition to it is still a `400`. If every tool ends up removed, the `tools` array and any `tool_choice`
+are left out. The blocks leave the message, and a system message left empty is
+dropped. Both legs check each block by the same rules, on `/v1/messages` and
+`count_tokens` alike (the estimate counts the tools that would be sent), and
+answer a `400` naming the block rather than a silently missing tool for: an
 unknown target type, a missing target, a nameless definition, a removal that is
 not a reference, or a reference addition to a tool nothing declares. The block's
 `type` is read after JSON decoding, so a spelling that writes a character of it
 as a JSON unicode escape is the same block. At DEBUG the Codex translation record
 and the DeepSeek rewrite record name the hoisted tools (`inline_tools_hoisted`)
-and count the removals (`tool_removals_ignored`, `tool_removals_dropped`).
+and the tools the request's blocks removed from the advertised set
+(`tools_removed`).
 
 ## Install & run
 

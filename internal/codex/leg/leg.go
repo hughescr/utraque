@@ -668,8 +668,8 @@ func logTranslation(ctx context.Context, log *slog.Logger, rq *router.Request, m
 	if len(meta.InlineToolsHoisted) > 0 {
 		attrs = append(attrs, slog.Any("inline_tools_hoisted", meta.InlineToolsHoisted))
 	}
-	if meta.ToolRemovalsIgnored > 0 {
-		attrs = append(attrs, slog.Int("tool_removals_ignored", meta.ToolRemovalsIgnored))
+	if len(meta.ToolsRemoved) > 0 {
+		attrs = append(attrs, slog.Any("tools_removed", meta.ToolsRemoved))
 	}
 	attrs = append(attrs, meta.Patterns.LogAttrs()...)
 	log.LogAttrs(ctx, slog.LevelDebug, "translated a Messages request for the codex backend", attrs...)

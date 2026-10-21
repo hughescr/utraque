@@ -133,3 +133,102 @@ func TestMalformedToolChangeIs400OnBothLegs(t *testing.T) {
 		}
 	}
 }
+
+// TestToolRemovalThroughBothLegs sends a conversation that removes a tool, and
+// one that removes it and re-adds it, to both upstream legs, on /v1/messages
+// and /v1/messages/count_tokens. The removed tool must be missing from what
+// each upstream is told it can call, back when re-added, and its earlier call
+// and result must still be in the history.
+func TestToolRemovalThroughBothLegs(t *testing.T) {
+	restoreRegistry(t)
+	deepseekBodies := make(chan string, 8)
+	deepseek := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		deepseekBodies <- string(b)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"msg_ds","type":"message","role":"assistant","model":"deepseek-flash","content":[],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`)
+	}))
+	t.Cleanup(deepseek.Close)
+	env := newCodexEnv(t, func(cfg *config.Config) {
+		cfg.DeepSeek.BaseURL = deepseek.URL
+		cfg.DeepSeek.APIKey = "deepseek-test-key"
+	})
+
+	// Grep carries a long description so dropping it visibly lowers the
+	// count_tokens estimate.
+	bigDescription := strings.Repeat("Searches file contents with a regular expression. ", 200)
+	tools := `[{"name":"Read","input_schema":{"type":"object"}},` +
+		`{"name":"Grep","description":"` + bigDescription + `","input_schema":{"type":"object"}},` +
+		`{"name":"Glob","input_schema":{"type":"object"}}]`
+	removeGrep := `{"role":"system","content":[{"type":"tool_removal","tool":{"type":"tool_reference","name":"Grep"}}]}`
+	readdGrep := `{"role":"system","content":[{"type":"tool_addition","tool":{"type":"tool_reference","name":"Grep"}}]}`
+	body := func(model string, changes ...string) string {
+		messages := []string{
+			`{"role":"user","content":"find it"}`,
+			`{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Grep","input":{"q":"x"}}]}`,
+			`{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"grep-result-marker"}]}`,
+		}
+		messages = append(append(messages, changes...), `{"role":"user","content":"go on"}`)
+		return `{"model":"` + model + `","max_tokens":8,"stream":false,"tools":` + tools + `,"messages":[` + strings.Join(messages, ",") + `]}`
+	}
+	do := func(model, path string, changes ...string) (int, string) {
+		resp := post(t, env.front.URL+path, body(model, changes...), nil)
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, string(b)
+	}
+	upstreamBody := func(model string) string {
+		if model == "sol" {
+			return env.codex.lastBody(t)
+		}
+		return <-deepseekBodies
+	}
+
+	for _, model := range []string{"sol", "deepseek-flash"} {
+		t.Run(model, func(t *testing.T) {
+			if status, msg := do(model, "/v1/messages", removeGrep); status != http.StatusOK {
+				t.Fatalf("removal: status %d: %s", status, msg)
+			}
+			sent := upstreamBody(model)
+			if got, want := toolNames(t, sent), []string{"Read", "Glob"}; !reflect.DeepEqual(got, want) {
+				t.Errorf("tools after removal = %v, want %v", got, want)
+			}
+			if !strings.Contains(sent, "grep-result-marker") || !strings.Contains(sent, `"Grep"`) {
+				t.Errorf("history lost the removed tool's call or result: %s", sent)
+			}
+			if strings.Contains(sent, "tool_removal") {
+				t.Errorf("a tool_removal block reached the upstream: %s", sent)
+			}
+
+			if status, msg := do(model, "/v1/messages", removeGrep, readdGrep); status != http.StatusOK {
+				t.Fatalf("removal then re-add: status %d: %s", status, msg)
+			}
+			if got, want := toolNames(t, upstreamBody(model)), []string{"Read", "Grep", "Glob"}; !reflect.DeepEqual(got, want) {
+				t.Errorf("tools after re-add = %v, want %v", got, want)
+			}
+
+			// count_tokens estimates the body that would go upstream, so a removed
+			// tool's long description must stop counting.
+			count := func(changes ...string) int {
+				status, msg := do(model, "/v1/messages/count_tokens", changes...)
+				if status != http.StatusOK {
+					t.Fatalf("count_tokens: status %d: %s", status, msg)
+				}
+				var out struct {
+					InputTokens int `json:"input_tokens"`
+				}
+				if err := json.Unmarshal([]byte(msg), &out); err != nil {
+					t.Fatalf("count_tokens body %q: %v", msg, err)
+				}
+				return out.InputTokens
+			}
+			kept, removed, readded := count(), count(removeGrep), count(removeGrep, readdGrep)
+			if removed >= kept {
+				t.Errorf("count_tokens with Grep removed = %d, not below %d with it kept", removed, kept)
+			}
+			if readded != kept {
+				t.Errorf("count_tokens with Grep removed then re-added = %d, want %d", readded, kept)
+			}
+		})
+	}
+}

@@ -227,7 +227,8 @@ func (l *Leg) forward(w http.ResponseWriter, r *http.Request, rq *router.Request
 // the same rewritten_patterns and dropped_patterns attributes the codex leg
 // logs for its translation, so a tool that stopped enforcing a constraint can
 // be traced to the rewrite without re-deriving it. It also records the tools
-// hoisted out of tool_addition blocks and the removals dropped. Requests whose
+// hoisted out of tool_addition blocks and the tools tool_removal blocks took
+// out of the tools array. Requests whose
 // tools went through untouched log nothing.
 func (l *Leg) logRewrite(ctx context.Context, rq *router.Request, report rewriteReport) {
 	if !l.log.Enabled(ctx, slog.LevelDebug) {
@@ -237,11 +238,11 @@ func (l *Leg) logRewrite(ctx context.Context, rq *router.Request, report rewrite
 		attrs := append([]slog.Attr{slog.String("upstream_model", rq.Dec.UpstreamModel)}, report.Patterns.LogAttrs()...)
 		l.log.LogAttrs(ctx, slog.LevelDebug, "rewrote tool schema patterns for the deepseek backend", attrs...)
 	}
-	if len(report.InlineToolsHoisted) > 0 || report.ToolRemovalsDropped > 0 {
-		l.log.LogAttrs(ctx, slog.LevelDebug, "rewrote tool_addition and tool_removal blocks for the deepseek backend",
+	if len(report.InlineToolsHoisted) > 0 || len(report.ToolsRemoved) > 0 {
+		l.log.LogAttrs(ctx, slog.LevelDebug, "applied tool_addition and tool_removal blocks for the deepseek backend",
 			slog.String("upstream_model", rq.Dec.UpstreamModel),
 			slog.Any("inline_tools_hoisted", report.InlineToolsHoisted),
-			slog.Int("tool_removals_dropped", report.ToolRemovalsDropped))
+			slog.Any("tools_removed", report.ToolsRemoved))
 	}
 }
 

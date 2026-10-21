@@ -18,18 +18,21 @@ import (
 //	{"type":"tool_removal","tool":{"type":"tool_reference","name":"x"}}
 //
 // DeepSeek's Anthropic-compatible endpoint documents none of them and has no
-// per-turn tool list. The mapping that keeps their meaning:
+// per-turn tool list. The mapping that keeps their meaning is to advertise, in
+// the top-level tools array, the tools that are active once every block has
+// been applied in message order (aschema.ToolSet holds the rules, shared with
+// the Codex leg):
 //
-//   - an addition with a definition is hoisted into the top-level tools array,
-//     after the tools the request declared and in conversation order, so the
-//     model can call the tool; a name that is already declared keeps its first
-//     declaration;
-//   - an addition by reference names a tool the request already declares
-//     (deferred, typically); DeepSeek has no deferral, so the declaration loses
-//     its defer_loading flag and the tool is callable;
-//   - a removal is dropped and the tool stays declared. DeepSeek cannot express
-//     "gone", earlier turns may still hold calls to the tool, and the client
-//     answers a call to a tool it removed with an error result of its own;
+//   - an addition with a definition is hoisted into the tools array, after the
+//     tools the request declared and in conversation order, so the model can
+//     call the tool; a name that is already active keeps its first declaration;
+//   - an addition by reference names a tool the request or an earlier block
+//     declared (deferred, typically, or removed since); DeepSeek has no
+//     deferral, so the declaration loses its defer_loading flag and the tool is
+//     active and callable;
+//   - a removal takes the tool out of the tools array. Its definition stays
+//     known, so a later addition by reference or by definition brings it back.
+//     Earlier tool_use and tool_result blocks for the tool stay in the history;
 //   - the blocks leave the message, and a message left with no content is
 //     dropped, since an empty content array would be refused.
 //
@@ -38,39 +41,36 @@ import (
 // alternative is to lose a tool silently.
 
 // hoistToolChanges rewrites obj in place as described above and reports the
-// names it hoisted (in order) and how many removals it dropped. A request with
-// no such blocks is returned untouched; finding that out decodes only the block
-// types (hasToolChanges), never searches the raw bytes, because JSON lets any
-// character of a type name be written as an escape.
-func hoistToolChanges(obj map[string]json.RawMessage) (hoisted []string, removals int, err error) {
+// names it hoisted (in order) and the declared tools it left out. A request
+// with no such blocks is returned untouched; finding that out decodes only the
+// block types (hasToolChanges), never searches the raw bytes, because JSON lets
+// any character of a type name be written as an escape.
+func hoistToolChanges(obj map[string]json.RawMessage) (hoisted, removed []string, err error) {
 	rawMessages := obj["messages"]
 	if !hasToolChanges(rawMessages) {
-		return nil, 0, nil
+		return nil, nil, nil
 	}
 	var messages []map[string]json.RawMessage
 	if err := json.Unmarshal(rawMessages, &messages); err != nil {
-		return nil, 0, apierr.InvalidRequest("deepseek messages must be an array")
+		return nil, nil, apierr.InvalidRequest("deepseek messages must be an array")
 	}
 	var tools []map[string]json.RawMessage
 	if present(obj["tools"]) {
 		if err := json.Unmarshal(obj["tools"], &tools); err != nil {
-			return nil, 0, apierr.InvalidRequest("deepseek tools must be an array")
+			return nil, nil, apierr.InvalidRequest("deepseek tools must be an array")
 		}
 	}
-	declared := make(map[string]int, len(tools)) // name -> index in tools
+	names := make([]string, len(tools))
 	for i, tool := range tools {
-		var name string
-		if json.Unmarshal(tool["name"], &name) == nil && name != "" {
-			declared[name] = i
-		}
+		_ = json.Unmarshal(tool["name"], &names[i]) // a missing name stays ""
 	}
+	set := aschema.NewToolSet(names)
 
-	toolsChanged := false
 	kept := make([]map[string]json.RawMessage, 0, len(messages))
 	for mi, message := range messages {
-		rewritten, remaining, changed, err := hoistFromMessage(message, mi, &tools, declared, &hoisted, &removals, &toolsChanged)
+		rewritten, remaining, changed, err := hoistFromMessage(message, mi, &tools, set)
 		if err != nil {
-			return nil, 0, err
+			return nil, nil, err
 		}
 		if changed && !remaining {
 			continue // nothing left to say: drop the message
@@ -83,17 +83,31 @@ func hoistToolChanges(obj map[string]json.RawMessage) (hoisted []string, removal
 
 	encoded, err := json.Marshal(kept)
 	if err != nil {
-		return nil, 0, apierr.Wrap(err, apierr.TypeInvalidRequest, "encode deepseek messages")
+		return nil, nil, apierr.Wrap(err, apierr.TypeInvalidRequest, "encode deepseek messages")
 	}
 	obj["messages"] = encoded
-	if toolsChanged {
-		encoded, err := json.Marshal(tools)
+
+	active := make([]map[string]json.RawMessage, 0, len(tools))
+	for slot, tool := range tools {
+		if set.Active(slot) {
+			active = append(active, tool)
+		}
+	}
+	removed = set.Removed()
+	switch {
+	case len(active) > 0:
+		encoded, err := json.Marshal(active)
 		if err != nil {
-			return nil, 0, apierr.Wrap(err, apierr.TypeInvalidRequest, "encode deepseek tools")
+			return nil, nil, apierr.Wrap(err, apierr.TypeInvalidRequest, "encode deepseek tools")
 		}
 		obj["tools"] = encoded
+	case len(removed) > 0:
+		// Every tool was removed: an empty tools array, or a tool_choice over no
+		// tools, is not something to send.
+		delete(obj, "tools")
+		delete(obj, "tool_choice")
 	}
-	return hoisted, removals, nil
+	return set.Hoisted(), removed, nil
 }
 
 // hasToolChanges reports whether any message's content carries a tool_addition
@@ -126,10 +140,11 @@ func hasToolChanges(rawMessages json.RawMessage) bool {
 }
 
 // hoistFromMessage strips the tool_addition and tool_removal blocks out of one
-// message's content, hoisting definitions into *tools. It reports the new
-// content, whether any block remains, and whether the message changed at all.
+// message's content, applying each to set and keeping *tools in step with the
+// set's slots (a definition is stored in its slot). It reports the new content,
+// whether any block remains, and whether the message changed at all.
 func hoistFromMessage(message map[string]json.RawMessage, mi int, tools *[]map[string]json.RawMessage,
-	declared map[string]int, hoisted *[]string, removals *int, toolsChanged *bool,
+	set *aschema.ToolSet,
 ) (content json.RawMessage, remaining, changed bool, err error) {
 	raw := bytes.TrimSpace(message["content"])
 	if len(raw) == 0 || raw[0] != '[' {
@@ -149,8 +164,8 @@ func hoistFromMessage(message map[string]json.RawMessage, mi int, tools *[]map[s
 		}
 		changed = true
 		field := fmt.Sprintf("messages[%d].content[%d]", mi, bi)
-		// The rules live in aschema.CheckToolChange, shared with the Codex leg.
-		// The target is decoded twice on purpose: typed for the check, raw so the
+		// The rules live in aschema.ToolSet, shared with the Codex leg. The
+		// target is decoded twice on purpose: typed for the rules, raw so the
 		// hoisted definition keeps every field the client sent.
 		var checked *aschema.ToolTarget
 		if present(block["tool"]) {
@@ -159,34 +174,27 @@ func hoistFromMessage(message map[string]json.RawMessage, mi int, tools *[]map[s
 				return nil, false, false, apierr.InvalidRequest("deepseek %s has no valid tool object", field)
 			}
 		}
-		isDeclared := func(name string) bool { _, ok := declared[name]; return ok }
-		if err := aschema.CheckToolChange(kind, checked, isDeclared); err != nil {
+		before := set.Len()
+		edit, err := set.Apply(kind, checked)
+		if err != nil {
 			return nil, false, false, apierr.InvalidRequest("deepseek %s %v", field, err)
 		}
-		var target struct {
-			Definition map[string]json.RawMessage `json:"definition"`
-		}
-		_ = json.Unmarshal(block["tool"], &target)
-
 		switch {
-		case kind == aschema.BlockToolRemoval:
-			*removals++
-		case checked.Type == aschema.ToolTargetDefinition:
-			name := checked.Definition.Name
-			if _, dup := declared[name]; dup {
-				continue
+		case edit.Store:
+			var target struct {
+				Definition map[string]json.RawMessage `json:"definition"`
 			}
+			_ = json.Unmarshal(block["tool"], &target)
 			delete(target.Definition, "defer_loading")
-			declared[name] = len(*tools)
-			*tools = append(*tools, target.Definition)
-			*hoisted = append(*hoisted, name)
-			*toolsChanged = true
-		default: // an addition by reference, already checked to be declared
-			i := declared[checked.Name]
-			if _, deferred := (*tools)[i]["defer_loading"]; deferred {
-				delete((*tools)[i], "defer_loading")
-				*toolsChanged = true
+			if edit.Slot == before {
+				*tools = append(*tools, target.Definition)
+			} else {
+				(*tools)[edit.Slot] = target.Definition
 			}
+		case kind == aschema.BlockToolAddition && checked.Type == aschema.ToolTargetReference:
+			// An addition by reference: the tool is callable now, so it cannot stay
+			// deferred.
+			delete((*tools)[edit.Slot], "defer_loading")
 		}
 	}
 	if !changed {
