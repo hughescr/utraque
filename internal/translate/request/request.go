@@ -20,6 +20,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -108,6 +109,11 @@ const DroppedBillingHeader = "system:billing-header"
 // vision backends reject, so the image is dropped instead of emitted and this
 // reason is recorded so the loss is visible to logging.
 const DroppedImageEmptyMediaType = "image: empty media_type or data"
+
+// ErrToolChange wraps the error Translate returns for a malformed
+// tool_addition or tool_removal block. It is the client's mistake, so a leg
+// answers it with a 400 that carries the detail.
+var ErrToolChange = errors.New("invalid tool change")
 
 // Options tunes a translation. The zero value is valid: it uses
 // DefaultMutatingTools and takes effort/summary entirely from the routing
@@ -257,14 +263,22 @@ func Translate(req *aschema.MessagesRequest, dec router.Decision, model cschema.
 	// A removal has no Responses equivalent, and the tool stays declared: earlier
 	// turns may still call it, and the client answers a call to a gone tool with
 	// an error result of its own.
+	//
+	// A malformed change (unknown target, nameless definition, a reference to a
+	// tool nothing declares) is refused, as on the DeepSeek leg: dropping it
+	// would leave the model without a tool and nothing to say so.
+	changes, err := aschema.ResolveToolChanges(req.Messages, req.Tools)
+	if err != nil {
+		return nil, Metadata{}, fmt.Errorf("%w: %v", ErrToolChange, err)
+	}
 	tools := req.Tools
-	if added := aschema.AddedTools(req.Messages, req.Tools); len(added) > 0 {
-		tools = append(append(make([]aschema.Tool, 0, len(req.Tools)+len(added)), req.Tools...), added...)
-		for _, t := range added {
+	if len(changes.Added) > 0 {
+		tools = append(append(make([]aschema.Tool, 0, len(req.Tools)+len(changes.Added)), req.Tools...), changes.Added...)
+		for _, t := range changes.Added {
 			meta.InlineToolsHoisted = append(meta.InlineToolsHoisted, t.Name)
 		}
 	}
-	meta.ToolRemovalsIgnored = aschema.CountToolRemovals(req.Messages)
+	meta.ToolRemovalsIgnored = changes.Removals
 
 	out.Tools, meta.Patterns = translateTools(tools)
 	out.ToolChoice = translateToolChoice(req.ToolChoice)
@@ -489,7 +503,8 @@ func translateMessages(messages []aschema.Message) (messagesResult, error) {
 
 			case aschema.BlockToolAddition, aschema.BlockToolRemoval:
 				// Tool changes emit no input item. Inline definitions were hoisted
-				// into the tools array by Translate (aschema.AddedTools); a
+				// into the tools array by Translate (aschema.ResolveToolChanges, which
+				// has already refused any malformed block); a
 				// reference addition names a tool the request already declares; a
 				// removal cannot be expressed. Skipped here on purpose, not by
 				// falling through as an unknown type.

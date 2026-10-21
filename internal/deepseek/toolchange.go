@@ -4,8 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"strings"
 
+	"github.com/hughescr/utraque/internal/anthropic/schema"
 	"github.com/hughescr/utraque/internal/apierr"
 )
 
@@ -39,10 +39,12 @@ import (
 
 // hoistToolChanges rewrites obj in place as described above and reports the
 // names it hoisted (in order) and how many removals it dropped. A request with
-// no such blocks is returned untouched and costs one substring scan.
+// no such blocks is returned untouched; finding that out decodes only the block
+// types (hasToolChanges), never searches the raw bytes, because JSON lets any
+// character of a type name be written as an escape.
 func hoistToolChanges(obj map[string]json.RawMessage) (hoisted []string, removals int, err error) {
 	rawMessages := obj["messages"]
-	if !bytes.Contains(rawMessages, []byte(`"tool_addition"`)) && !bytes.Contains(rawMessages, []byte(`"tool_removal"`)) {
+	if !hasToolChanges(rawMessages) {
 		return nil, 0, nil
 	}
 	var messages []map[string]json.RawMessage
@@ -94,6 +96,35 @@ func hoistToolChanges(obj map[string]json.RawMessage) (hoisted []string, removal
 	return hoisted, removals, nil
 }
 
+// hasToolChanges reports whether any message's content carries a tool_addition
+// or tool_removal block, judged by the DECODED type. A body that is not the
+// expected shape reports false and is left for the later stages to refuse.
+func hasToolChanges(rawMessages json.RawMessage) bool {
+	var messages []struct {
+		Content json.RawMessage `json:"content"`
+	}
+	if json.Unmarshal(rawMessages, &messages) != nil {
+		return false
+	}
+	for _, m := range messages {
+		if c := bytes.TrimSpace(m.Content); len(c) == 0 || c[0] != '[' {
+			continue
+		}
+		var blocks []struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(m.Content, &blocks) != nil {
+			continue
+		}
+		for _, b := range blocks {
+			if b.Type == aschema.BlockToolAddition || b.Type == aschema.BlockToolRemoval {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // hoistFromMessage strips the tool_addition and tool_removal blocks out of one
 // message's content, hoisting definitions into *tools. It reports the new
 // content, whether any block remains, and whether the message changed at all.
@@ -112,28 +143,36 @@ func hoistFromMessage(message map[string]json.RawMessage, mi int, tools *[]map[s
 	for bi, block := range blocks {
 		var kind string
 		_ = json.Unmarshal(block["type"], &kind)
-		if kind != "tool_addition" && kind != "tool_removal" {
+		if kind != aschema.BlockToolAddition && kind != aschema.BlockToolRemoval {
 			out = append(out, block)
 			continue
 		}
 		changed = true
 		field := fmt.Sprintf("messages[%d].content[%d]", mi, bi)
+		// The rules live in aschema.CheckToolChange, shared with the Codex leg.
+		// The target is decoded twice on purpose: typed for the check, raw so the
+		// hoisted definition keeps every field the client sent.
+		var checked *aschema.ToolTarget
+		if present(block["tool"]) {
+			checked = new(aschema.ToolTarget)
+			if err := json.Unmarshal(block["tool"], checked); err != nil {
+				return nil, false, false, apierr.InvalidRequest("deepseek %s has no valid tool object", field)
+			}
+		}
+		isDeclared := func(name string) bool { _, ok := declared[name]; return ok }
+		if err := aschema.CheckToolChange(kind, checked, isDeclared); err != nil {
+			return nil, false, false, apierr.InvalidRequest("deepseek %s %v", field, err)
+		}
 		var target struct {
-			Type       string                     `json:"type"`
-			Name       string                     `json:"name"`
 			Definition map[string]json.RawMessage `json:"definition"`
 		}
-		if err := json.Unmarshal(block["tool"], &target); err != nil {
-			return nil, false, false, apierr.InvalidRequest("deepseek %s has no valid tool object", field)
-		}
+		_ = json.Unmarshal(block["tool"], &target)
+
 		switch {
-		case kind == "tool_removal" && target.Type == "tool_reference":
+		case kind == aschema.BlockToolRemoval:
 			*removals++
-		case kind == "tool_addition" && target.Type == "tool_definition":
-			var name string
-			if json.Unmarshal(target.Definition["name"], &name) != nil || strings.TrimSpace(name) == "" {
-				return nil, false, false, apierr.InvalidRequest("deepseek %s defines a tool with no name", field)
-			}
+		case checked.Type == aschema.ToolTargetDefinition:
+			name := checked.Definition.Name
 			if _, dup := declared[name]; dup {
 				continue
 			}
@@ -142,17 +181,12 @@ func hoistFromMessage(message map[string]json.RawMessage, mi int, tools *[]map[s
 			*tools = append(*tools, target.Definition)
 			*hoisted = append(*hoisted, name)
 			*toolsChanged = true
-		case kind == "tool_addition" && target.Type == "tool_reference":
-			i, ok := declared[target.Name]
-			if !ok {
-				return nil, false, false, apierr.InvalidRequest("deepseek cannot preserve added tool %q without its top-level input_schema", target.Name)
-			}
+		default: // an addition by reference, already checked to be declared
+			i := declared[checked.Name]
 			if _, deferred := (*tools)[i]["defer_loading"]; deferred {
 				delete((*tools)[i], "defer_loading")
 				*toolsChanged = true
 			}
-		default:
-			return nil, false, false, apierr.InvalidRequest("deepseek compatibility for %s tool target %q is unknown", kind, target.Type)
 		}
 	}
 	if !changed {

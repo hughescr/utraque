@@ -146,6 +146,8 @@ func TestToolChangeEdgeCases(t *testing.T) {
 		"unknown target type":             system(`{"type":"tool_addition","tool":{"type":"tool_bundle","name":"x"}}`),
 		"missing tool object":             system(`{"type":"tool_addition"}`),
 		"removal by definition":           system(`{"type":"tool_removal","tool":{"type":"tool_definition","definition":{"name":"x"}}}`),
+		"removal with no name":            system(`{"type":"tool_removal","tool":{"type":"tool_reference"}}`),
+		"definition with no definition":   system(`{"type":"tool_addition","tool":{"type":"tool_definition"}}`),
 	}
 	for name, message := range errCases {
 		t.Run("rejects "+name, func(t *testing.T) {
@@ -154,6 +156,68 @@ func TestToolChangeEdgeCases(t *testing.T) {
 				t.Fatal("accepted a tool change DeepSeek cannot be given faithfully")
 			}
 		})
+	}
+}
+
+// TestToolChangeTypeEncodingIsEquivalent: JSON lets any character of a block's
+// type be written as an escape, so a valid tool_addition spelled that way must
+// be hoisted exactly like the literal spelling (it once skipped the hoist and
+// hit the unknown-block 400), on both /v1/messages and count_tokens.
+func TestToolChangeTypeEncodingIsEquivalent(t *testing.T) {
+	raw, err := os.ReadFile("testdata/tool_addition_request.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	literal := string(raw)
+	bs := string(rune(92)) // a backslash, spelled so no tool normalises the escape away
+	escaped := strings.NewReplacer(`"tool_addition"`, `"tool`+bs+`u005faddition"`, `"tool_removal"`, `"`+bs+`u0074ool_removal"`).Replace(literal)
+	if escaped == literal {
+		t.Fatal("fixture has no tool change blocks to escape")
+	}
+
+	// The rewrite itself, byte for byte.
+	a, ra, err := rewriteRequest([]byte(literal), "deepseek-flash", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, rb, err := rewriteRequest([]byte(escaped), "deepseek-flash", "")
+	if err != nil {
+		t.Fatalf("escaped spelling refused: %v", err)
+	}
+	if string(a) != string(b) || !reflect.DeepEqual(ra.InlineToolsHoisted, rb.InlineToolsHoisted) {
+		t.Errorf("escaped spelling rewrote differently:\n%s\n%s", a, b)
+	}
+
+	// What the leg sends upstream, and what count_tokens answers. The bodies
+	// are edited as text so the escapes under test survive.
+	var sent []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		sent = append(sent, string(body))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"msg_1","type":"message","role":"assistant","model":"deepseek-flash","content":[],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`)
+	}))
+	defer upstream.Close()
+	l := testLeg(t, upstream.URL+"/anthropic")
+	for _, body := range []string{literal, escaped} {
+		body = strings.Replace(body, `"stream": true`, `"stream": false`, 1)
+		if _, err := callLeg(t, l, "deepseek-flash", body, false, false, nil); err != nil {
+			t.Fatalf("Messages: %v", err)
+		}
+	}
+	if len(sent) != 2 || sent[0] != sent[1] {
+		t.Errorf("upstream bodies differ between spellings:\n%v", sent)
+	}
+	count := func(body string) string {
+		body = strings.NewReplacer(`"max_tokens": 8192,`, ``, `"stream": true,`, ``).Replace(body)
+		rec, err := callLeg(t, l, "deepseek-flash", body, false, true, nil)
+		if err != nil {
+			t.Fatalf("CountTokens: %v", err)
+		}
+		return rec.Body.String()
+	}
+	if x, y := count(literal), count(escaped); x != y {
+		t.Errorf("count_tokens differs between spellings: %s vs %s", x, y)
 	}
 }
 

@@ -136,10 +136,13 @@ the top-level `tools` array, after the declared tools and in conversation order
 declared, and on DeepSeek loses its `defer_loading` flag; a removal is dropped and
 the tool stays declared, because earlier turns may still hold calls to it and the
 client answers a call to a tool it removed with an error result of its own. The
-blocks leave the message, and a system message left empty is dropped. On
-DeepSeek an unknown target type, a nameless definition, or a reference to a tool
-nothing declares is a `400` rather than a silently missing tool; the GPT leg
-skips a nameless definition. At DEBUG the Codex translation record
+blocks leave the message, and a system message left empty is dropped. Both legs
+check each block by the same rules, on `/v1/messages` and `count_tokens` alike,
+and answer a `400` naming the block rather than a silently missing tool for: an
+unknown target type, a missing target, a nameless definition, a removal that is
+not a reference, or a reference addition to a tool nothing declares. The block's
+`type` is read after JSON decoding, so a spelling that writes a character of it
+as a JSON unicode escape is the same block. At DEBUG the Codex translation record
 and the DeepSeek rewrite record name the hoisted tools (`inline_tools_hoisted`)
 and count the removals (`tool_removals_ignored`, `tool_removals_dropped`).
 

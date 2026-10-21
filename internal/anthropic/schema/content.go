@@ -6,6 +6,8 @@ package aschema
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"strings"
 )
 
@@ -56,55 +58,86 @@ type ToolTarget struct {
 	Definition *Tool  `json:"definition,omitempty"`
 }
 
-// AddedTools returns the tools that tool_addition blocks declare inline
-// (ToolTargetDefinition) across messages, in conversation order. A name that is
-// already in declared, or that an earlier block already added, is skipped, so
-// the first declaration wins and the top-level tools array is never
-// contradicted. References add nothing: the tool they name is declared
-// already. Removals add nothing either.
-func AddedTools(messages []Message, declared []Tool) []Tool {
+// CheckToolChange validates one tool_addition or tool_removal block of the
+// given kind against its target. It is the single rule set both the Codex and
+// the DeepSeek legs apply, so a malformed block is refused the same way on
+// either: silently losing a tool is worse than a 400. declared reports whether
+// a tool name is declared at that point (in the request's tools array or by an
+// earlier inline definition). The rules:
+//
+//   - the block needs a tool object;
+//   - a removal must be a tool_reference with a name;
+//   - an addition must be a tool_definition whose definition has a name, or a
+//     tool_reference naming a declared tool;
+//   - any other target type is unknown.
+func CheckToolChange(kind string, t *ToolTarget, declared func(name string) bool) error {
+	if t == nil {
+		return errors.New("has no tool object")
+	}
+	switch {
+	case kind == BlockToolRemoval && t.Type == ToolTargetReference:
+		if strings.TrimSpace(t.Name) == "" {
+			return errors.New("removes a tool with no name")
+		}
+	case kind == BlockToolAddition && t.Type == ToolTargetDefinition:
+		if t.Definition == nil || strings.TrimSpace(t.Definition.Name) == "" {
+			return errors.New("defines a tool with no name")
+		}
+	case kind == BlockToolAddition && t.Type == ToolTargetReference:
+		if !declared(t.Name) {
+			return fmt.Errorf("adds tool %q, which nothing declares", t.Name)
+		}
+	default:
+		return fmt.Errorf("%s has an unknown tool target type %q", kind, t.Type)
+	}
+	return nil
+}
+
+// ToolChanges is what a conversation's tool_addition and tool_removal blocks
+// amount to.
+type ToolChanges struct {
+	// Added are the tools defined inline, in conversation order. A name that
+	// the request declares, or that an earlier block added, is skipped, so the
+	// first declaration wins and the top-level tools array is never
+	// contradicted.
+	Added []Tool
+	// Removals counts the tool_removal blocks.
+	Removals int
+}
+
+// ResolveToolChanges validates every tool_addition and tool_removal block in
+// messages with CheckToolChange and returns what they add and remove. The
+// error names the offending block as messages[i].content[j]. References add
+// nothing: the tool they name is declared already.
+func ResolveToolChanges(messages []Message, declared []Tool) (ToolChanges, error) {
 	seen := make(map[string]struct{}, len(declared))
 	for i := range declared {
 		seen[declared[i].Name] = struct{}{}
 	}
-	var added []Tool
-	for i := range messages {
-		if messages[i].Content == nil {
-			continue
-		}
-		for _, blk := range messages[i].Content.Blocks {
-			if blk.Type != BlockToolAddition || blk.Tool == nil ||
-				blk.Tool.Type != ToolTargetDefinition || blk.Tool.Definition == nil {
-				continue
-			}
-			def := *blk.Tool.Definition
-			if def.Name == "" {
-				continue
-			}
-			if _, dup := seen[def.Name]; dup {
-				continue
-			}
-			seen[def.Name] = struct{}{}
-			added = append(added, def)
-		}
-	}
-	return added
-}
+	isDeclared := func(name string) bool { _, ok := seen[name]; return ok }
 
-// CountToolRemovals reports how many tool_removal blocks messages carry.
-func CountToolRemovals(messages []Message) int {
-	n := 0
+	var changes ToolChanges
 	for i := range messages {
 		if messages[i].Content == nil {
 			continue
 		}
-		for _, blk := range messages[i].Content.Blocks {
-			if blk.Type == BlockToolRemoval {
-				n++
+		for j, blk := range messages[i].Content.Blocks {
+			if blk.Type != BlockToolAddition && blk.Type != BlockToolRemoval {
+				continue
+			}
+			if err := CheckToolChange(blk.Type, blk.Tool, isDeclared); err != nil {
+				return ToolChanges{}, fmt.Errorf("messages[%d].content[%d] %w", i, j, err)
+			}
+			switch {
+			case blk.Type == BlockToolRemoval:
+				changes.Removals++
+			case blk.Tool.Type == ToolTargetDefinition && !isDeclared(blk.Tool.Definition.Name):
+				seen[blk.Tool.Definition.Name] = struct{}{}
+				changes.Added = append(changes.Added, *blk.Tool.Definition)
 			}
 		}
 	}
-	return n
+	return changes, nil
 }
 
 // Stop reasons.

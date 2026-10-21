@@ -228,7 +228,7 @@ func (l *Leg) Messages(w http.ResponseWriter, r *http.Request, rq *router.Reques
 	model := l.catalogModel(ctx, cred, rq.Dec.UpstreamModel, log)
 	creq, meta, err := request.Translate(&req, rq.Dec, model, request.Options{Summary: l.summary})
 	if err != nil {
-		return apierr.Wrap(err, apierr.TypeInvalidRequest, "translating the request for the codex backend failed")
+		return translateError(err)
 	}
 	logTranslation(ctx, log, rq, meta)
 
@@ -269,6 +269,16 @@ func (l *Leg) Messages(w http.ResponseWriter, r *http.Request, rq *router.Reques
 	return l.serveAggregate(ctx, w, rq, upstream, seed, meta.Effort, log)
 }
 
+// translateError renders a translation failure as a 400. A malformed tool
+// change carries its own detail to the client, since it is the client's to
+// fix; any other failure keeps the generic message.
+func translateError(err error) error {
+	if errors.Is(err, request.ErrToolChange) {
+		return apierr.Wrap(err, apierr.TypeInvalidRequest, "%v", err)
+	}
+	return apierr.Wrap(err, apierr.TypeInvalidRequest, "translating the request for the codex backend failed")
+}
+
 // CountTokens serves POST /v1/messages/count_tokens for a codex-routed model.
 //
 // The Codex backend exposes no token-counting endpoint, and asking it would
@@ -300,7 +310,7 @@ func (l *Leg) CountTokens(w http.ResponseWriter, r *http.Request, rq *router.Req
 		ToolChoice: req.ToolChoice,
 	}, rq.Dec, cschema.CatalogModel{}, request.Options{Summary: l.summary})
 	if err != nil {
-		return apierr.Wrap(err, apierr.TypeInvalidRequest, "translating the request for the codex backend failed")
+		return translateError(err)
 	}
 
 	body, err := json.Marshal(aschema.CountTokensResponse{InputTokens: l.est.EstimateRequest(creq)})

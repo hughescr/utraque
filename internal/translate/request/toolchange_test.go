@@ -2,9 +2,11 @@ package request_test
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	aschema "github.com/hughescr/utraque/internal/anthropic/schema"
@@ -70,12 +72,89 @@ func TestAddedToolsFirstDeclarationWins(t *testing.T) {
 		}
 	}
 	messages := []aschema.Message{
-		{Role: "system", Content: aschema.BlockContent(def("a", "first"), def("declared", "must not replace"), def("", "nameless"))},
+		{Role: "system", Content: aschema.BlockContent(def("a", "first"), def("declared", "must not replace"))},
 		{Role: "system", Content: aschema.BlockContent(def("a", "second"), def("b", "b"))},
 		{Role: "system"}, // nil content must not panic
 	}
-	got := aschema.AddedTools(messages, []aschema.Tool{{Name: "declared"}})
-	if len(got) != 2 || got[0].Name != "a" || got[0].Description != "first" || got[1].Name != "b" {
-		t.Errorf("AddedTools = %+v, want a(first) then b", got)
+	got, err := aschema.ResolveToolChanges(messages, []aschema.Tool{{Name: "declared"}})
+	if err != nil {
+		t.Fatalf("ResolveToolChanges: %v", err)
+	}
+	if len(got.Added) != 2 || got.Added[0].Name != "a" || got.Added[0].Description != "first" || got.Added[1].Name != "b" {
+		t.Errorf("Added = %+v, want a(first) then b", got.Added)
+	}
+}
+
+// TestMalformedToolChangeIsRefused pins the contract both legs share: a tool
+// change the translator cannot honour is an error (a 400 at the leg), never a
+// block silently dropped. The DeepSeek leg runs the same rules.
+func TestMalformedToolChangeIsRefused(t *testing.T) {
+	cases := map[string]string{
+		"reference to an undeclared tool": `{"type":"tool_addition","tool":{"type":"tool_reference","name":"ghost"}}`,
+		"nameless definition":             `{"type":"tool_addition","tool":{"type":"tool_definition","definition":{"input_schema":{}}}}`,
+		"missing definition":              `{"type":"tool_addition","tool":{"type":"tool_definition"}}`,
+		"unknown target type":             `{"type":"tool_addition","tool":{"type":"tool_bundle","name":"x"}}`,
+		"missing tool object":             `{"type":"tool_addition"}`,
+		"removal by definition":           `{"type":"tool_removal","tool":{"type":"tool_definition","definition":{"name":"x"}}}`,
+		"removal with no name":            `{"type":"tool_removal","tool":{"type":"tool_reference"}}`,
+	}
+	for name, block := range cases {
+		t.Run(name, func(t *testing.T) {
+			raw := `{"model":"m","max_tokens":8,"tools":[{"name":"Read","input_schema":{"type":"object"}}],"messages":[` +
+				`{"role":"user","content":"hi"},{"role":"system","content":[` + block + `]}]}`
+			var req aschema.MessagesRequest
+			if err := json.Unmarshal([]byte(raw), &req); err != nil {
+				t.Fatal(err)
+			}
+			cfg := defaultCase()
+			_, _, err := request.Translate(&req, cfg.dec, cfg.model, cfg.opts)
+			if !errors.Is(err, request.ErrToolChange) {
+				t.Fatalf("Translate error = %v, want request.ErrToolChange", err)
+			}
+		})
+	}
+
+	t.Run("a reference to a tool defined earlier inline is valid", func(t *testing.T) {
+		raw := `{"model":"m","max_tokens":8,"messages":[{"role":"user","content":"hi"},{"role":"system","content":[` +
+			`{"type":"tool_addition","tool":{"type":"tool_definition","definition":{"name":"late","input_schema":{"type":"object"}}}},` +
+			`{"type":"tool_addition","tool":{"type":"tool_reference","name":"late"}}]}]}`
+		var req aschema.MessagesRequest
+		if err := json.Unmarshal([]byte(raw), &req); err != nil {
+			t.Fatal(err)
+		}
+		cfg := defaultCase()
+		if _, _, err := request.Translate(&req, cfg.dec, cfg.model, cfg.opts); err != nil {
+			t.Fatalf("Translate: %v", err)
+		}
+	})
+}
+
+// TestToolChangeTypeEncodingIsEquivalent: JSON may write any character of a
+// block's type as an escape; the translation must not depend on how it did.
+func TestToolChangeTypeEncodingIsEquivalent(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join(requestsDir, "tool_addition_midconversation.anthropic.input.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bs := string(rune(92)) // a backslash, spelled so no tool normalises the escape away
+	escaped := strings.NewReplacer(`"tool_addition"`, `"tool`+bs+`u005faddition"`, `"tool_removal"`, `"`+bs+`u0074ool_removal"`).Replace(string(raw))
+	if escaped == string(raw) {
+		t.Fatal("fixture has no tool change blocks to escape")
+	}
+	translate := func(body string) []byte {
+		var req aschema.MessagesRequest
+		if err := json.Unmarshal([]byte(body), &req); err != nil {
+			t.Fatal(err)
+		}
+		cfg := defaultCase()
+		out, _, err := request.Translate(&req, cfg.dec, cfg.model, cfg.opts)
+		if err != nil {
+			t.Fatalf("translate: %v", err)
+		}
+		b, _ := json.Marshal(out)
+		return b
+	}
+	if a, b := translate(string(raw)), translate(escaped); string(a) != string(b) {
+		t.Errorf("escaped and literal types translated differently:\n%s\n%s", a, b)
 	}
 }
