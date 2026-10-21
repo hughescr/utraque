@@ -75,34 +75,53 @@ func rewriteEffort(obj map[string]json.RawMessage, requested effort.Level) (stri
 	return applied, nil
 }
 
-// rewriteRequest rewrites one request body for DeepSeek and reports, as a
-// toolschema.Report, what rewriteContent (via rewriteTools) changed in the
-// tool schemas, so the leg can log it the way the codex leg logs its
-// translation metadata. It also returns the effort sent upstream (see
-// rewriteEffort); requested is the Decision's effort.
-func rewriteRequest(raw []byte, canonical string, requested effort.Level) ([]byte, toolschema.Report, string, error) {
-	var report toolschema.Report
+// rewriteReport is what rewriteRequest changed, for the leg to log the way the
+// codex leg logs its translation metadata.
+type rewriteReport struct {
+	// Patterns is what rewriteContent (via rewriteTools) changed in the tool
+	// schemas.
+	Patterns toolschema.Report
+	// Effort is the output_config.effort sent upstream ("" when none; see
+	// rewriteEffort).
+	Effort string
+	// InlineToolsHoisted names the tools tool_addition blocks defined inline
+	// that were moved into the top-level tools array, and ToolRemovalsDropped
+	// counts the tool_removal blocks dropped (see hoistToolChanges).
+	InlineToolsHoisted  []string
+	ToolRemovalsDropped int
+}
+
+// rewriteRequest rewrites one request body for DeepSeek and reports what it
+// changed. requested is the Decision's effort.
+func rewriteRequest(raw []byte, canonical string, requested effort.Level) ([]byte, rewriteReport, error) {
+	var report rewriteReport
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &obj); err != nil || obj == nil {
-		return nil, report, "", apierr.InvalidRequest("deepseek request body must be a JSON object")
+		return nil, report, apierr.InvalidRequest("deepseek request body must be a JSON object")
 	}
 	if err := rejectUnsupportedFields(obj); err != nil {
-		return nil, report, "", err
+		return nil, report, err
 	}
-	if err := rewriteContent(obj, canonical, &report); err != nil {
-		return nil, report, "", err
-	}
-	applied, err := rewriteEffort(obj, requested)
+	// Before rewriteContent, so a tool defined inline is declared by the time a
+	// tool_reference to it is checked.
+	hoisted, removals, err := hoistToolChanges(obj)
 	if err != nil {
-		return nil, report, "", err
+		return nil, report, err
+	}
+	report.InlineToolsHoisted, report.ToolRemovalsDropped = hoisted, removals
+	if err := rewriteContent(obj, canonical, &report.Patterns); err != nil {
+		return nil, report, err
+	}
+	if report.Effort, err = rewriteEffort(obj, requested); err != nil {
+		return nil, report, err
 	}
 	model, _ := json.Marshal(canonical)
 	obj["model"] = model
 	out, err := json.Marshal(obj)
 	if err != nil {
-		return nil, report, "", apierr.Wrap(err, apierr.TypeInvalidRequest, "encode deepseek request")
+		return nil, report, apierr.Wrap(err, apierr.TypeInvalidRequest, "encode deepseek request")
 	}
-	return out, report, applied, nil
+	return out, report, nil
 }
 
 // rejectUnsupportedFields returns an invalid-request error for any Anthropic

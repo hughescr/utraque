@@ -188,6 +188,13 @@ type Metadata struct {
 	// was dropped instead of emitted. The image itself is NOT emitted — this
 	// is the only trace that it existed in the request.
 	DroppedImages []string
+	// InlineToolsHoisted names, in conversation order, the tools that
+	// tool_addition blocks defined inline and that were moved into the
+	// Responses tools array.
+	InlineToolsHoisted []string
+	// ToolRemovalsIgnored counts tool_removal blocks, which the Responses API
+	// cannot express; the removed tool stays declared.
+	ToolRemovalsIgnored int
 	// Patterns records, per tool schema node, each "pattern" keyword that was
 	// translated for backend compatibility or dropped with its text folded
 	// into the node's description (see toolschema.Report).
@@ -243,10 +250,26 @@ func Translate(req *aschema.MessagesRequest, dec router.Decision, model cschema.
 	// the first assistant message.
 	out.Include = []string{cschema.IncludeReasoningEncryptedContent}
 
-	out.Tools, meta.Patterns = translateTools(req.Tools)
+	// Tools a client adds mid-conversation (tool_addition blocks carrying a
+	// definition) belong in the Responses tools array, which has no per-turn
+	// form: without them the model is told nothing about the tool and can never
+	// call it. They follow the tools the request declared, in conversation order.
+	// A removal has no Responses equivalent, and the tool stays declared: earlier
+	// turns may still call it, and the client answers a call to a gone tool with
+	// an error result of its own.
+	tools := req.Tools
+	if added := aschema.AddedTools(req.Messages, req.Tools); len(added) > 0 {
+		tools = append(append(make([]aschema.Tool, 0, len(req.Tools)+len(added)), req.Tools...), added...)
+		for _, t := range added {
+			meta.InlineToolsHoisted = append(meta.InlineToolsHoisted, t.Name)
+		}
+	}
+	meta.ToolRemovalsIgnored = aschema.CountToolRemovals(req.Messages)
+
+	out.Tools, meta.Patterns = translateTools(tools)
 	out.ToolChoice = translateToolChoice(req.ToolChoice)
 
-	disabled, names := disableParallel(req.Tools, opts.mutatingSet())
+	disabled, names := disableParallel(tools, opts.mutatingSet())
 	clientDisableParallel := req.ToolChoice != nil && req.ToolChoice.DisableParallelToolUse
 	// Either a mutating tool (the local footgun heuristic) or the client's
 	// explicit tool_choice.disable_parallel_tool_use forces serial calls. Both
@@ -345,6 +368,7 @@ func translateMessages(messages []aschema.Message) (messagesResult, error) {
 	for mi := range messages {
 		msg := messages[mi]
 		role := msg.Role
+		remapped := false
 		if msg.Content == nil {
 			continue
 		}
@@ -356,7 +380,7 @@ func translateMessages(messages []aschema.Message) (messagesResult, error) {
 			// top-level system field is unaffected — it still becomes
 			// instructions via joinSystem.
 			role = cschema.RoleDeveloper
-			systemRemapped++
+			remapped = true
 		}
 
 		var pending []cschema.ContentPart
@@ -364,6 +388,13 @@ func translateMessages(messages []aschema.Message) (messagesResult, error) {
 			if len(pending) > 0 {
 				items = append(items, cschema.MessageItem(role, pending...))
 				pending = nil
+				if remapped {
+					// Counted when the item is emitted, not when the message is
+					// seen: a system message that carries only tool_addition or
+					// tool_removal blocks produces no item at all.
+					systemRemapped++
+					remapped = false
+				}
 			}
 		}
 
@@ -455,6 +486,13 @@ func translateMessages(messages []aschema.Message) (messagesResult, error) {
 				} else {
 					unreplayable++
 				}
+
+			case aschema.BlockToolAddition, aschema.BlockToolRemoval:
+				// Tool changes emit no input item. Inline definitions were hoisted
+				// into the tools array by Translate (aschema.AddedTools); a
+				// reference addition names a tool the request already declares; a
+				// removal cannot be expressed. Skipped here on purpose, not by
+				// falling through as an unknown type.
 
 			default:
 				// Unknown block types are skipped rather than fatal — an input

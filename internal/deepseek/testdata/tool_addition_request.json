@@ -1,0 +1,101 @@
+{
+  "model": "deepseek-flash",
+  "max_tokens": 8192,
+  "stream": true,
+  "system": [
+    {
+      "type": "text",
+      "text": "You are Claude Code, Anthropic's official CLI for Claude.",
+      "cache_control": { "type": "ephemeral" }
+    }
+  ],
+  "tools": [
+    {
+      "name": "Read",
+      "description": "Reads a file from the local filesystem.",
+      "input_schema": {
+        "type": "object",
+        "properties": { "file_path": { "type": "string", "description": "Absolute path to the file" } },
+        "required": ["file_path"]
+      }
+    },
+    {
+      "name": "mcp__notes__search_notes",
+      "description": "Search the user's notes by keyword.",
+      "defer_loading": true,
+      "input_schema": {
+        "type": "object",
+        "properties": { "query": { "type": "string", "description": "Keywords to search for" } },
+        "required": ["query"]
+      }
+    }
+  ],
+  "messages": [
+    {
+      "role": "user",
+      "content": [{ "type": "text", "text": "Find my notes about the migration and file a ticket." }]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        { "type": "text", "text": "I will search your notes first." },
+        { "type": "tool_use", "id": "toolu_01A", "name": "mcp__notes__search_notes", "input": { "query": "migration" } }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [{ "type": "tool_result", "tool_use_id": "toolu_01A", "content": "Migration plan, draft 3" }]
+    },
+    {
+      "role": "system",
+      "content": [
+        { "type": "tool_removal", "tool": { "type": "tool_reference", "name": "mcp__old__retired_tool" } },
+        { "type": "tool_addition", "tool": { "type": "tool_reference", "name": "mcp__notes__search_notes" } },
+        {
+          "type": "tool_addition",
+          "tool": {
+            "type": "tool_definition",
+            "definition": {
+              "name": "mcp__tickets__create_ticket",
+              "description": "Create a ticket in the tracker.",
+              "input_schema": {
+                "type": "object",
+                "properties": {
+                  "title": { "type": "string", "description": "Ticket title" },
+                  "priority": { "type": "string", "enum": ["low", "normal", "urgent"] }
+                },
+                "required": ["title"]
+              }
+            }
+          },
+          "cache_control": { "type": "ephemeral" }
+        }
+      ]
+    },
+    {
+      "role": "system",
+      "content": [
+        {
+          "type": "tool_addition",
+          "tool": {
+            "type": "tool_definition",
+            "definition": {
+              "name": "mcp__tickets__comment",
+              "description": "Comment on a ticket.",
+              "input_schema": {
+                "type": "object",
+                "properties": { "ticket_id": { "type": "string" }, "body": { "type": "string" } },
+                "required": ["ticket_id", "body"]
+              }
+            }
+          }
+        },
+        { "type": "text", "text": "<system-reminder>The tickets server just connected.</system-reminder>" }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [{ "type": "text", "text": "Go ahead and file it." }]
+    }
+  ]
+}

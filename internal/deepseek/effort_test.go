@@ -36,7 +36,7 @@ func TestDeepseekEffortMapping(t *testing.T) {
 
 func rewriteForTest(t *testing.T, body string, requested effort.Level) (map[string]json.RawMessage, string) {
 	t.Helper()
-	out, _, applied, err := rewriteRequest([]byte(body), "deepseek-flash", requested)
+	out, report, err := rewriteRequest([]byte(body), "deepseek-flash", requested)
 	if err != nil {
 		t.Fatalf("rewriteRequest: %v", err)
 	}
@@ -44,7 +44,7 @@ func rewriteForTest(t *testing.T, body string, requested effort.Level) (map[stri
 	if err := json.Unmarshal(out, &obj); err != nil {
 		t.Fatalf("rewritten body is not JSON: %v", err)
 	}
-	return obj, applied
+	return obj, report.Effort
 }
 
 func TestRewriteEffort(t *testing.T) {

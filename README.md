@@ -122,6 +122,27 @@ before forwarding, so a tool such as Claude Code's Artifact tool — whose
 `^[^\0]*$` DeepSeek rejects outright — no longer fails every request on a
 DeepSeek route. See *Tool schemas on a GPT or DeepSeek route* for the rules.
 
+**Tools added mid-conversation.** With the `mid-conversation-tool-changes` and
+`inline-tools` betas, Claude Code announces tool changes inside a `role: "system"`
+message in `messages[]`, as `tool_addition` and `tool_removal` blocks:
+`{"type":"tool_addition","tool":{"type":"tool_definition","definition":{...}}}`
+defines a tool inline, `{"type":"tool_addition","tool":{"type":"tool_reference","name":"x"}}`
+announces one the request already declares, and
+`{"type":"tool_removal","tool":{"type":"tool_reference","name":"x"}}` retires one.
+Neither the Responses API nor DeepSeek's endpoint has a per-turn tool list, so
+the GPT and DeepSeek legs both do the same thing: an inline definition moves into
+the top-level `tools` array, after the declared tools and in conversation order
+(the first declaration of a name wins); a reference addition just needs its tool
+declared, and on DeepSeek loses its `defer_loading` flag; a removal is dropped and
+the tool stays declared, because earlier turns may still hold calls to it and the
+client answers a call to a tool it removed with an error result of its own. The
+blocks leave the message, and a system message left empty is dropped. On
+DeepSeek an unknown target type, a nameless definition, or a reference to a tool
+nothing declares is a `400` rather than a silently missing tool; the GPT leg
+skips a nameless definition. At DEBUG the Codex translation record
+and the DeepSeek rewrite record name the hoisted tools (`inline_tools_hoisted`)
+and count the removals (`tool_removals_ignored`, `tool_removals_dropped`).
+
 ## Install & run
 
 ### Prerequisites

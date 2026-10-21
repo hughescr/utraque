@@ -1,0 +1,147 @@
+{
+  "model": "gpt-5.6-sol",
+  "instructions": "You are Claude Code, Anthropic's official CLI for Claude.",
+  "input": [
+    {
+      "type": "message",
+      "role": "user",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "Find my notes about the migration and file a ticket."
+        }
+      ]
+    },
+    {
+      "type": "message",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "output_text",
+          "text": "I will search your notes first."
+        }
+      ]
+    },
+    {
+      "type": "function_call",
+      "name": "mcp__notes__search_notes",
+      "arguments": "{\"query\":\"migration\"}",
+      "call_id": "toolu_01A"
+    },
+    {
+      "type": "function_call_output",
+      "call_id": "toolu_01A",
+      "output": "Migration plan, draft 3"
+    },
+    {
+      "type": "message",
+      "role": "developer",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "\u003csystem-reminder\u003eThe tickets server just connected.\u003c/system-reminder\u003e"
+        }
+      ]
+    },
+    {
+      "type": "message",
+      "role": "user",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "Go ahead and file it."
+        }
+      ]
+    }
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "name": "Read",
+      "description": "Reads a file from the local filesystem.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "file_path": {
+            "type": "string",
+            "description": "Absolute path to the file"
+          }
+        },
+        "required": [
+          "file_path"
+        ]
+      }
+    },
+    {
+      "type": "function",
+      "name": "mcp__notes__search_notes",
+      "description": "Search the user's notes by keyword.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "Keywords to search for"
+          }
+        },
+        "required": [
+          "query"
+        ]
+      }
+    },
+    {
+      "type": "function",
+      "name": "mcp__tickets__create_ticket",
+      "description": "Create a ticket in the tracker.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string",
+            "description": "Ticket title"
+          },
+          "priority": {
+            "type": "string",
+            "enum": [
+              "low",
+              "normal",
+              "urgent"
+            ]
+          }
+        },
+        "required": [
+          "title"
+        ]
+      }
+    },
+    {
+      "type": "function",
+      "name": "mcp__tickets__comment",
+      "description": "Comment on a ticket.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "ticket_id": {
+            "type": "string"
+          },
+          "body": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "ticket_id",
+          "body"
+        ]
+      }
+    }
+  ],
+  "reasoning": {
+    "effort": "low"
+  },
+  "include": [
+    "reasoning.encrypted_content"
+  ],
+  "prompt_cache_key": "utq-2ad042d032a613d27824055e66912b45",
+  "store": false,
+  "stream": true
+}

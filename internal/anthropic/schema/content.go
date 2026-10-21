@@ -28,7 +28,84 @@ const (
 	BlockToolResult       = "tool_result"
 	BlockThinking         = "thinking"
 	BlockRedactedThinking = "redacted_thinking"
+	// BlockToolAddition and BlockToolRemoval are the mid-conversation tool
+	// change blocks (betas mid-conversation-tool-changes-2026-07-01 and
+	// inline-tools-2026-09-15). They ride in a role "system" message and carry
+	// a Tool target; see ToolTarget.
+	BlockToolAddition = "tool_addition"
+	BlockToolRemoval  = "tool_removal"
 )
+
+// Tool target types: what a tool_addition or tool_removal block points at.
+const (
+	// ToolTargetReference names a tool by name. For an addition the tool is
+	// already declared in the top-level tools array (typically with
+	// defer_loading) and is merely announced as available from here on.
+	ToolTargetReference = "tool_reference"
+	// ToolTargetDefinition carries the whole tool inline, so the tool exists
+	// only because of this block.
+	ToolTargetDefinition = "tool_definition"
+)
+
+// ToolTarget is the "tool" object of a tool_addition or tool_removal block:
+// {"type":"tool_reference","name":"..."} or
+// {"type":"tool_definition","definition":{"name":"...","input_schema":{...}}}.
+type ToolTarget struct {
+	Type       string `json:"type"`
+	Name       string `json:"name,omitempty"`
+	Definition *Tool  `json:"definition,omitempty"`
+}
+
+// AddedTools returns the tools that tool_addition blocks declare inline
+// (ToolTargetDefinition) across messages, in conversation order. A name that is
+// already in declared, or that an earlier block already added, is skipped, so
+// the first declaration wins and the top-level tools array is never
+// contradicted. References add nothing: the tool they name is declared
+// already. Removals add nothing either.
+func AddedTools(messages []Message, declared []Tool) []Tool {
+	seen := make(map[string]struct{}, len(declared))
+	for i := range declared {
+		seen[declared[i].Name] = struct{}{}
+	}
+	var added []Tool
+	for i := range messages {
+		if messages[i].Content == nil {
+			continue
+		}
+		for _, blk := range messages[i].Content.Blocks {
+			if blk.Type != BlockToolAddition || blk.Tool == nil ||
+				blk.Tool.Type != ToolTargetDefinition || blk.Tool.Definition == nil {
+				continue
+			}
+			def := *blk.Tool.Definition
+			if def.Name == "" {
+				continue
+			}
+			if _, dup := seen[def.Name]; dup {
+				continue
+			}
+			seen[def.Name] = struct{}{}
+			added = append(added, def)
+		}
+	}
+	return added
+}
+
+// CountToolRemovals reports how many tool_removal blocks messages carry.
+func CountToolRemovals(messages []Message) int {
+	n := 0
+	for i := range messages {
+		if messages[i].Content == nil {
+			continue
+		}
+		for _, blk := range messages[i].Content.Blocks {
+			if blk.Type == BlockToolRemoval {
+				n++
+			}
+		}
+	}
+	return n
+}
 
 // Stop reasons.
 const (
@@ -73,6 +150,9 @@ type ContentBlock struct {
 	ToolUseID string   `json:"tool_use_id,omitempty"`
 	Content   *Content `json:"content,omitempty"`
 	IsError   bool     `json:"is_error,omitempty"`
+
+	// Tool is the target of a tool_addition or tool_removal block.
+	Tool *ToolTarget `json:"tool,omitempty"`
 
 	CacheControl *CacheControl `json:"cache_control,omitempty"`
 }

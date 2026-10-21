@@ -26,7 +26,6 @@ import (
 	"github.com/hughescr/utraque/internal/router"
 	"github.com/hughescr/utraque/internal/sse"
 	"github.com/hughescr/utraque/internal/tokens"
-	"github.com/hughescr/utraque/internal/toolschema"
 	"github.com/hughescr/utraque/internal/transport"
 )
 
@@ -119,11 +118,14 @@ func (l *Leg) CountTokens(w http.ResponseWriter, r *http.Request, rq *router.Req
 	if rq == nil || rq.Dec.Backend != router.BackendDeepSeek || rq.Dec.UpstreamModel == "" {
 		return apierr.InvalidRequest("deepseek request has no resolved model")
 	}
-	if _, _, _, err := rewriteRequest(rq.Raw, rq.Dec.UpstreamModel, rq.Dec.Effort); err != nil {
+	// The estimate is of the body that would go upstream, so a tool hoisted out
+	// of a tool_addition block is counted as the declaration it becomes.
+	rewritten, _, err := rewriteRequest(rq.Raw, rq.Dec.UpstreamModel, rq.Dec.Effort)
+	if err != nil {
 		return err
 	}
 	var request aschema.CountTokensRequest
-	if err := json.Unmarshal(rq.Raw, &request); err != nil {
+	if err := json.Unmarshal(rewritten, &request); err != nil {
 		return apierr.Wrap(err, apierr.TypeInvalidRequest, "request body is not a valid count_tokens request")
 	}
 	body, err := json.Marshal(tokens.Count(l.estimator, &request))
@@ -155,7 +157,7 @@ func (l *Leg) forward(w http.ResponseWriter, r *http.Request, rq *router.Request
 	}
 	// The dispatcher has already read and size-limited the body into rq.Raw
 	// (this leg has no catch-all ServeHTTP, so there is no other way in).
-	body, report, appliedEffort, err := rewriteRequest(rq.Raw, rq.Dec.UpstreamModel, rq.Dec.Effort)
+	body, report, err := rewriteRequest(rq.Raw, rq.Dec.UpstreamModel, rq.Dec.Effort)
 	if err != nil {
 		return err
 	}
@@ -163,10 +165,10 @@ func (l *Leg) forward(w http.ResponseWriter, r *http.Request, rq *router.Request
 	// The effort sent beside the one asked for, as the Codex leg does. Absent
 	// when none went upstream, so a request that named no effort keeps the same
 	// line it always had.
-	if appliedEffort != "" {
-		obs.SummaryFrom(r.Context()).SetEffortApplied(appliedEffort)
+	if report.Effort != "" {
+		obs.SummaryFrom(r.Context()).SetEffortApplied(report.Effort)
 	}
-	l.logEffort(r.Context(), rq, appliedEffort)
+	l.logEffort(r.Context(), rq, report.Effort)
 
 	ctx, idle := relay.WithUpstreamIdleDeadline(r.Context(), l.upstreamIdle)
 	defer idle.Stop()
@@ -224,17 +226,23 @@ func (l *Leg) forward(w http.ResponseWriter, r *http.Request, rq *router.Request
 // logRewrite records, at DEBUG, what rewriteRequest changed in a tool schema:
 // the same rewritten_patterns and dropped_patterns attributes the codex leg
 // logs for its translation, so a tool that stopped enforcing a constraint can
-// be traced to the rewrite without re-deriving it. Requests whose schemas went
-// through untouched log nothing.
-func (l *Leg) logRewrite(ctx context.Context, rq *router.Request, report toolschema.Report) {
-	if report.Empty() {
-		return
-	}
+// be traced to the rewrite without re-deriving it. It also records the tools
+// hoisted out of tool_addition blocks and the removals dropped. Requests whose
+// tools went through untouched log nothing.
+func (l *Leg) logRewrite(ctx context.Context, rq *router.Request, report rewriteReport) {
 	if !l.log.Enabled(ctx, slog.LevelDebug) {
 		return
 	}
-	attrs := append([]slog.Attr{slog.String("upstream_model", rq.Dec.UpstreamModel)}, report.LogAttrs()...)
-	l.log.LogAttrs(ctx, slog.LevelDebug, "rewrote tool schema patterns for the deepseek backend", attrs...)
+	if !report.Patterns.Empty() {
+		attrs := append([]slog.Attr{slog.String("upstream_model", rq.Dec.UpstreamModel)}, report.Patterns.LogAttrs()...)
+		l.log.LogAttrs(ctx, slog.LevelDebug, "rewrote tool schema patterns for the deepseek backend", attrs...)
+	}
+	if len(report.InlineToolsHoisted) > 0 || report.ToolRemovalsDropped > 0 {
+		l.log.LogAttrs(ctx, slog.LevelDebug, "rewrote tool_addition and tool_removal blocks for the deepseek backend",
+			slog.String("upstream_model", rq.Dec.UpstreamModel),
+			slog.Any("inline_tools_hoisted", report.InlineToolsHoisted),
+			slog.Int("tool_removals_dropped", report.ToolRemovalsDropped))
+	}
 }
 
 // logEffort records, at DEBUG, the effort the request named, where it came
