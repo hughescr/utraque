@@ -119,7 +119,7 @@ func (l *Leg) CountTokens(w http.ResponseWriter, r *http.Request, rq *router.Req
 	if rq == nil || rq.Dec.Backend != router.BackendDeepSeek || rq.Dec.UpstreamModel == "" {
 		return apierr.InvalidRequest("deepseek request has no resolved model")
 	}
-	if _, _, err := rewriteRequest(rq.Raw, rq.Dec.UpstreamModel); err != nil {
+	if _, _, _, err := rewriteRequest(rq.Raw, rq.Dec.UpstreamModel, rq.Dec.Effort); err != nil {
 		return err
 	}
 	var request aschema.CountTokensRequest
@@ -155,11 +155,18 @@ func (l *Leg) forward(w http.ResponseWriter, r *http.Request, rq *router.Request
 	}
 	// The dispatcher has already read and size-limited the body into rq.Raw
 	// (this leg has no catch-all ServeHTTP, so there is no other way in).
-	body, report, err := rewriteRequest(rq.Raw, rq.Dec.UpstreamModel)
+	body, report, appliedEffort, err := rewriteRequest(rq.Raw, rq.Dec.UpstreamModel, rq.Dec.Effort)
 	if err != nil {
 		return err
 	}
 	l.logRewrite(r.Context(), rq, report)
+	// The effort sent beside the one asked for, as the Codex leg does. Absent
+	// when none went upstream, so a request that named no effort keeps the same
+	// line it always had.
+	if appliedEffort != "" {
+		obs.SummaryFrom(r.Context()).SetEffortApplied(appliedEffort)
+	}
+	l.logEffort(r.Context(), rq, appliedEffort)
 
 	ctx, idle := relay.WithUpstreamIdleDeadline(r.Context(), l.upstreamIdle)
 	defer idle.Stop()
@@ -228,6 +235,22 @@ func (l *Leg) logRewrite(ctx context.Context, rq *router.Request, report toolsch
 	}
 	attrs := append([]slog.Attr{slog.String("upstream_model", rq.Dec.UpstreamModel)}, report.LogAttrs()...)
 	l.log.LogAttrs(ctx, slog.LevelDebug, "rewrote tool schema patterns for the deepseek backend", attrs...)
+}
+
+// logEffort records, at DEBUG, the effort the request named, where it came
+// from, and what DeepSeek was sent (see deepseekEffort), so a "medium" that
+// DeepSeek ran as "high" is visible without re-deriving the table.
+func (l *Leg) logEffort(ctx context.Context, rq *router.Request, applied string) {
+	if !l.log.Enabled(ctx, slog.LevelDebug) {
+		return
+	}
+	l.log.LogAttrs(ctx, slog.LevelDebug, "deepseek reasoning effort resolved",
+		slog.String("upstream_model", rq.Dec.UpstreamModel),
+		slog.String("effort_requested", rq.Dec.Effort.String()),
+		slog.String("effort_applied", applied),
+		slog.String("effort_source", rq.Dec.EffortSource.LogName()),
+		slog.Bool("effort_mapped", applied != rq.Dec.Effort.String()),
+	)
 }
 
 func (l *Leg) jsonResponse(w http.ResponseWriter, r *http.Request, idle *relay.UpstreamIdleGuard, resp *http.Response, canonical string, rewriteModel bool) error {

@@ -30,6 +30,7 @@ type Summary struct {
 	upstreamModel   string
 	effortRequested string
 	effortApplied   string
+	effortSource    string
 	transport       string
 	stopReason      string
 	err             string
@@ -100,16 +101,26 @@ func (s *Summary) SetModels(client, upstream string) {
 }
 
 // SetEffortRequested records the reasoning effort the client asked for: the
-// "-<level>" suffix on the model name, and nothing else — the router parses
-// only the suffix, so an empty value means the name carried none, NOT that a
-// default was resolved (the anthropic-beta, config and catalog fallbacks are
-// applied later, by the Codex translator, and show up in effort_applied). The
+// "-<level>" suffix on the model name, else the request body's
+// output_config.effort — and nothing else. An empty value means the client
+// named none, NOT that a default was resolved (the anthropic-beta, config and
+// catalog fallbacks are applied later, by the Codex translator, and show up in
+// effort_applied). The
 // router sets it right after routing, in cmd/utraque/main.go's dispatch, so
 // it is on the line for every routed request whichever leg served it, empty
 // value included; only a request that never routed (a /healthz poll) lacks
 // it. It is logged as effort_requested.
 func (s *Summary) SetEffortRequested(effort string) {
 	s.set(func() { s.effortRequested, s.haveEffortRequested = effort, true })
+}
+
+// SetEffortSource records where effort_requested came from: "suffix" (the
+// model name carried one), "body" (the request body's output_config.effort),
+// or "default" (the client named none, so the leg's own default applies). The
+// dispatcher sets it beside effort_requested, so it is on the line for every
+// routed request. It is logged as effort_source.
+func (s *Summary) SetEffortSource(source string) {
+	s.set(func() { s.effortSource = source })
 }
 
 // SetEffortApplied records the reasoning effort actually sent upstream, after
@@ -238,6 +249,7 @@ func (s *Summary) Attrs() []slog.Attr {
 	if s.haveEffortRequested {
 		attrs = append(attrs, slog.String("effort_requested", s.effortRequested))
 	}
+	str("effort_source", s.effortSource)
 	if s.haveEffortApplied {
 		attrs = append(attrs, slog.String("effort_applied", s.effortApplied))
 	}

@@ -282,6 +282,28 @@ version pin (`sol-6.1`), an effort suffix (`sol-high`, `sol-6.1-ultra`), or the
 raw upstream slug (`gpt-6.1-sol`). Effort composes with any of them and is
 clamped to what that model actually supports.
 
+**Where the effort comes from.** An explicit suffix wins. Without one, utraque
+reads the `output_config.effort` Claude Code puts in the request body (`low`,
+`medium`, `high`, `xhigh` or `max`), so an agent file can name a bare `sol`,
+`astra`, `luna`, `deepseek-flash` or `deepseek-v4-pro` and still get the effort
+its `effort:` line (or `/effort`) chose. Without either, the leg's default
+applies (the catalog's `default_reasoning_level` on Codex; DeepSeek's own
+default, `high`). The precedence is suffix, then body, then default, and the
+request line's `effort_source` says which one won. A body effort utraque does not
+recognise is ignored. The Anthropic leg forwards the body untouched, so Claude
+sees `output_config` exactly as Claude Code wrote it.
+
+On the Codex leg the chosen level is clamped to what the model's live catalog
+lists: a level the model lacks drops to the nearest one below it (`max` on a
+model that tops out at `xhigh` is sent as `xhigh`), or rises to the lowest one if
+the request sits below all of them. If the catalog is unreachable the level is
+sent as asked. On the DeepSeek leg the endpoint takes only `low`, `high` and
+`max` in `output_config.effort`
+([thinking mode](https://api-docs.deepseek.com/guides/thinking_mode)), and
+utraque applies DeepSeek's documented folding itself: `low` runs `low`;
+`medium`, `high` and `xhigh` run `high`; `max` and `ultra` run `max`. A DeepSeek
+model name takes no effort suffix, so the body is its only explicit source.
+
 **3. The `/model` picker** — *not available if you took the required context
 window fix, and you should.* The two settings are mutually exclusive. Claude
 Code gates gateway discovery on four conditions, and the third is the same
@@ -571,7 +593,7 @@ One structured line per request (`msg` = `request`), on stderr (launchd
 captures it), carrying `request_id`, `method`, `path`, `status`, `req_bytes`,
 `resp_bytes`, `ttfb_ms`, `total_ms`, `route` (`anthropic`, `codex`,
 `deepseek`, or `discovery`), `client_model`, `upstream_model`,
-`effort_requested`, `effort_applied`, `stream`, `upstream_status`,
+`effort_requested`, `effort_source`, `effort_applied`, `stream`, `upstream_status`,
 `output_tokens`, `input_tokens`, `cache_read_input_tokens`,
 `cache_creation_input_tokens`, `estimated_input_tokens`, `stop_reason`,
 `interrupted`, `transport`, `err` when there was one, and a `headers` group
@@ -580,25 +602,32 @@ holding the four allowlisted request headers by value and, under
 *Redaction* below).
 
 `effort_requested` is the reasoning effort the client asked for: the
-`-<level>` suffix on the model name, and nothing else. The router parses only
-the suffix, so a name without one logs an EMPTY `effort_requested` — the key is
-present on every routed request, Anthropic and DeepSeek included, and an empty
-value means "the client asked for none", never a default the router resolved
-(the `anthropic-beta`, config and catalog fallbacks are applied later, by the
-Codex translator, and show up in `effort_applied`). Only a request that never
-routed, such as a `/healthz` poll, lacks the key. `effort_applied` is the
-effort actually sent upstream after those fallbacks and the catalog clamp; only
-the Codex leg knows it, so it is absent on Anthropic and DeepSeek lines and on
-a Codex request that failed before translation, and once known it is emitted
-even when empty (a translation that sent no reasoning effort at all). So an
-unsuffixed `sol` request reads `effort_requested="" effort_applied="low"` when
-the catalog default is `low`. (Both replaced a single `effort` field that meant
+`-<level>` suffix on the model name or, failing that, the request body's
+`output_config.effort`, and nothing else. A request that names neither logs an
+EMPTY `effort_requested` — the key is present on every routed request,
+Anthropic and DeepSeek included, and an empty value means "the client asked
+for none", never a default the router resolved (the `anthropic-beta`, config
+and catalog fallbacks are applied later, by the Codex translator, and show up in
+`effort_applied`). `effort_source` says which of those it was: `suffix`,
+`body`, or `default` (nothing named an effort; also what every Anthropic line
+reads, because that leg forwards the body untouched). Only a request that never
+routed, such as a `/healthz` poll, lacks the keys. `effort_applied` is the
+effort actually sent upstream after those fallbacks and the clamp (Codex: the
+catalog clamp; DeepSeek: the `low`/`high`/`max` folding). It is absent on
+Anthropic lines, on a DeepSeek line whose request named no effort, and on a
+Codex request that failed before translation, and once known it is emitted even
+when empty (a Codex translation that sent no reasoning effort at all). So an
+unsuffixed `sol` request reads `effort_requested="" effort_source=default
+effort_applied="low"` when the catalog default is `low`, and the same request
+with `output_config.effort` of `xhigh` on a model that lacks it reads
+`effort_requested=xhigh effort_source=body effort_applied=high`. (Both replaced a single `effort` field that meant
 the requested value before translation and the applied value after it.)
 
 At DEBUG the dispatcher also writes a `routed` record carrying `route`,
-`client_model`, `upstream_model`, `effort_requested` (the suffix value, empty
-when the name had none), `effort_source` (`suffix` when a suffix was parsed,
-otherwise `""` — the router never resolves the other sources) and `stream`.
+`client_model`, `upstream_model`, `effort_requested` (the suffix or body value,
+empty when the request named none), `effort_source` (`suffix` or `body` when the
+request named an effort, otherwise `""` — the router never resolves the other
+sources) and `stream`.
 (`route` was `backend`, and `effort_requested` was `effort`, before the
 log-schema change that aligned the record with the request line.) The Codex
 leg's own DEBUG records are listed under *Prompt caching* (the translation
@@ -701,9 +730,9 @@ carrying `upstream_model`, `effort_requested`, `effort_applied`, `started`,
 `codex_stream` block uses. (Before the log-schema change `unknown_events` was
 the map, and the record carried no effort.) On this record and the translation
 record, `effort_requested` is the level the translator chose by precedence
-(suffix, then `anthropic-beta`, config and the catalog default) before
-clamping, so it equals the request line's suffix value whenever there was a
-suffix and names the fallback otherwise; `effort_applied` is the level sent,
+(suffix, then body, then `anthropic-beta`, config and the catalog default)
+before clamping, so it equals the request line's `effort_requested` whenever the
+request named an effort and names the fallback otherwise; `effort_applied` is the level sent,
 the same value the request line carries. Both are always present on the
 stream record, empty when the translation sent no effort. A Codex call that
 fails before its response starts is logged with `class` (`auth`, `rate_limit`,

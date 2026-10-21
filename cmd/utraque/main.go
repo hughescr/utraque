@@ -1148,6 +1148,22 @@ type dispatcher struct {
 type peeked struct {
 	Model  string `json:"model"`
 	Stream bool   `json:"stream"`
+	// OutputConfig is kept raw so a malformed one (the client sent a string, or
+	// an effort that is not a string) can never fail the whole peek: the effort
+	// is optional, and a request that merely carries a strange one still routes.
+	OutputConfig json.RawMessage `json:"output_config"`
+}
+
+// bodyEffort returns the request body's output_config.effort token, or "" when
+// output_config is absent, is not an object, or carries no string effort.
+func (p peeked) bodyEffort() string {
+	var oc struct {
+		Effort string `json:"effort"`
+	}
+	if len(p.OutputConfig) == 0 || json.Unmarshal(p.OutputConfig, &oc) != nil {
+		return ""
+	}
+	return oc.Effort
 }
 
 // legCall selects which router.Leg method a dispatched request invokes, so the
@@ -1193,6 +1209,10 @@ func (d *dispatcher) dispatch(w http.ResponseWriter, r *http.Request, call legCa
 		_ = apierr.Write(w, err)
 		return
 	}
+	// Claude Code carries the effort it chose in the body (output_config.effort),
+	// so an agent file can name a bare model and still get its effort. An explicit
+	// model-name suffix keeps precedence; the Anthropic leg is left alone.
+	dec = dec.WithBodyEffort(p.bodyEffort())
 
 	// The routing decision is the half of the request line only the dispatcher
 	// knows. It goes onto the shared summary rather than a log line of its own,
@@ -1203,6 +1223,7 @@ func (d *dispatcher) dispatch(w http.ResponseWriter, r *http.Request, call legCa
 	sum.SetRoute(dec.Backend.String())
 	sum.SetModels(dec.ClientModel, dec.UpstreamModel)
 	sum.SetEffortRequested(dec.Effort.String())
+	sum.SetEffortSource(dec.EffortSource.LogName())
 	sum.SetStream(p.Stream)
 	// The dispatcher read the body, so it knows its real size — better than the
 	// declared Content-Length the middleware had to settle for.

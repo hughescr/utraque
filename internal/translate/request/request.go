@@ -76,8 +76,8 @@ const (
 	DroppedMaxTokens     = "max_tokens"
 	DroppedStopSequences = "stop_sequences"
 	// DroppedThinking records that the client's thinking config (budget_tokens)
-	// was discarded. Reasoning effort is resolved by precedence (suffix > beta >
-	// config > catalog), never from the Anthropic thinking budget, so the budget
+	// was discarded. Reasoning effort is resolved by precedence (suffix > body >
+	// beta > config > catalog), never from the Anthropic thinking budget, so the budget
 	// has no effect — but the package's contract is that every drop is recorded.
 	DroppedThinking = "thinking"
 )
@@ -630,7 +630,7 @@ func disableParallel(tools []aschema.Tool, mutating map[string]bool) (bool, []st
 }
 
 // translateReasoning resolves the reasoning block: the effort by precedence
-// (suffix > anthropic-beta > config > catalog default), clamped to the model's
+// (suffix > body > anthropic-beta > config > catalog default), clamped to the model's
 // supported levels, and the summary (config override else catalog default,
 // with SummaryNone meaning omit). It returns nil reasoning only when there is no
 // effort and no summary to send.
@@ -656,13 +656,15 @@ func translateReasoning(dec router.Decision, model cschema.CatalogModel, opts Op
 
 // chooseEffort applies the effort precedence and returns the chosen level and
 // its provenance, before any clamping. A model-name suffix (already parsed by
-// the router into the Decision) wins; then the anthropic-beta signal; then the
+// the router into the Decision) wins; then the request body's
+// output_config.effort (which the dispatcher folded into the Decision, see
+// router.Decision.WithBodyEffort); then the anthropic-beta signal; then the
 // per-model config override; then the catalog default. The catalog default is
 // a raw token converted here, at the boundary: it need not be a level effort
 // recognises, and clampEffort tolerates one that is not.
 func chooseEffort(dec router.Decision, model cschema.CatalogModel, opts Options) (effort.Level, effort.Source) {
-	if dec.EffortSource == effort.SourceSuffix && dec.Effort != "" {
-		return dec.Effort, effort.SourceSuffix
+	if dec.Effort != "" && (dec.EffortSource == effort.SourceSuffix || dec.EffortSource == effort.SourceBody) {
+		return dec.Effort, dec.EffortSource
 	}
 	if opts.BetaEffort != "" {
 		return opts.BetaEffort, effort.SourceBeta

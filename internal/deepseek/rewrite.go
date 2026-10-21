@@ -9,35 +9,100 @@ import (
 	"github.com/hughescr/utraque/internal/anthropic/schema"
 	"github.com/hughescr/utraque/internal/apierr"
 	"github.com/hughescr/utraque/internal/deepseek/models"
+	"github.com/hughescr/utraque/internal/effort"
 	"github.com/hughescr/utraque/internal/sse"
 	"github.com/hughescr/utraque/internal/toolschema"
 )
 
 const toolErrorMarker = "[tool error]"
 
+// deepseekEffort maps an effort level to the value DeepSeek's Anthropic-compatible
+// endpoint takes in output_config.effort. DeepSeek documents three levels
+// (low, high, max) and a server-side table folding the rest onto them
+// (https://api-docs.deepseek.com/guides/thinking_mode): minimal and low run low;
+// medium, high and xhigh run high; max and ultra run max. utraque applies the
+// same table itself, so the value on the wire is always one of the three and
+// does not depend on DeepSeek keeping that table.
+func deepseekEffort(l effort.Level) string {
+	switch l {
+	case effort.Low:
+		return "low"
+	case effort.Medium, effort.High, effort.XHigh:
+		return "high"
+	case effort.Max, effort.Ultra:
+		return "max"
+	default:
+		return ""
+	}
+}
+
+// rewriteEffort makes obj's output_config.effort the DeepSeek spelling of the
+// level the dispatcher resolved. requested is the Decision's effort, which the
+// dispatcher already parsed from the body, so a body effort utraque does not
+// recognise arrives here as "" and is removed rather than forwarded for
+// DeepSeek to reject or silently ignore. An output_config left empty by that is
+// dropped. It returns the level applied ("" when none was sent).
+func rewriteEffort(obj map[string]json.RawMessage, requested effort.Level) (string, error) {
+	applied := deepseekEffort(requested)
+	var oc map[string]json.RawMessage
+	if raw := obj["output_config"]; present(raw) {
+		// rejectUnsupportedFields already proved this is an object.
+		if err := json.Unmarshal(raw, &oc); err != nil || oc == nil {
+			return "", apierr.InvalidRequest("deepseek output_config must be an object")
+		}
+	}
+	if applied == "" {
+		if oc != nil {
+			delete(oc, "effort")
+		}
+	} else {
+		if oc == nil {
+			oc = map[string]json.RawMessage{}
+		}
+		oc["effort"], _ = json.Marshal(applied)
+	}
+	switch {
+	case oc == nil:
+	case len(oc) == 0:
+		delete(obj, "output_config")
+	default:
+		encoded, err := json.Marshal(oc)
+		if err != nil {
+			return "", apierr.Wrap(err, apierr.TypeInvalidRequest, "encode deepseek output_config")
+		}
+		obj["output_config"] = encoded
+	}
+	return applied, nil
+}
+
 // rewriteRequest rewrites one request body for DeepSeek and reports, as a
 // toolschema.Report, what rewriteContent (via rewriteTools) changed in the
 // tool schemas, so the leg can log it the way the codex leg logs its
-// translation metadata.
-func rewriteRequest(raw []byte, canonical string) ([]byte, toolschema.Report, error) {
+// translation metadata. It also returns the effort sent upstream (see
+// rewriteEffort); requested is the Decision's effort.
+func rewriteRequest(raw []byte, canonical string, requested effort.Level) ([]byte, toolschema.Report, string, error) {
 	var report toolschema.Report
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &obj); err != nil || obj == nil {
-		return nil, report, apierr.InvalidRequest("deepseek request body must be a JSON object")
+		return nil, report, "", apierr.InvalidRequest("deepseek request body must be a JSON object")
 	}
 	if err := rejectUnsupportedFields(obj); err != nil {
-		return nil, report, err
+		return nil, report, "", err
 	}
 	if err := rewriteContent(obj, canonical, &report); err != nil {
-		return nil, report, err
+		return nil, report, "", err
+	}
+	applied, err := rewriteEffort(obj, requested)
+	if err != nil {
+		return nil, report, "", err
 	}
 	model, _ := json.Marshal(canonical)
 	obj["model"] = model
 	out, err := json.Marshal(obj)
 	if err != nil {
-		return nil, report, apierr.Wrap(err, apierr.TypeInvalidRequest, "encode deepseek request")
+		return nil, report, "", apierr.Wrap(err, apierr.TypeInvalidRequest, "encode deepseek request")
 	}
-	return out, report, nil
+	return out, report, applied, nil
 }
 
 // rejectUnsupportedFields returns an invalid-request error for any Anthropic

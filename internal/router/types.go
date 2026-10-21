@@ -65,11 +65,12 @@ const (
 
 // Effort provenance, highest precedence first. A Decision records which of
 // these supplied its Effort so the request translator can apply the
-// precedence order (suffix > anthropic-beta > config > catalog) without
+// precedence order (suffix > body > anthropic-beta > config > catalog) without
 // re-deriving it. The values are effort.Source; these names are kept so
 // existing call sites read as before.
 const (
 	EffortSourceSuffix  = effort.SourceSuffix
+	EffortSourceBody    = effort.SourceBody
 	EffortSourceBeta    = effort.SourceBeta
 	EffortSourceConfig  = effort.SourceConfig
 	EffortSourceCatalog = effort.SourceCatalog
@@ -85,14 +86,38 @@ const (
 // forwards that untouched. It is the single copy of the caller's model string
 // on a Request. UpstreamModel is the slug the Codex leg should ask for, and is
 // empty for the Anthropic backend, which does not rewrite the model. Effort is
-// the reasoning-effort level a model-name suffix asked for, if any, and
-// EffortSource says where it came from.
+// the reasoning-effort level the client asked for, if any — a model-name
+// suffix, else the request body's output_config.effort (see WithBodyEffort) —
+// and EffortSource says which.
 type Decision struct {
 	Backend       Backend
 	UpstreamModel string
 	ClientModel   string
 	Effort        effort.Level
 	EffortSource  effort.Source
+}
+
+// WithBodyEffort folds the request body's output_config.effort into the
+// Decision, at the precedence below an explicit model-name suffix: it applies
+// only when no suffix supplied an effort, only to the backends that translate
+// effort themselves (Codex and DeepSeek — the Anthropic leg forwards the body
+// untouched, so Claude's own handling of output_config is never second-guessed),
+// and only when raw names a level effort.Parse recognises. Anything else
+// returns d unchanged.
+func (d Decision) WithBodyEffort(raw string) Decision {
+	if d.Backend != BackendCodex && d.Backend != BackendDeepSeek {
+		return d
+	}
+	if d.EffortSource == EffortSourceSuffix && d.Effort != "" {
+		return d
+	}
+	level, ok := effort.Parse(raw)
+	if !ok {
+		return d
+	}
+	d.Effort = level
+	d.EffortSource = EffortSourceBody
+	return d
 }
 
 // Request is one dispatched call: the raw body already read by the front
