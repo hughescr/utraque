@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
-# Configure this checkout to use its version-controlled hooks without silently
-# replacing another hook setup.
+# Configure this repository to use its version-controlled hooks without
+# silently replacing another hook setup.
 
 set -euo pipefail
 
@@ -17,7 +17,16 @@ git_root=$(git -C "$repo" rev-parse --show-toplevel 2>/dev/null) || die "not ins
 [ "$git_root" = "$repo" ] || die "script directory does not match Git root: $git_root"
 [ -x "$repo/.githooks/pre-push" ] || die "missing executable hook: $repo/.githooks/pre-push"
 
-if configured=$(git -C "$repo" config --get core.hooksPath 2>/dev/null); then
+set +e
+configured_output=$(git -C "$repo" config --get core.hooksPath 2>&1)
+config_rc=$?
+set -e
+case "$config_rc" in
+	0) configured="$configured_output" ;;
+	1) configured="" ;;
+	*) die "could not read core.hooksPath: $configured_output" ;;
+esac
+if [ "$config_rc" -eq 0 ]; then
 	case "$configured" in
 		.githooks|"$repo/.githooks")
 			printf '%s\n' 'Git hooks already use .githooks; no change needed.'
@@ -28,6 +37,19 @@ if configured=$(git -C "$repo" config --get core.hooksPath 2>/dev/null); then
 			die "core.hooksPath is already configured ($origin); left it unchanged"
 			;;
 	esac
+fi
+
+worktrees=$(git -C "$repo" worktree list --porcelain) || die "could not list repository worktrees"
+worktree_count=0
+while IFS= read -r line; do
+	case "$line" in
+		worktree\ *) worktree_count=$((worktree_count + 1)) ;;
+	esac
+done <<EOF
+$worktrees
+EOF
+if [ "$worktree_count" -gt 1 ]; then
+	die "core.hooksPath is repository-local and would affect all $worktree_count linked worktrees; left it unchanged so you can integrate their hooks manually"
 fi
 
 hooks_dir=$(git -C "$repo" rev-parse --git-path hooks)
@@ -48,4 +70,4 @@ done
 [ -z "$conflicts" ] || die "executable hooks already exist in $hooks_dir ($conflicts); left them and core.hooksPath unchanged"
 
 git -C "$repo" config --local core.hooksPath .githooks
-printf '%s\n' 'Configured this checkout to use .githooks.'
+printf '%s\n' 'Configured this repository to use .githooks.'

@@ -1445,10 +1445,12 @@ and native-cgo race suites, checks every deployment and project shell script,
 and exercises the pre-push hook against disposable local repositories. Use
 `./scripts/validate.sh go` or `./scripts/validate.sh shell` for one partition.
 
-Run `./scripts/install-hooks.sh` once per checkout to enable the
+Run `./scripts/install-hooks.sh` once per repository to enable the
 version-controlled pre-push hook. The installer leaves an existing hooks path
-or executable `.git/hooks` setup untouched. The hook requires a clean checkout
-whose pushed updates resolve to `HEAD`; deletion-only pushes remain available.
+or executable `.git/hooks` setup untouched. Because `core.hooksPath` is shared
+by linked worktrees, the installer refuses that setup and leaves manual hook
+integration to you. The hook requires a clean checkout whose pushed updates
+resolve to `HEAD`; deletion-only pushes remain available.
 
 **The default suite contacts nothing.** Every upstream in it is an
 `httptest` server and every credential is a throwaway written under

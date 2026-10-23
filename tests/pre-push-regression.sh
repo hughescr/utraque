@@ -6,12 +6,14 @@
 
 set -euo pipefail
 
-unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR
-unset GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0
+root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+git_local_env=$(git -C "$root" rev-parse --local-env-vars)
+for variable in $git_local_env; do
+	unset "$variable"
+done
 export GIT_CONFIG_NOSYSTEM=1
 export GIT_CONFIG_GLOBAL=/dev/null
 
-root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 tmp_root=$(mktemp -d "${TMPDIR:-/tmp}/utraque-pre-push.XXXXXX") || exit 1
 trap 'rm -rf "$tmp_root"' EXIT HUP INT TERM
 mkdir -p "$tmp_root/git-template"
@@ -472,6 +474,46 @@ EOF
 	[ "$rc" -ne 0 ] || fail "installer replaced a global core.hooksPath"
 	[ -z "$(git -C "$global_conflict" config --local --get core.hooksPath 2>/dev/null)" ] || fail "installer added local hooksPath over a global conflict"
 	[ "$(GIT_CONFIG_GLOBAL="$global_config" git config --global --get core.hooksPath)" = global-hooks ] || fail "installer changed the global core.hooksPath"
+
+	read_error="$tmp_root/install-read-error"
+	git_shim="$tmp_root/git-shim"
+	real_git=$(command -v git) || fail "test host lacks git"
+	init_installer_fixture "$read_error"
+	mkdir -p "$git_shim"
+	cat >"$git_shim/git" <<'EOF'
+#!/bin/sh
+case "$*" in
+	*' config --get core.hooksPath')
+		printf '%s\n' 'simulated core.hooksPath read failure' >&2
+		exit 2
+		;;
+esac
+exec "$REAL_GIT" "$@"
+EOF
+	chmod +x "$git_shim/git"
+	set +e
+	(cd "$read_error" && REAL_GIT="$real_git" PATH="$git_shim:$PATH" scripts/install-hooks.sh) >"$log" 2>&1
+	rc=$?
+	set -e
+	[ "$rc" -ne 0 ] || fail "installer treated a core.hooksPath read failure as an absent setting"
+	grep -q 'simulated core.hooksPath read failure' "$log" || fail "installer discarded the Git config diagnostic"
+	[ -z "$(git -C "$read_error" config --local --get core.hooksPath 2>/dev/null)" ] || fail "installer mutated hooksPath after a config read failure"
+
+	linked="$tmp_root/install-linked"
+	linked_other="$tmp_root/install-linked-other"
+	init_installer_fixture "$linked"
+	git -C "$linked" config user.name "Utraque Hook Test"
+	git -C "$linked" config user.email "hook-test@example.invalid"
+	git -C "$linked" add .githooks scripts
+	git -C "$linked" commit -m "linked installer fixture" >/dev/null
+	git -C "$linked" worktree add -b linked-installer-test "$linked_other" HEAD >/dev/null
+	set +e
+	(cd "$linked" && scripts/install-hooks.sh) >"$log" 2>&1
+	rc=$?
+	set -e
+	[ "$rc" -ne 0 ] || fail "installer configured repository-local hooksPath with a linked worktree"
+	grep -q 'linked worktrees' "$log" || fail "linked-worktree refusal did not explain the repository-wide effect"
+	[ -z "$(git -C "$linked" config --local --get core.hooksPath 2>/dev/null)" ] || fail "installer mutated hooksPath with linked worktrees present"
 
 	pass "hook installer is idempotent and preserves existing hook choices"
 }

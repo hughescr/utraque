@@ -43,18 +43,20 @@ under `deploy`, `scripts`, and `tests`, plus every file under `.githooks`; it
 runs `bash -n` separately on each file before ShellCheck. The `hooks` group
 exercises real pushes against disposable local repositories and bare remotes.
 
-To enable the version-controlled pre-push hook in this checkout, run:
+To enable the version-controlled pre-push hook in this repository, run:
 
 ```sh
 ./scripts/install-hooks.sh
 ```
 
 The installer refuses to replace another configured hooks path or any
-executable hook already present under `.git/hooks`. The hook accepts only a
-clean, fully tracked checkout of `HEAD`, then runs the complete validator before
-Git updates the remote. Check `git status` yourself before running the validator
-directly; the clean-HEAD rule is enforced by the pre-push hook, not by
-`validate.sh`.
+executable hook already present under `.git/hooks`. `core.hooksPath` is stored
+in the repository's shared config, so the installer also refuses a repository
+with linked worktrees; integrate those worktrees' hooks manually instead. The
+hook accepts only a clean, fully tracked checkout of `HEAD`, then runs the
+complete validator before Git updates the remote. Check `git status` yourself
+before running the validator directly; the clean-HEAD rule is enforced by the
+pre-push hook, not by `validate.sh`.
 
 ## The test suite contacts nothing
 
