@@ -91,19 +91,19 @@ while [ $# -gt 0 ]; do
 		--local-token-file) local_token_file="${2:-}"; shift 2 ;;
 		--codex-home)  codex_home="${2:-}"; shift 2 ;;
 		--deepseek-api-key-file)
-			[ $# -ge 2 ] && [ -n "$2" ] || die "--deepseek-api-key-file requires a path"
+			if [ $# -lt 2 ] || [ -z "$2" ]; then die "--deepseek-api-key-file requires a path"; fi
 			deepseek_api_key_file="$2"; shift 2 ;;
 		--ccusage-runner)
-			[ $# -ge 2 ] && [ -n "$2" ] || die "--ccusage-runner requires a path or command name"
+			if [ $# -lt 2 ] || [ -z "$2" ]; then die "--ccusage-runner requires a path or command name"; fi
 			ccusage_runner="$2"; shift 2 ;;
 		--ccusage-executable)
-			[ $# -ge 2 ] && [ -n "$2" ] || die "--ccusage-executable requires a path or command name"
+			if [ $# -lt 2 ] || [ -z "$2" ]; then die "--ccusage-executable requires a path or command name"; fi
 			ccusage_executable="$2"; shift 2 ;;
 		--codex-executable)
-			[ $# -ge 2 ] && [ -n "$2" ] || die "--codex-executable requires a path or command name"
+			if [ $# -lt 2 ] || [ -z "$2" ]; then die "--codex-executable requires a path or command name"; fi
 			codex_executable="$2"; shift 2 ;;
 		--path)
-			[ $# -ge 2 ] && [ -n "$2" ] || die "--path requires a value"
+			if [ $# -lt 2 ] || [ -z "$2" ]; then die "--path requires a value"; fi
 			service_path="$2"; shift 2 ;;
 		--log-level)   log_level="${2:-}"; shift 2 ;;
 		--log-format)  log_format="${2:-}"; shift 2 ;;
@@ -147,7 +147,7 @@ resolve_executable() {
 			resolved=$(command -v "$value" 2>/dev/null) || die "cannot find $2 executable: $value"
 			resolved=$(absolute_path "$resolved" "$2") ;;
 	esac
-	[ -f "$resolved" ] && [ -x "$resolved" ] || die "not an executable file for $2: $resolved"
+	if [ ! -f "$resolved" ] || [ ! -x "$resolved" ]; then die "not an executable file for $2: $resolved"; fi
 	printf '%s\n' "$resolved"
 }
 

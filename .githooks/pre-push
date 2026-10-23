@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+repo=$(git rev-parse --show-toplevel) || {
+	printf '%s\n' 'pre-push: cannot determine repository root' >&2
+	exit 1
+}
+head_oid=$(git -C "$repo" rev-parse --verify HEAD) || {
+	printf '%s\n' 'pre-push: cannot resolve HEAD' >&2
+	exit 1
+}
+
+has_update=0
+while read -r local_ref local_oid remote_ref _remote_oid; do
+	# Git represents a deletion with an all-zero local object ID. It has no
+	# source tree to validate, so deletion-only pushes remain usable.
+	case "$local_oid" in
+		''|*[!0]*) ;;
+		*) continue ;;
+	esac
+	has_update=1
+	peeled=$(git -C "$repo" rev-parse --verify "${local_oid}^{commit}" 2>/dev/null) || {
+		printf 'pre-push: %s does not resolve to a commit\n' "$local_ref" >&2
+		exit 1
+	}
+	if [ "$peeled" != "$head_oid" ]; then
+		printf 'pre-push: %s -> %s resolves to %s, not HEAD %s; push only the checked-out HEAD\n' \
+			"$local_ref" "$remote_ref" "$peeled" "$head_oid" >&2
+		exit 1
+	fi
+done
+
+[ "$has_update" -eq 1 ] || exit 0
+
+if ! git -C "$repo" diff --quiet --ignore-submodules=none || \
+	! git -C "$repo" diff --cached --quiet --ignore-submodules=none; then
+	printf '%s\n' 'pre-push: tracked working-tree or index changes are present; commit or remove them before pushing' >&2
+	exit 1
+fi
+untracked=$(git -C "$repo" ls-files --others --exclude-standard)
+if [ -n "$untracked" ]; then
+	printf '%s\n' 'pre-push: untracked files are present; commit, ignore, or remove them before pushing' >&2
+	printf '%s\n' "$untracked" >&2
+	exit 1
+fi
+
+exec "$repo/scripts/validate.sh"

@@ -16,16 +16,45 @@ go test ./...
 Go 1.27. On macOS, the launchd path also needs cgo (the default) and the Xcode
 Command Line Tools.
 
+The complete validator also needs Git, Bash, and ShellCheck. Install ShellCheck
+with `brew install shellcheck` on macOS or
+`sudo apt-get install shellcheck` on Ubuntu. Race-enabled cgo builds require a
+native C toolchain: Xcode Command Line Tools on macOS or `build-essential` on
+Ubuntu.
+
 ## Before opening a pull request
 
 ```sh
-gofmt -l ./cmd ./internal     # must print nothing
-go vet ./...
-go test -race ./...
+./scripts/validate.sh
 ```
 
-CI runs exactly these on macOS and Linux, plus `shellcheck` over the deploy
-scripts. If you touch `deploy/*.sh`, run `shellcheck` locally too.
+The script locates the repository from its own path, so it works from any
+directory. With no argument (or with `all`) it runs the `go`, `shell`, and
+`hooks` groups in that order and exits on the first failure. Unknown groups and
+extra arguments are errors, and a missing required tool fails instead of
+silently skipping its check. CI runs `go` on both macOS and Linux; its Ubuntu
+shell job runs `shell` and `hooks`.
+
+The `go` group checks every recursive `*.go` file except files under `.git` or
+`vendor`, forces `CGO_ENABLED=1`, then vets, builds `./cmd/utraque` into a
+disposable output, and runs ordinary and race-enabled tests. It never formats
+source or replaces `bin/utraque`. The `shell` group recursively finds `*.sh`
+under `deploy`, `scripts`, and `tests`, plus every file under `.githooks`; it
+runs `bash -n` separately on each file before ShellCheck. The `hooks` group
+exercises real pushes against disposable local repositories and bare remotes.
+
+To enable the version-controlled pre-push hook in this checkout, run:
+
+```sh
+./scripts/install-hooks.sh
+```
+
+The installer refuses to replace another configured hooks path or any
+executable hook already present under `.git/hooks`. The hook accepts only a
+clean, fully tracked checkout of `HEAD`, then runs the complete validator before
+Git updates the remote. Check `git status` yourself before running the validator
+directly; the clean-HEAD rule is enforced by the pre-push hook, not by
+`validate.sh`.
 
 ## The test suite contacts nothing
 

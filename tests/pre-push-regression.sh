@@ -4,11 +4,21 @@
 # version-controlled pre-push hook. Every repository and remote created here is
 # disposable and local; the test never contacts a network remote.
 
-set -u
+set -euo pipefail
+
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR
+unset GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0
+export GIT_CONFIG_NOSYSTEM=1
+export GIT_CONFIG_GLOBAL=/dev/null
 
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 tmp_root=$(mktemp -d "${TMPDIR:-/tmp}/utraque-pre-push.XXXXXX") || exit 1
 trap 'rm -rf "$tmp_root"' EXIT HUP INT TERM
+mkdir -p "$tmp_root/git-template"
+export GIT_TEMPLATE_DIR="$tmp_root/git-template"
+export GOCACHE="$tmp_root/go-cache"
+export GOMODCACHE="$tmp_root/go-mod-cache"
+mkdir -p "$GOCACHE" "$GOMODCACHE"
 
 tests_run=0
 
@@ -58,33 +68,43 @@ EOF
 copy_validation_artifacts() {
 	destination=$1
 	mkdir -p "$destination/scripts" "$destination/.githooks"
-	if [ -f "$root/scripts/validate.sh" ]; then
-		cp "$root/scripts/validate.sh" "$destination/scripts/validate.sh"
+	if [ -x "$root/scripts/validate.sh" ]; then
+		cp -p "$root/scripts/validate.sh" "$destination/scripts/validate-source.sh"
+		cat >"$destination/scripts/validate.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+if [ "$#" -gt 0 ]; then
+	exec "$here/validate-source.sh" "$@"
+fi
+"$here/validate-source.sh" go
+exec "$here/validate-source.sh" shell
+EOF
 		chmod +x "$destination/scripts/validate.sh"
 	fi
-	if [ -f "$root/.githooks/pre-push" ]; then
-		cp "$root/.githooks/pre-push" "$destination/.githooks/pre-push"
-		chmod +x "$destination/.githooks/pre-push"
+	if [ -x "$root/.githooks/pre-push" ]; then
+		cp -p "$root/.githooks/pre-push" "$destination/.githooks/pre-push"
 	fi
 }
 
 init_fixture() {
 	working=$1
 	remote=$2
-	git init --bare "$remote" >/dev/null || fail "could not initialize bare remote"
+	git init --bare -b main "$remote" >/dev/null || fail "could not initialize bare remote"
 	git init -b main "$working" >/dev/null || fail "could not initialize working repository"
 	git -C "$working" config user.name "Utraque Hook Test"
 	git -C "$working" config user.email "hook-test@example.invalid"
 	git -C "$working" config core.hooksPath .githooks
 	git -C "$working" remote add origin "$remote"
 
-	mkdir -p "$working/deploy/nested"
+	mkdir -p "$working/cmd/utraque" "$working/deploy/nested"
 	cat >"$working/go.mod" <<'EOF'
 module example.invalid/hookfixture
 
 go 1.27
 EOF
 	write_valid_go "$working/main.go"
+	write_valid_go "$working/cmd/utraque/main.go"
 	write_valid_shell "$working/deploy/install.sh"
 	write_valid_shell "$working/deploy/nested/check.sh"
 	copy_validation_artifacts "$working"
@@ -95,16 +115,17 @@ EOF
 remote_oid() {
 	remote=$1
 	ref=$2
-	git --git-dir="$remote" rev-parse "$ref" 2>/dev/null || printf '%s\n' absent
+	git --git-dir="$remote" rev-parse --verify "$ref" 2>/dev/null || printf '%s\n' absent
 }
 
 capture_push() {
 	output_file=$1
 	shift
-	set +e
-	git "$@" >"$output_file" 2>&1
-	push_rc=$?
-	set -e
+	if git "$@" >"$output_file" 2>&1; then
+		push_rc=0
+	else
+		push_rc=$?
+	fi
 }
 
 assert_blocked_without_remote_change() {
@@ -232,6 +253,11 @@ EOF
 	stale_after=$(remote_oid "$remote" refs/heads/stale)
 	assert_blocked_without_remote_change "non-HEAD code push" absent "$stale_after" "$push_rc"
 	grep -q 'HEAD' "$push_log" || fail "non-HEAD rejection did not explain the HEAD-only rule"
+	capture_push "$push_log" -C "$working" push origin HEAD:refs/heads/atomic-valid stale:refs/heads/atomic-stale
+	atomic_valid_after=$(remote_oid "$remote" refs/heads/atomic-valid)
+	atomic_stale_after=$(remote_oid "$remote" refs/heads/atomic-stale)
+	assert_blocked_without_remote_change "mixed HEAD/non-HEAD multi-ref push" absent "$atomic_valid_after" "$push_rc"
+	[ "$atomic_stale_after" = absent ] || fail "mixed multi-ref rejection still created the stale remote ref"
 
 	# A deletion has no local code tree to validate and must remain usable even
 	# while the checkout is dirty.
@@ -258,7 +284,7 @@ test_validator_contract() {
 	mkdir -p "$working/bin"
 	printf 'deployed binary sentinel\n' >"$working/bin/utraque"
 
-	(cd "$working" && "$validator" shell) >"$log" 2>&1 || fail "valid shell group failed: $(cat "$log")"
+	(cd "$working/deploy" && "$validator" shell) >"$log" 2>&1 || fail "valid shell group failed outside the repository root: $(cat "$log")"
 	real_go=$(command -v go) || fail "test host lacks go"
 	go_log="$tmp_root/go-invocations.log"
 	go_shim="$tmp_root/go-shim"
@@ -270,6 +296,9 @@ exec "$REAL_GO" "$@"
 EOF
 	chmod +x "$go_shim/go"
 	(cd "$working" && GO_INVOCATIONS="$go_log" REAL_GO="$real_go" PATH="$go_shim:$PATH" "$validator" go) >"$log" 2>&1 || fail "valid Go group failed: $(cat "$log")"
+	grep -q '^1|vet ./\.\.\.$' "$go_log" || fail "Go validation did not force CGO_ENABLED=1 for go vet ./..."
+	grep -Eq '^1\|build -o .+ ./cmd/utraque$' "$go_log" || fail "Go validation did not build ./cmd/utraque with CGO_ENABLED=1 into a separate output"
+	grep -q '^1|test ./\.\.\.$' "$go_log" || fail "Go validation did not force CGO_ENABLED=1 for go test ./..."
 	grep -q '^1|test -race ./\.\.\.$' "$go_log" || fail "Go validation did not force CGO_ENABLED=1 for go test -race ./..."
 	[ "$(cat "$working/bin/utraque")" = "deployed binary sentinel" ] || fail "Go validation overwrote bin/utraque"
 	(cd "$working" && "$validator") >"$log" 2>&1 || fail "valid default validation failed: $(cat "$log")"
@@ -343,12 +372,20 @@ EOF
 	set -e
 	[ "$rc" -ne 0 ] || fail "unknown validator group succeeded"
 	[ ! -e "$marker" ] || fail "unknown validator group ran validation commands before rejecting the argument"
+	set +e
+	(cd "$working" && VALIDATOR_MARKER="$marker" PATH="$marker_bin:$PATH" "$validator" go extra) >"$log" 2>&1
+	rc=$?
+	set -e
+	[ "$rc" -ne 0 ] || fail "validator accepted an extra argument"
+	[ ! -e "$marker" ] || fail "validator ran validation commands before rejecting an extra argument"
 
 	shim="$tmp_root/no-shellcheck-bin"
-	make_path_shim "$shim" dirname find git sort
+	make_path_shim "$shim" dirname find mktemp rm
 	cat >"$shim/bash" <<'EOF'
 #!/bin/sh
-: >"$VALIDATOR_MARKER"
+if [ "${1:-}" = -n ]; then
+	: >"$VALIDATOR_MARKER"
+fi
 exec /bin/bash "$@"
 EOF
 	chmod +x "$shim/bash"
@@ -358,7 +395,7 @@ EOF
 	set -e
 	[ "$rc" -ne 0 ] || fail "shell group succeeded without shellcheck"
 	[ ! -e "$marker" ] || fail "shell group began syntax checks before reporting missing shellcheck"
-	rg -q 'shellcheck' "$log" 2>/dev/null || grep -q 'shellcheck' "$log" || fail "missing-shellcheck error did not name shellcheck"
+	grep -q 'shellcheck' "$log" || fail "missing-shellcheck error did not name shellcheck"
 
 	pass "validator rejects bad arguments and missing dependencies early"
 }
@@ -366,12 +403,16 @@ EOF
 init_installer_fixture() {
 	working=$1
 	git init -b main "$working" >/dev/null || fail "could not initialize installer repository"
-	mkdir -p "$working/scripts" "$working/.githooks"
-	[ -f "$root/scripts/install-hooks.sh" ] || fail "repository has no scripts/install-hooks.sh"
-	[ -f "$root/.githooks/pre-push" ] || fail "repository has no .githooks/pre-push"
-	cp "$root/scripts/install-hooks.sh" "$working/scripts/install-hooks.sh"
-	cp "$root/.githooks/pre-push" "$working/.githooks/pre-push"
-	chmod +x "$working/scripts/install-hooks.sh" "$working/.githooks/pre-push"
+	mkdir -p "$working/scripts" "$working/.githooks" "$working/.git/hooks"
+	[ -x "$root/scripts/install-hooks.sh" ] || fail "repository has no executable scripts/install-hooks.sh"
+	[ -x "$root/.githooks/pre-push" ] || fail "repository has no executable .githooks/pre-push"
+	cp -p "$root/scripts/install-hooks.sh" "$working/scripts/install-hooks.sh"
+	cp -p "$root/.githooks/pre-push" "$working/.githooks/pre-push"
+	cat >"$working/.git/hooks/pre-push.sample" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+	chmod +x "$working/.git/hooks/pre-push.sample"
 }
 
 test_installer_conflicts() {
@@ -408,6 +449,29 @@ EOF
 	set -e
 	[ "$rc" -ne 0 ] || fail "installer replaced a different configured core.hooksPath"
 	[ "$(git -C "$path_conflict" config --local --get core.hooksPath)" = custom-hooks ] || fail "installer changed the conflicting core.hooksPath"
+
+	empty_conflict="$tmp_root/install-empty-conflict"
+	init_installer_fixture "$empty_conflict"
+	git -C "$empty_conflict" config core.hooksPath ''
+	set +e
+	(cd "$empty_conflict" && scripts/install-hooks.sh) >"$log" 2>&1
+	rc=$?
+	set -e
+	[ "$rc" -ne 0 ] || fail "installer replaced an explicitly empty core.hooksPath"
+	git -C "$empty_conflict" config --local --get core.hooksPath >/dev/null || fail "installer removed the explicitly empty core.hooksPath"
+	[ -z "$(git -C "$empty_conflict" config --local --get core.hooksPath)" ] || fail "installer changed the explicitly empty core.hooksPath"
+
+	global_conflict="$tmp_root/install-global-conflict"
+	global_config="$tmp_root/conflicting-global.gitconfig"
+	init_installer_fixture "$global_conflict"
+	GIT_CONFIG_GLOBAL="$global_config" git config --global core.hooksPath global-hooks
+	set +e
+	(cd "$global_conflict" && GIT_CONFIG_GLOBAL="$global_config" scripts/install-hooks.sh) >"$log" 2>&1
+	rc=$?
+	set -e
+	[ "$rc" -ne 0 ] || fail "installer replaced a global core.hooksPath"
+	[ -z "$(git -C "$global_conflict" config --local --get core.hooksPath 2>/dev/null)" ] || fail "installer added local hooksPath over a global conflict"
+	[ "$(GIT_CONFIG_GLOBAL="$global_config" git config --global --get core.hooksPath)" = global-hooks ] || fail "installer changed the global core.hooksPath"
 
 	pass "hook installer is idempotent and preserves existing hook choices"
 }

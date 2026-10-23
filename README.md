@@ -1436,8 +1436,19 @@ registry, so a chosen model remains usable after the daemon restarts.
 ## Tests
 
 ```sh
-go test -race ./...          # the whole suite; hermetic
+./scripts/validate.sh        # the whole local/CI suite; hermetic
 ```
+
+The validator checks every module Go file, builds `./cmd/utraque` into a
+disposable output (never over the deployed `bin/utraque`), runs the ordinary
+and native-cgo race suites, checks every deployment and project shell script,
+and exercises the pre-push hook against disposable local repositories. Use
+`./scripts/validate.sh go` or `./scripts/validate.sh shell` for one partition.
+
+Run `./scripts/install-hooks.sh` once per checkout to enable the
+version-controlled pre-push hook. The installer leaves an existing hooks path
+or executable `.git/hooks` setup untouched. The hook requires a clean checkout
+whose pushed updates resolve to `HEAD`; deletion-only pushes remain available.
 
 **The default suite contacts nothing.** Every upstream in it is an
 `httptest` server and every credential is a throwaway written under
