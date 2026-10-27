@@ -387,7 +387,7 @@ func TestParallelDisableBoth(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	const want = `{"model":"gpt-5.6-sol","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}],"tools":[{"type":"function","name":"Read"},{"type":"function","name":"Bash"}],"tool_choice":"auto","parallel_tool_calls":false,"reasoning":{"effort":"low"},"include":["reasoning.encrypted_content"],"prompt_cache_key":"utq-fad4234920c575b4d617be304f537eba","store":false,"stream":true}`
+	const want = `{"model":"gpt-5.6-sol","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}],"tools":[{"type":"function","name":"Read","strict":false},{"type":"function","name":"Bash","strict":false}],"tool_choice":"auto","parallel_tool_calls":false,"reasoning":{"effort":"low"},"include":["reasoning.encrypted_content"],"prompt_cache_key":"utq-53b96ceafe1c4c081b166a70dd344c37","store":false,"stream":true}`
 	if string(got) != want {
 		t.Errorf("wire document changed:\n got %s\nwant %s", got, want)
 	}

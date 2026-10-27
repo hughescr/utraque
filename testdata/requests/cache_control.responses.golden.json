@@ -21,7 +21,8 @@
       "parameters": {
         "type": "object",
         "properties": {}
-      }
+      },
+      "strict": false
     }
   ],
   "reasoning": {
@@ -30,7 +31,7 @@
   "include": [
     "reasoning.encrypted_content"
   ],
-  "prompt_cache_key": "utq-c650bfc6dcd3f33b44d9357bafb2c7f3",
+  "prompt_cache_key": "utq-6fbedd85cdffaf22e9711f42ff21a88e",
   "store": false,
   "stream": true
 }

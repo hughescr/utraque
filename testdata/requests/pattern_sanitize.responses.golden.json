@@ -53,7 +53,8 @@
           }
         },
         "type": "object"
-      }
+      },
+      "strict": false
     },
     {
       "type": "function",
@@ -61,7 +62,8 @@
       "description": "read a file",
       "parameters": {
         "type": "object"
-      }
+      },
+      "strict": false
     }
   ],
   "reasoning": {
@@ -70,7 +72,7 @@
   "include": [
     "reasoning.encrypted_content"
   ],
-  "prompt_cache_key": "utq-9ae41cd8e507c62b8b279482a78aad64",
+  "prompt_cache_key": "utq-4f955088057787c819e2ed5b2a275ea7",
   "store": false,
   "stream": true
 }

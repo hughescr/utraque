@@ -70,7 +70,8 @@
         "required": [
           "file_path"
         ]
-      }
+      },
+      "strict": false
     },
     {
       "type": "function",
@@ -87,7 +88,8 @@
         "required": [
           "query"
         ]
-      }
+      },
+      "strict": false
     },
     {
       "type": "function",
@@ -112,7 +114,8 @@
         "required": [
           "title"
         ]
-      }
+      },
+      "strict": false
     },
     {
       "type": "function",
@@ -132,7 +135,8 @@
           "ticket_id",
           "body"
         ]
-      }
+      },
+      "strict": false
     }
   ],
   "reasoning": {
@@ -141,7 +145,7 @@
   "include": [
     "reasoning.encrypted_content"
   ],
-  "prompt_cache_key": "utq-2ad042d032a613d27824055e66912b45",
+  "prompt_cache_key": "utq-117c44c89a4a48a7cb6a0d120e7bb588",
   "store": false,
   "stream": true
 }

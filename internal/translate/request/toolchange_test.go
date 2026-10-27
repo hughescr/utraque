@@ -341,3 +341,43 @@ func TestToolChangeTypeEncodingIsEquivalent(t *testing.T) {
 		t.Errorf("escaped and literal types translated differently:\n%s\n%s", a, b)
 	}
 }
+
+// TestToolsAreNonStrict pins "strict": false on the wire for every function
+// tool, declared or hoisted from a tool_addition. The Responses API treats an
+// omitted strict as true, which forces the model to emit every property.
+func TestToolsAreNonStrict(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join(requestsDir, "tool_addition_midconversation.anthropic.input.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var req aschema.MessagesRequest
+	if err := json.Unmarshal(raw, &req); err != nil {
+		t.Fatal(err)
+	}
+	cfg := defaultCase()
+	out, _, err := request.Translate(&req, cfg.dec, cfg.model, cfg.opts)
+	if err != nil {
+		t.Fatalf("translate: %v", err)
+	}
+	if len(out.Tools) < 2 {
+		t.Fatalf("tools = %d, want declared and hoisted tools", len(out.Tools))
+	}
+	body, err := json.Marshal(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wire struct {
+		Tools []map[string]json.RawMessage `json:"tools"`
+	}
+	if err := json.Unmarshal(body, &wire); err != nil {
+		t.Fatal(err)
+	}
+	if len(wire.Tools) != len(out.Tools) {
+		t.Fatalf("wire tools = %d, want %d", len(wire.Tools), len(out.Tools))
+	}
+	for i, tool := range wire.Tools {
+		if got := string(tool["strict"]); got != "false" {
+			t.Errorf("tool %d (%s): strict = %q on the wire, want false", i, out.Tools[i].Name, got)
+		}
+	}
+}

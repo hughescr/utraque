@@ -19,7 +19,8 @@
       "description": "read a file",
       "parameters": {
         "type": "object"
-      }
+      },
+      "strict": false
     },
     {
       "type": "function",
@@ -27,7 +28,8 @@
       "description": "search files",
       "parameters": {
         "type": "object"
-      }
+      },
+      "strict": false
     }
   ],
   "tool_choice": "auto",
@@ -38,7 +40,7 @@
   "include": [
     "reasoning.encrypted_content"
   ],
-  "prompt_cache_key": "utq-e70a86155bcd21528f961f5541081290",
+  "prompt_cache_key": "utq-fbd04604272acb25da4e0f0147041d90",
   "store": false,
   "stream": true
 }

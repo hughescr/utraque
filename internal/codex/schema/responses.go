@@ -165,16 +165,25 @@ func ReasoningItem(id, encryptedContent string) InputItem {
 // Tool is a function tool declaration on a Responses request. Parameters is the
 // JSON Schema of the tool's inputs, carried through verbatim from the
 // Anthropic tool's input_schema.
+//
+// Strict is always emitted, as false, and has no omitempty on purpose: the
+// Responses API treats an omitted strict on a function tool as true, which
+// constrains decoding to emit every property (optional ones included, and
+// corrupting required ones). The Codex CLI sends "strict": false for the same
+// reason.
 type Tool struct {
 	Type        string          `json:"type"`
 	Name        string          `json:"name"`
 	Description string          `json:"description,omitempty"`
 	Parameters  json.RawMessage `json:"parameters,omitempty"`
+	Strict      bool            `json:"strict"`
 }
 
-// FunctionTool builds a function tool.
+// FunctionTool builds a function tool. It is the only constructor of Tool, so
+// every tool sent to the backend (declared up front or hoisted from a
+// mid-conversation tool_addition) is non-strict.
 func FunctionTool(name, description string, parameters json.RawMessage) Tool {
-	return Tool{Type: ToolTypeFunction, Name: name, Description: description, Parameters: parameters}
+	return Tool{Type: ToolTypeFunction, Name: name, Description: description, Parameters: parameters, Strict: false}
 }
 
 // ToolChoice is the string-or-object union the Responses API accepts for
