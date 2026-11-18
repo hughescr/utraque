@@ -260,17 +260,37 @@ start with `claude-`**. It sizes the GPT routes and can never change a Claude
 model's window, so it is not an alternative to the variable above — the two do
 not overlap.
 
-One value covers every GPT route, and every model the live Codex catalog now
-lists reports the same window: 272,000 tokens for `gpt-6.1-sol`,
-`gpt-6-astra`, `gpt-6-sol`, `gpt-6-luna`, `gpt-5.6-sol`, `gpt-5.6-terra`,
-`gpt-5.6-luna` and `gpt-5.5`. Set
-`272000`, and leave it unset if you only use Claude models.
+The Codex catalog gives each model two numbers. `context_window` is only the
+default point at which the Codex CLI compacts a conversation: 500,000 for
+`gpt-6.2-sol`, `gpt-6.1-sol` and `gpt-6.1-terra`, and 272,000 for
+`gpt-6.2-astra`, `gpt-6-astra`, `gpt-6-sol`, `gpt-6-luna`, `gpt-5.6-sol`,
+`gpt-5.6-terra` and `gpt-5.6-luna`. `max_context_window` is the ceiling a
+Codex CLI user may raise that point to, and it is 872,000 for every listed
+model. Neither value is sent to the backend: the window is a client-side
+decision about when to compact. OpenAI's API pages list 1,050,000 tokens for
+these models; the subscription catalog is what applies here.
 
-If a narrower model ever reappears in the catalog, size this to the smallest
-route you actually use rather than the largest. An early compaction costs
-context you can re-establish, while a session allowed to grow past its real
-window draws a hard "too long" error from the backend and breaks the
-conversation outright.
+The backend does not enforce the default. In a direct test through `utraque`
+on 2026-11-17, `gpt-6-luna` (default 272,000) accepted prompts of 450,000 and
+800,000 tokens and answered correctly. Other models above their defaults are
+untested.
+
+Set `828000`: the 872,000 maximum less the 5% margin the Codex CLI keeps
+(`effective_context_window_percent` 95), rounded down. One value covers every
+GPT route. Leave it unset if you only use Claude models.
+
+On OpenAI's API, a request with more than 272,000 input tokens is priced at 2x
+the input and cached-input rates and 1.5x the output rate for the whole
+request. The model pages for GPT-6.2 Astra, GPT-6 Astra and GPT-6.1 Terra
+state this. OpenAI does not document how that maps onto subscription
+allowance, so assume a session above 272,000 tokens draws the allowance down
+faster, most noticeably on Astra. A user who prefers to stay under that
+threshold can set `272000` instead and accept earlier compaction.
+
+If the backend ever rejects a long prompt, lower the value. An early
+compaction costs context you can re-establish, while a session allowed to grow
+past its real window draws a hard "too long" error from the backend and breaks
+the conversation outright.
 
 #### If you turn the local token on
 
@@ -1015,7 +1035,8 @@ reports process status, version and uptime, plus, for the Codex leg:
   recognise, by type (`unknown_events`, `unknown_event_types`,
   `streams_with_unknowns`). A non-zero count is the early warning that the
   upstream protocol has drifted; the live contract test below is the deliberate
-  version of the same check.
+  version of the same check. The backend's two routine frames, `response.metadata`
+  and `keepalive`, are recognised and ignored, so they do not count.
 - `transport` — which HTTP transport is in force per leg (`anthropic`, always
   `std`; `codex`, which `kind` repeats because it is the only one that can
   change), read live, since the auto transport can switch stacks mid-process.

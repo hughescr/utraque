@@ -91,6 +91,8 @@ var handledEventTypes = []string{
 	cschema.EventResponseCompleted,
 	cschema.EventResponseIncomplete,
 	cschema.EventResponseFailed,
+	cschema.EventResponseMetadata,
+	cschema.EventKeepalive,
 
 	cschema.EventOutputItemAdded,
 	cschema.EventOutputItemDone,
@@ -508,6 +510,13 @@ func (t *Translator) handle(sink Sink, fr sse.Frame) (bool, error) {
 		return false, t.ensureStarted(sink)
 
 	case cschema.EventResponseInProgress:
+		return false, nil
+
+	case cschema.EventResponseMetadata, cschema.EventKeepalive:
+		// Recognised and deliberately silent: nothing here belongs downstream. The
+		// frame still counted as upstream activity in the run loop (onUpstream), so
+		// a keepalive holds off the idle bound exactly as any other event does,
+		// and the heartbeat ping is unaffected.
 		return false, nil
 
 	case cschema.EventOutputItemAdded:

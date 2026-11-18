@@ -154,6 +154,9 @@ func NewRegistry() *Registry {
 // recorded from models_cache.json. Phase 3 replaces this *source*, not the
 // tiering logic, by calling LoadCatalog with live entries instead.
 var staticSlugs = []string{
+	"gpt-6.2-sol",
+	"gpt-6.2-astra",
+	"gpt-6.1-terra",
 	"gpt-6.1-sol",
 	"gpt-6-astra",
 	"gpt-6-sol",
@@ -161,7 +164,6 @@ var staticSlugs = []string{
 	"gpt-5.6-sol",
 	"gpt-5.6-terra",
 	"gpt-5.6-luna",
-	"gpt-5.5",
 }
 
 // staticOverrides seeds alias overrides for slugs the grammar cannot parse:

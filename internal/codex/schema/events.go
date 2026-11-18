@@ -37,6 +37,11 @@ const (
 	EventFunctionCallArgumentsDelta = "response.function_call_arguments.delta"
 	EventFunctionCallArgumentsDone  = "response.function_call_arguments.done"
 
+	// EventResponseMetadata arrives once in nearly every stream, and EventKeepalive
+	// is the backend's own idle frame. Neither carries anything to translate.
+	EventResponseMetadata = "response.metadata"
+	EventKeepalive        = "keepalive"
+
 	// EventError is the standalone error frame the backend sends on a stream-level
 	// failure (also delivered on the SSE event: line as "error").
 	EventError = "error"

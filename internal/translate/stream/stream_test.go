@@ -19,6 +19,7 @@ import (
 
 	"github.com/hughescr/utraque/internal/anthropic/schema"
 	"github.com/hughescr/utraque/internal/apierr"
+	cschema "github.com/hughescr/utraque/internal/codex/schema"
 	"github.com/hughescr/utraque/internal/sse"
 	"github.com/hughescr/utraque/internal/synthetic"
 	"github.com/hughescr/utraque/internal/translate/fixtures"
@@ -589,6 +590,55 @@ func TestUnknownEventCounts(t *testing.T) {
 		if n != 1 {
 			t.Errorf("unknown type %q counted %d times, want 1", typ, n)
 		}
+	}
+}
+
+// TestBenignEventsAreRecognisedNoOps confirms response.metadata and keepalive —
+// the two harmless types the backend sends in nearly every stream — are not
+// counted as unknown and leave the downstream output byte-identical, whether
+// they carry their type in the JSON body or only on the SSE event: line, and
+// wherever in the stream they arrive (before response.created included).
+func TestBenignEventsAreRecognisedNoOps(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join(streamsDir, "text_only"+fixtures.StreamInputSuffix))
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	want, wantRes, err := runToBytes(t, raw, goldenOptions())
+	if err != nil {
+		t.Fatalf("baseline run: %v", err)
+	}
+
+	benign := sseFrame(cschema.EventResponseMetadata, `{"type":"response.metadata","metadata":{"openai_model":"gpt-5.6-sol"}}`) +
+		sseFrame(cschema.EventKeepalive, `{"type":"keepalive"}`) +
+		// The type on the event: line alone, with a body that names none.
+		sseFrame(cschema.EventKeepalive, `{}`) +
+		sseFrame(cschema.EventResponseMetadata, `{}`)
+
+	// Inject the benign frames before the first frame, between frames, and
+	// just ahead of the terminus.
+	parts := strings.Split(string(raw), "\n\n")
+	var injected strings.Builder
+	injected.WriteString(benign)
+	for _, p := range parts {
+		if p == "" {
+			continue
+		}
+		injected.WriteString(p + "\n\n")
+		if strings.HasPrefix(p, "event: response.output_text.delta") {
+			injected.WriteString(benign)
+		}
+	}
+	injected.WriteString(benign)
+
+	got, res, err := runToBytes(t, []byte(injected.String()), goldenOptions())
+	if err != nil {
+		t.Fatalf("run with benign events: %v", err)
+	}
+	if len(res.UnknownEvents) != 0 || len(wantRes.UnknownEvents) != 0 {
+		t.Errorf("unknown events = %v (baseline %v), want none", res.UnknownEvents, wantRes.UnknownEvents)
+	}
+	if !bytes.Equal(got, want) {
+		t.Errorf("benign events changed the downstream output:\n--- without ---\n%s\n--- with ---\n%s", want, got)
 	}
 }
 

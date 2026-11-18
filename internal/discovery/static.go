@@ -15,10 +15,10 @@ import "github.com/hughescr/utraque/internal/anthropic"
 // corrected the moment an upstream read succeeds, and it is overridable via
 // Options.StaticAnthropicModels.
 var staticAnthropicModels = []anthropic.CatalogModel{
-	{ID: "claude-fable-5", DisplayName: "Fable 5", Type: modelType},
-	{ID: "claude-opus-5", DisplayName: "Opus 5", Type: modelType},
-	{ID: "claude-sonnet-5", DisplayName: "Sonnet 5", Type: modelType},
-	{ID: "claude-haiku-4-5", DisplayName: "Haiku 4.5", Type: modelType},
+	{ID: "claude-fable-5-2", DisplayName: "Fable 5.2", Type: modelType},
+	{ID: "claude-opus-5-5", DisplayName: "Opus 5.5", Type: modelType},
+	{ID: "claude-sonnet-5-5", DisplayName: "Sonnet 5.5", Type: modelType},
+	{ID: "claude-haiku-5-5", DisplayName: "Haiku 5.5", Type: modelType},
 }
 
 // StaticAnthropicModels returns a copy of the built-in Anthropic fallback list.

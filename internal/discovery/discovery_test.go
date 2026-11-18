@@ -638,10 +638,10 @@ func TestIncludeHiddenOffersHiddenModelsAndTheyStillRoute(t *testing.T) {
 
 func TestStaticModelListIsExactlyTheFourCurrentModels(t *testing.T) {
 	want := []anthropic.CatalogModel{
-		{ID: "claude-fable-5", DisplayName: "Fable 5", Type: "model"},
-		{ID: "claude-opus-5", DisplayName: "Opus 5", Type: "model"},
-		{ID: "claude-sonnet-5", DisplayName: "Sonnet 5", Type: "model"},
-		{ID: "claude-haiku-4-5", DisplayName: "Haiku 4.5", Type: "model"},
+		{ID: "claude-fable-5-2", DisplayName: "Fable 5.2", Type: "model"},
+		{ID: "claude-opus-5-5", DisplayName: "Opus 5.5", Type: "model"},
+		{ID: "claude-sonnet-5-5", DisplayName: "Sonnet 5.5", Type: "model"},
+		{ID: "claude-haiku-5-5", DisplayName: "Haiku 5.5", Type: "model"},
 	}
 	got := discovery.StaticAnthropicModels()
 	if len(got) != len(want) {
@@ -797,7 +797,7 @@ func TestUpstreamCatalogIsReadWithTheClientsOwnCredential(t *testing.T) {
 		t.Errorf("upstream model missing from the merge; ids = %v", ids(resp))
 	}
 	// Merge mode also keeps the static entries upstream did not mention.
-	if !hasID(resp, "claude-opus-5") {
+	if !hasID(resp, "claude-opus-5-5") {
 		t.Errorf("static model missing from the merge; ids = %v", ids(resp))
 	}
 }
@@ -813,7 +813,7 @@ func TestNoCredentialSkipsTheUpstreamReadEntirely(t *testing.T) {
 	if hits.Load() != 0 {
 		t.Errorf("upstream was contacted %d times without a credential", hits.Load())
 	}
-	if !hasID(resp, "claude-opus-5") {
+	if !hasID(resp, "claude-opus-5-5") {
 		t.Errorf("static fallback missing; ids = %v", ids(resp))
 	}
 }
@@ -828,7 +828,7 @@ func TestUpstreamFailureFallsBackToStaticAndIsNegativeCached(t *testing.T) {
 
 	for i := range 3 {
 		resp := h.Models(t.Context(), testCred, anthropic.RequestOptions{})
-		if !hasID(resp, "claude-opus-5") {
+		if !hasID(resp, "claude-opus-5-5") {
 			t.Fatalf("call %d: static fallback missing; ids = %v", i, ids(resp))
 		}
 	}
@@ -907,7 +907,7 @@ func TestDeadlineIsHonouredWithASlowUpstream(t *testing.T) {
 	if elapsed > time.Second {
 		t.Errorf("Models took %s; the %s deadline was not enforced", elapsed, deadline)
 	}
-	if !hasID(resp, "claude-opus-5") {
+	if !hasID(resp, "claude-opus-5-5") {
 		t.Errorf("slow upstream should have fallen back to the static list; ids = %v", ids(resp))
 	}
 	if !hasID(resp, "anthropic-compat.sol") {
@@ -938,7 +938,7 @@ func TestDeadlineIsHonouredWithASlowCodexCatalog(t *testing.T) {
 	if elapsed := time.Since(start); elapsed > time.Second {
 		t.Errorf("Models took %s; the %s deadline was not enforced", elapsed, deadline)
 	}
-	if !hasID(resp, "claude-opus-5") {
+	if !hasID(resp, "claude-opus-5-5") {
 		t.Errorf("a slow Codex read must not take the Anthropic half down with it; ids = %v", ids(resp))
 	}
 }
@@ -974,7 +974,7 @@ func TestNeverRedirects(t *testing.T) {
 		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 			t.Errorf("%s: body is not JSON: %v", target, err)
 		}
-		if !hasID(resp, "claude-opus-5") {
+		if !hasID(resp, "claude-opus-5-5") {
 			t.Errorf("%s: expected the static fallback after the upstream redirect; ids = %v",
 				target, ids(resp))
 		}
@@ -1025,7 +1025,7 @@ func TestCodexFailureLeavesTheClaudeHalfIntact(t *testing.T) {
 		Codex:       codexFailing(),
 	})
 	resp := h.Models(t.Context(), testCred, anthropic.RequestOptions{})
-	if !hasID(resp, "claude-opus-5") {
+	if !hasID(resp, "claude-opus-5-5") {
 		t.Errorf("Claude rows missing; ids = %v", ids(resp))
 	}
 	for _, m := range resp.Data {
@@ -1056,22 +1056,22 @@ func TestWrongMethodIsNotARedirect(t *testing.T) {
 func TestDuplicateIDsAreEmittedOnce(t *testing.T) {
 	loadRegistry(t)
 	cat, _ := fakeAnthropic(t, upstreamModels(
-		anthropic.CatalogModel{ID: "claude-opus-5", DisplayName: "Opus 5 (upstream)"},
-		anthropic.CatalogModel{ID: "claude-opus-5", DisplayName: "Opus 5 (dup)"},
+		anthropic.CatalogModel{ID: "claude-opus-5-5", DisplayName: "Opus 5.5 (upstream)"},
+		anthropic.CatalogModel{ID: "claude-opus-5-5", DisplayName: "Opus 5.5 (dup)"},
 	))
 	h := mustHandler(t, discovery.Options{Anthropic: cat})
 	resp := h.Models(t.Context(), testCred, anthropic.RequestOptions{})
 
 	seen := 0
 	for _, m := range resp.Data {
-		if m.ID == "claude-opus-5" {
+		if m.ID == "claude-opus-5-5" {
 			seen++
 		}
 	}
 	if seen != 1 {
-		t.Errorf("claude-opus-5 appeared %d times, want 1", seen)
+		t.Errorf("claude-opus-5-5 appeared %d times, want 1", seen)
 	}
-	if got := displayOf(resp, "claude-opus-5"); got != "Opus 5 (upstream)" {
+	if got := displayOf(resp, "claude-opus-5-5"); got != "Opus 5.5 (upstream)" {
 		t.Errorf("upstream display name should win, got %q", got)
 	}
 }

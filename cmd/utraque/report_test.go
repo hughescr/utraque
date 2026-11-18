@@ -149,7 +149,7 @@ func TestProductionReportCompositionUsesAllInjectedSources(t *testing.T) {
 func TestReferencePriceCandidatesAndHistoryNormalizationFollowRoutes(t *testing.T) {
 	cfg := config.Default()
 	anthropicModels := eligibleReferencePriceModels(cfg, leg.Anthropic)
-	if !contains(anthropicModels, "claude-haiku-4-5") || contains(anthropicModels, "claude-3-haiku") {
+	if !contains(anthropicModels, "claude-haiku-5-5") || contains(anthropicModels, "claude-3-haiku") {
 		t.Fatalf("anthropic candidates=%v", anthropicModels)
 	}
 	if codexModels := eligibleReferencePriceModels(cfg, leg.Codex); !contains(codexModels, "gpt-5.6-sol") {
@@ -166,7 +166,7 @@ func TestReferencePriceCandidatesAndHistoryNormalizationFollowRoutes(t *testing.
 		id    leg.ID
 		model string
 		want  string
-	}{{leg.Codex, "sol", "gpt-6.1-sol"}, {leg.DeepSeek, "deepseek-v4-flash", "deepseek-flash"}, {leg.Anthropic, "CLAUDE-SONNET-5", "claude-sonnet-5"},
+	}{{leg.Codex, "sol", "gpt-6.2-sol"}, {leg.DeepSeek, "deepseek-v4-flash", "deepseek-flash"}, {leg.Anthropic, "CLAUDE-SONNET-5", "claude-sonnet-5"},
 		// An alias that resolves to another leg is left alone, not relabelled.
 		{leg.DeepSeek, "sol", "sol"}, {leg.Codex, "deepseek-v4-flash", "deepseek-v4-flash"}} {
 		if got := normalizeReferencePriceModel(tc.id, tc.model); got != tc.want {
