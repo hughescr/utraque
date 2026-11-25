@@ -1104,19 +1104,23 @@ of it: `message_start` waits for it only if the tokenizer is slower than the
 backend's first event, which on a warm cache it never is, and a request whose
 client has gone away does not wait at all. Per-field counts are memoized in a
 bounded in-process cache keyed by content hash, because an agentic loop
-resends the same history every turn — a 400 KB prompt costs ~35 ms cold and
+resends the same history every turn — a 400 KB prompt costs ~30 ms cold and
 ~55 µs on the next turn.
 
-The work is bounded per field. The tokenizer library is quadratic in the
-length of one regex piece — an unbroken run of letters, one repeated symbol,
-or a block of blank lines — and a 400 KB run took nearly a minute. So a run
-of one character class 1 KB or longer is never handed to it: the run, widened
-to the nearest guaranteed piece boundaries, is charged the provable floor of
-one token per 128 bytes (the longest o200k token), and everything else is
-counted exactly. Ordinary prose, code and JSON never contain such a run; for
-the rare field that does, the count reads low, which is the accepted
-direction. A 400 KB field of such runs counts in ~250 ms at worst, and a
-single 400 KB run in under a millisecond.
+The work is bounded per field. The tokenizer library's regex engine is
+quadratic on a block of mixed spaces and newlines — 100 KB of `" \n"` takes
+about 20 seconds. So a run of one character class 1 KB or longer is never
+handed to it: the run, widened to the nearest guaranteed piece boundaries, is
+charged the provable floor of one token per 128 bytes (the longest o200k
+token), and everything else is counted exactly. Ordinary prose, code and JSON
+never contain such a run; for the rare field that does, the count reads low,
+which is the accepted direction. A 400 KB field of such runs counts in ~170 ms
+at worst, and a single 400 KB run in under a millisecond.
+
+Invalid UTF-8 never reaches the tokenizer as raw bytes: each invalid byte is
+first replaced by its own U+FFFD, which is what the backend receives once the
+request is JSON-encoded, so the count cannot exceed the backend's on text that
+is not valid UTF-8.
 
 ### Testing the round trip without spending quota
 

@@ -65,11 +65,12 @@ func TestPrevRunMirrorsRunEnd(t *testing.T) {
 }
 
 // TestCountIsExactWithoutLongRuns: with nothing to floor, count is one codec
-// call and must equal the codec.
+// call and must equal the codec's count of the text upstream receives, which
+// is s with each invalid byte replaced by U+FFFD.
 func TestCountIsExactWithoutLongRuns(t *testing.T) {
 	e := fresh(t, 16)
 	for _, s := range boundaryCorpus {
-		want, _ := e.codec.Count(s)
+		want, _ := e.codec.Count(string([]rune(s)))
 		if got := e.count(s); got != want {
 			t.Errorf("count(%q) = %d, codec says %d", s, got, want)
 		}
@@ -179,7 +180,7 @@ func TestLowLimitStaysALowerBound(t *testing.T) {
 	for _, limit := range []int{1, 2, 3, 5, 8} {
 		e := &O200kBase{codec: shared.codec, memo: newMemo(16), maxPiece: limit}
 		for _, s := range boundaryCorpus {
-			want, _ := e.codec.Count(s)
+			want, _ := e.codec.Count(string([]rune(s)))
 			if got := e.count(s); got > want {
 				t.Errorf("limit %d: count(%q) = %d exceeds the codec's %d", limit, s, got, want)
 			}
@@ -231,11 +232,10 @@ func TestLongRunsAreFloored(t *testing.T) {
 		{"digits stop the walk", "9it's" + aa, exact("9") + floorTokens(4+4096)},
 		// Whitespace with newlines, the regex engine's own quadratic case.
 		{"mixed whitespace", "a" + strings.Repeat(" \n", 3000) + "b", exact("a") + floorTokens(6001)},
-		// Invalid bytes beside a run count by their own length, a lower
-		// bound on the three-byte U+FFFD they become upstream; the one
-		// before the letters is in the region, the one after is the
-		// codec's.
-		{"invalid utf8", "\xff " + strings.Repeat("a", 3000) + " \xfe", floorTokens(3002) + exact(" \ufffd")},
+		// Invalid bytes are counted as the three-byte U+FFFD each becomes
+		// upstream; the one before the letters is in the region, the one
+		// after is the codec's.
+		{"invalid utf8", "\xff " + strings.Repeat("a", 3000) + " \xfe", floorTokens(3+1+3000) + exact(" \ufffd")},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -243,10 +243,37 @@ func TestLongRunsAreFloored(t *testing.T) {
 			if got != c.want {
 				t.Errorf("count = %d, want %d", got, c.want)
 			}
-			if truth := exact(c.s); got > truth {
+			// The truth is the codec's count of the text upstream receives:
+			// invalid bytes become U+FFFD, one each ([]rune conversion does
+			// the same).
+			if truth := exact(string([]rune(c.s))); got > truth {
 				t.Errorf("count %d exceeds the codec's %d: not a lower bound", got, truth)
 			}
 		})
+	}
+}
+
+// TestInvalidUTF8CountsAsReplacement: an invalid byte is counted as the
+// U+FFFD it becomes upstream, never as the raw byte tokens the codec would
+// otherwise emit for it, which can outnumber the replacement's tokens
+// ("\xff\xff" is two byte tokens; "��" is one).
+func TestInvalidUTF8CountsAsReplacement(t *testing.T) {
+	e := fresh(t, 16)
+	for _, s := range []string{
+		"\xff", "\xff\xff", "\xfe\xff\xfe", " \xfe", "a\xfe", "\xe2\x82", "x\xe2\x82 y",
+		"\xf0\x9f\x98", "\xed\xa0\x80", "\xc0\xaf", "ok \xff\xff\xff\xff ok\n",
+	} {
+		want, err := e.codec.Count(string([]rune(s)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := e.count(s); got != want {
+			t.Errorf("count(%q) = %d, want %d (the codec's count of %q)", s, got, want, string([]rune(s)))
+		}
+	}
+	// Valid text is untouched.
+	if got, want := e.count("héllo wörld 日本語 🚀🚀"), 11; got != want {
+		t.Errorf("valid text counts %d, want %d", got, want)
 	}
 }
 
@@ -276,12 +303,11 @@ func (c *collectVisitor) Tool(t *cschema.Tool) {
 	c.fields = append(c.fields, t.Name, t.Description)
 }
 
-// TestLongRunCountsInBoundedTime is the regression guard for both quadratic
-// paths: 400 KB of one letter took 57 s through the codec and 100 KB of
-// " \n" took 4 s; each must now be a linear scan and a floor. The marks
-// cases guard the digit exemption: a run of combining marks before a digit
-// once classified as one digit run, bypassed the cap, and reached the codec
-// as one 200 KB piece (40 KB took 565 ms, growing quadratically).
+// TestLongRunCountsInBoundedTime is the regression guard for the codec's
+// super-linear paths: 100 KB of " \n" takes it about 20 s, so every long run
+// must be a linear scan and a floor. The marks cases guard the digit
+// exemption: a run of combining marks before a digit must not classify as one
+// digit run, bypass the cap and reach the codec as one 200 KB piece.
 func TestLongRunCountsInBoundedTime(t *testing.T) {
 	e := fresh(t, 16)
 	marks := strings.Repeat("\u0301", 200_000)
@@ -341,8 +367,8 @@ func TestMaxTokenBytesMatchesVocabulary(t *testing.T) {
 	}
 	for _, dep := range info.Deps {
 		if dep.Path == "github.com/tiktoken-go/tokenizer" {
-			if dep.Version != "v0.8.1" {
-				t.Errorf("tokenizer is %s; maxTokenBytes was derived from v0.8.1's vocabulary, re-derive it", dep.Version)
+			if dep.Version != "v0.10.0" {
+				t.Errorf("tokenizer is %s; maxTokenBytes was derived from v0.10.0's vocabulary, re-derive it", dep.Version)
 			}
 			return
 		}
@@ -353,8 +379,8 @@ func TestMaxTokenBytesMatchesVocabulary(t *testing.T) {
 // BenchmarkEstimateStringUnbrokenRun is the worst case the run scan exists
 // for: fields the split regex cannot cut short. "letters" and "blank" are
 // one region each; "worst" is 400 KB of runs just under maxPieceBytes, so
-// every one of them goes through the codec's quadratic merge and, for the
-// whitespace ones, its quadratic rescan.
+// every one of them goes through the codec's merge and, for the whitespace
+// ones, its quadratic rescan.
 func BenchmarkEstimateStringUnbrokenRun(b *testing.B) {
 	var worst strings.Builder
 	for worst.Len() < 400_000 {

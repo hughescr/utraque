@@ -3,6 +3,7 @@ package tokens
 import (
 	"fmt"
 	"hash/maphash"
+	"strings"
 	"sync"
 	"unicode"
 	"unicode/utf8"
@@ -90,17 +91,19 @@ func (e *O200kBase) EstimateString(s string) int {
 
 // count tokenizes s with no memoization, in time linear in len(s).
 //
-// The codec is quadratic in two places, both per "piece" of the o200k split
-// regex. Its byte-pair merge rescans and compacts a piece's part list on
-// every merge, so one unbroken run of letters or symbols costs the square of
-// its length (100 KB of "a": 3.6 s; 400 KB: 57 s). And its regex engine, on
-// a region of mixed spaces and newlines, rescans the whole remaining region
-// for every two-byte piece it cuts (100 KB of " \n": 4 s). Ordinary text
-// never notices: the regex cuts prose, code and JSON into words, short digit
-// groups and punctuation runs, and nothing long survives. But a tool result
-// can carry a block of thousands of blank lines, a kilobyte of one repeated
-// symbol or a file with no line breaks at all, and message_start waited on
-// every one of them.
+// The codec's regex engine is quadratic on a region of mixed spaces and
+// newlines: it rescans the whole remaining region for every two-byte piece it
+// cuts (100 KB of " \n": about 20 s). Its byte-pair merge was quadratic in
+// the length of one piece too, so one unbroken run of letters or symbols cost
+// the square of its length; tokenizer v0.10.0 merges pieces of 96 bytes and
+// more in O(n log n) (400 KB of "a": under 0.1 s), which leaves the whitespace
+// rescan as the one input the codec cannot bound. Ordinary text never
+// notices: the
+// regex cuts prose, code and JSON into words, short digit groups and
+// punctuation runs, and nothing long survives. But a tool result can carry a
+// block of thousands of blank lines, a kilobyte of one repeated symbol or a
+// file with no line breaks at all, and message_start once waited on every one
+// of them.
 //
 // So the string is scanned once for runs of a single rune class — letters,
 // digits, everything else — at least maxPieceBytes long. A run that long is
@@ -111,6 +114,9 @@ func (e *O200kBase) EstimateString(s string) int {
 // exactly as it would have in place. A string with no long run — every
 // string an ordinary session sends — is one codec call, as before.
 func (e *O200kBase) count(s string) int {
+	if !utf8.ValidString(s) {
+		s = replaceInvalid(s)
+	}
 	limit := e.maxPiece
 	if limit <= 0 {
 		limit = maxPieceBytes
@@ -135,6 +141,29 @@ func (e *O200kBase) count(s string) int {
 		prevClass = classNone
 	}
 	return total + e.countWhole(s[spanStart:])
+}
+
+// replaceInvalid returns s with every invalid UTF-8 byte replaced by its own
+// U+FFFD, the text encoding/json produces for it on the way upstream, so what
+// is counted is what the backend receives. The codec must not be handed the
+// raw bytes: it tokenizes them as byte tokens, which can number more than the
+// replacement characters do ("\xff\xff" is two byte tokens, but the two
+// U+FFFD it becomes upstream are one token), and a count above the backend's
+// is not a lower bound. Strings that came out of JSON decoding are already
+// valid, so this is a validity check for them and nothing more.
+func replaceInvalid(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); {
+		r, n := utf8.DecodeRuneInString(s[i:])
+		if r == utf8.RuneError && n == 1 {
+			b.WriteRune(utf8.RuneError)
+		} else {
+			b.WriteString(s[i : i+n])
+		}
+		i += n
+	}
+	return b.String()
 }
 
 // region widens the long run [a, b) of class c to [ra, re), the smallest
@@ -240,7 +269,9 @@ const (
 // a table-free fast path; everything else is decoded and classified by the
 // same Unicode categories the regex uses (\p{L}, \p{N}, \p{M}). An invalid
 // byte classifies as the U+FFFD the regex engine (and json.Marshal, on the
-// way upstream) turns it into: a symbol.
+// way upstream) turns it into: a symbol. count replaces invalid bytes before
+// it scans (see replaceInvalid), so this only matters to callers that scan a
+// raw string themselves.
 func runEnd(s string, i int) (class, end int) {
 	class = classNone
 	for end = i; end < len(s); {
@@ -396,9 +427,10 @@ func (e *O200kBase) countWhole(s string) int {
 
 // maxPieceBytes is the longest run of one rune class the codec is asked to
 // handle. Pieces are at most a run plus a leading rune and a contraction, so
-// a 1 KB run bounds the merge at ~0.4 ms per piece and the whitespace rescan
-// at ~0.6 ms per region; a field made entirely of such runs, the worst
-// case, counts at roughly 1 µs per byte against 60 ns for prose — bounded,
+// a 1 KB run bounds the whitespace rescan, the one super-linear step the
+// codec has left, at under a millisecond per region; a field made entirely
+// of such runs, the worst case, counts at roughly 0.4 µs per byte against
+// 60 ns for prose — bounded,
 // and well under the time the upstream takes to say anything. Runs at or
 // over the limit are charged floorTokens instead. Legitimate runs this long
 // are rare — a run of a thousand blank lines, a kilobyte of one repeated
@@ -410,7 +442,7 @@ const maxPieceBytes = 1024
 
 // maxTokenBytes is the byte length of the longest token in o200k_base: the
 // 128-space run. Derived from the vocabulary compiled into
-// github.com/tiktoken-go/tokenizer v0.8.1 (TestMaxTokenBytesMatchesVocabulary
+// github.com/tiktoken-go/tokenizer v0.10.0 (TestMaxTokenBytesMatchesVocabulary
 // pins the version); every token is at most this long, so a byte range that
 // whole tokens tile cannot hold fewer than ceil(n / maxTokenBytes) of them.
 const maxTokenBytes = 128
