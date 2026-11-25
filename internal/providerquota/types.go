@@ -5,13 +5,12 @@
 package providerquota
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"regexp"
 	"strings"
 	"time"
 
+	"github.com/hughescr/utraque/internal/accountscope"
 	"github.com/hughescr/utraque/internal/leg"
 )
 
@@ -523,8 +522,7 @@ func rateLimitError(provider leg.ID, retryAt, attemptedAt time.Time) error {
 }
 
 func scopeHash(provider leg.ID, secret string) string {
-	sum := sha256.Sum256([]byte(string(provider) + "\x00" + secret))
-	return string(provider) + ":" + hex.EncodeToString(sum[:])
+	return accountscope.Key(string(provider), secret)
 }
 
 func credentialScope(provider leg.ID, secret string) (string, error) {

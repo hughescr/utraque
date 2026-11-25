@@ -46,8 +46,16 @@ func newServer(t *testing.T, mutate func(*server.Options)) (*server.Server, *byt
 	return s, &buf
 }
 
+// do serves r the way a local client would reach the proxy. httptest's default
+// Host (example.com) is a foreign Host the browser guard rightly refuses, and a
+// direct call carries no listener, so the guard's Host check applies; tests
+// that are not about the guard get an accepted Host here instead of a weaker
+// guard.
 func do(t *testing.T, s *server.Server, r *http.Request) *httptest.ResponseRecorder {
 	t.Helper()
+	if r.Host == "example.com" {
+		r.Host = "localhost"
+	}
 	w := httptest.NewRecorder()
 	s.ServeHTTP(w, r)
 	return w
@@ -125,6 +133,63 @@ func TestHealthz(t *testing.T) {
 	}
 	if strings.Contains(w.Body.String(), localSecret) {
 		t.Fatalf("/healthz leaked the local token: %s", w.Body.String())
+	}
+}
+
+func TestHealthzDetailTiers(t *testing.T) {
+	const (
+		limited = "{\"status\":\"ok\",\"uptime_s\":90,\"version\":\"1.2.3-test\"}\n"
+		full    = "{\"extra\":\"detail\",\"status\":\"ok\",\"uptime_s\":90,\"version\":\"1.2.3-test\"}\n"
+	)
+	for _, tc := range []struct {
+		name, configured, presented, document string
+		calls                                 int
+	}{
+		{"open", "", "", full, 1},
+		{"open_with_wrong_header", "", "loopback-shared-secreX", full, 1},
+		{"open_with_right_header", "", localSecret, full, 1},
+		{"missing", localSecret, "", limited, 0},
+		{"wrong", localSecret, "loopback-shared-secreX", limited, 0},
+		{"correct", localSecret, localSecret, full, 1},
+	} {
+		for _, method := range []string{http.MethodGet, http.MethodHead} {
+			t.Run(tc.name+"/"+method, func(t *testing.T) {
+				clock := time.Unix(1_700_000_000, 0)
+				tr := &fakeTracker{}
+				calls := 0
+				s, _ := newServer(t, func(o *server.Options) {
+					o.Config.LocalToken = tc.configured
+					o.Now = func() time.Time { return clock }
+					o.Activity = tr
+					o.HealthExtra = func(context.Context) map[string]any {
+						calls++
+						return map[string]any{"extra": "detail"}
+					}
+				})
+				clock = clock.Add(90 * time.Second)
+				r := httptest.NewRequest(method, server.HealthPath, nil)
+				if tc.presented != "" {
+					r.Header.Set(proxyhdr.LocalToken, tc.presented)
+				}
+				w := do(t, s, r)
+				if w.Code != http.StatusOK || w.Header().Get("Cache-Control") != "no-store" {
+					t.Errorf("status=%d Cache-Control=%q", w.Code, w.Header().Get("Cache-Control"))
+				}
+				if got := w.Header().Get("Content-Length"); got != fmt.Sprint(len(tc.document)) {
+					t.Errorf("Content-Length=%q, want %d", got, len(tc.document))
+				}
+				wantBody := tc.document
+				if method == http.MethodHead {
+					wantBody = ""
+				}
+				if got := w.Body.String(); got != wantBody {
+					t.Errorf("body=%q, want %q", got, wantBody)
+				}
+				if calls != tc.calls || tr.holds != 0 {
+					t.Errorf("HealthExtra calls=%d, want %d; activity holds=%d, want 0", calls, tc.calls, tr.holds)
+				}
+			})
+		}
 	}
 }
 

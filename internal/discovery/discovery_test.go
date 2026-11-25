@@ -684,6 +684,42 @@ func TestDeepSeekRowsAppearOnlyWhenConfiguredAndSurviveRestart(t *testing.T) {
 	}
 }
 
+// A picker whose Codex half failed serves no Codex rows, but every non-Codex
+// row it does serve is registered, so picking one routes at once rather than
+// after the next picker open.
+func TestFailedCodexHalfStillRegistersNonCodexRows(t *testing.T) {
+	reg := router.NewStaticRegistry()
+	h := mustHandler(t, discovery.Options{
+		CatalogMode: discovery.CatalogModeStatic,
+		DeepSeek:    true,
+		Registry:    reg,
+		Codex:       codexFailing(),
+	})
+	resp := h.Models(t.Context(), testCred, anthropic.RequestOptions{})
+	var deepseek []string
+	for _, id := range ids(resp) {
+		if route, ok := reg.PickerRoute(strings.ToLower(id)); ok && route.Backend == router.BackendCodex {
+			t.Errorf("Codex row %q registered without a Codex catalog", id)
+		}
+		if strings.Contains(id, "deepseek") {
+			deepseek = append(deepseek, id)
+		}
+	}
+	if len(deepseek) == 0 {
+		t.Fatalf("no DeepSeek rows served: %v", ids(resp))
+	}
+	for _, id := range deepseek {
+		if route, ok := reg.PickerRoute(strings.ToLower(id)); !ok || route.Backend != router.BackendDeepSeek {
+			t.Errorf("served DeepSeek row %q is not registered", id)
+		}
+	}
+	for _, m := range codexFixture() {
+		if hasID(resp, "anthropic-compat."+m.Slug) {
+			t.Errorf("Codex row for %s served without a Codex catalog", m.Slug)
+		}
+	}
+}
+
 // TestDeepSeekPickerRowsAreStable pins the exact DeepSeek picker rows: the
 // ids, display names and routes are derived from internal/deepseek/models, and
 // the strings the client sees must not move when the catalog's shape does.

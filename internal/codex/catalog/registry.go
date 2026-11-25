@@ -34,8 +34,8 @@ func ListedEntries(models []cschema.CatalogModel) []router.CatalogEntry {
 // catalog.
 //
 // This package only adapts a model list into the registry. The caller (cmd's
-// alias loader) owns WHEN to publish: it feeds each Models result through here
-// and decides how to treat a stale or empty read. There is deliberately no
+// alias loader, wired as Options.OnModels) owns WHEN to publish: it feeds each
+// list the client commits through here and decides how to treat an empty one. There is deliberately no
 // fetch-and-publish convenience in this package.
 //
 // Any slug-shape irregularity the grammar can't parse (e.g. a two-token tail

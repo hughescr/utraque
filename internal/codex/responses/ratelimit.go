@@ -2,6 +2,7 @@ package responses
 
 import (
 	"log/slog"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -32,7 +33,7 @@ const (
 type Window struct {
 	// UsedPercent is how much of the window is consumed, 0-100.
 	UsedPercent float64
-	// HasUsedPercent reports whether UsedPercent was present and parseable.
+	// HasUsedPercent reports whether UsedPercent was present and in [0, 100].
 	HasUsedPercent bool
 	// WindowMinutes is the length of the rolling window.
 	WindowMinutes int
@@ -114,14 +115,21 @@ func ParseRateLimits(h http.Header, now time.Time) RateLimits {
 	return rl
 }
 
+// numericDuration rejects negative or unrepresentably large samples instead
+// of turning them into measured zeroes or letting multiplication wrap.
+func numericDuration(raw string, unit time.Duration) (time.Duration, bool) {
+	n, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || n < 0 || n > math.MaxInt64/int64(unit) {
+		return 0, false
+	}
+	return time.Duration(n) * unit, true
+}
+
 // parseRetryAfter accepts both RFC 9110 forms: delta-seconds and HTTP-date. A
 // date already in the past yields zero rather than a negative delay.
 func parseRetryAfter(raw string, now time.Time) (time.Duration, bool) {
-	if secs, err := strconv.Atoi(raw); err == nil {
-		if secs < 0 {
-			return 0, true
-		}
-		return time.Duration(secs) * time.Second, true
+	if d, ok := numericDuration(raw, time.Second); ok {
+		return d, true
 	}
 	if t, err := http.ParseTime(raw); err == nil {
 		if now.IsZero() {
@@ -139,22 +147,17 @@ func parseRetryAfter(raw string, now time.Time) (time.Duration, bool) {
 func parseWindow(h http.Header, scope string) Window {
 	var w Window
 	if v := strings.TrimSpace(h.Get(prefixCodex + scope + "-" + suffixUsedPercent)); v != "" {
-		if f, err := strconv.ParseFloat(v, 64); err == nil {
+		if f, err := strconv.ParseFloat(v, 64); err == nil && f >= 0 && f <= 100 {
 			w.UsedPercent, w.HasUsedPercent = f, true
 		}
 	}
 	if v := strings.TrimSpace(h.Get(prefixCodex + scope + "-" + suffixWindow)); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			w.WindowMinutes, w.HasWindowMinutes = n, true
+		if d, ok := numericDuration(v, time.Minute); ok {
+			w.WindowMinutes, w.HasWindowMinutes = int(d/time.Minute), true
 		}
 	}
 	if v := strings.TrimSpace(h.Get(prefixCodex + scope + "-" + suffixResetSeconds)); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			if n < 0 {
-				n = 0
-			}
-			w.ResetAfter, w.HasResetAfter = time.Duration(n)*time.Second, true
-		}
+		w.ResetAfter, w.HasResetAfter = numericDuration(v, time.Second)
 	}
 	return w
 }

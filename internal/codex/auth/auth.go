@@ -23,6 +23,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -31,6 +32,7 @@ import (
 
 	"golang.org/x/sync/singleflight"
 
+	"github.com/hughescr/utraque/internal/accountscope"
 	"github.com/hughescr/utraque/internal/apierr"
 	"github.com/hughescr/utraque/internal/obs"
 )
@@ -50,6 +52,29 @@ type Credential struct {
 	AccessToken string
 	AccountID   string
 	Exp         time.Time
+	// scope is accountScope(AccountID), computed once when the credential is
+	// read, so tagging and comparing account-derived state costs no hash.
+	scope string
+}
+
+// Scope reports the account scope key (internal/accountscope) of the account
+// this credential authorises: the tag on every catalog snapshot and quota
+// sample fetched with it. It is "" only for a credential that names no
+// account, such as the token-less one Get returns with an error when the file
+// names none.
+func (c Credential) Scope() string {
+	if c.scope == "" {
+		return accountScope(c.AccountID)
+	}
+	return c.scope
+}
+
+// accountScope is the account scope key for an account id, or "" for none.
+func accountScope(id string) string {
+	if id == "" {
+		return ""
+	}
+	return accountscope.Key("codex", id)
 }
 
 // State is the credential state reported by Peek.
@@ -74,6 +99,9 @@ const (
 // reports. It is produced by Peek without any network call and carries no token
 // value — only the coarse state and, when known, the time until expiry.
 type Status struct {
+	// Scope is the account scope of the account the file names, or "" when
+	// the file cannot be read or names none. It is a hash, never the id.
+	Scope string `json:"-"`
 	// State is one of StateOK, StateStale, or StateMissing.
 	State State
 	// Reason distinguishes the two StateStale paths: "expiring" for a
@@ -88,7 +116,35 @@ type Status struct {
 	// false when there is no usable credential, or the token's expiry could not
 	// be decoded.
 	HasExpiry bool
+	// FileMode is auth.json's permission bits as Peek's stat found them, or
+	// zero when the file could not be stat'd. It is reported for files that
+	// exist but cannot be used, too.
+	FileMode os.FileMode
+	// GroupOrOtherAccess reports that FileMode grants read or write to the
+	// file's group or to others. It describes the mode only: whether another
+	// account can actually reach the file also depends on the directories
+	// above it, ACLs and group membership. ModeWarning renders it.
+	GroupOrOtherAccess bool
 }
+
+// PermissiveModeWarning is the fixed text ModeWarning returns. It names no
+// path, mode or token, so it can be shown anywhere.
+const PermissiveModeWarning = "codex auth.json mode permits access by group/others; run chmod 600 on it"
+
+// ModeWarning returns PermissiveModeWarning when the auth file's mode grants
+// group or other access, and "" otherwise.
+func (st Status) ModeWarning() string {
+	if st.GroupOrOtherAccess {
+		return PermissiveModeWarning
+	}
+	return ""
+}
+
+// groupOrOtherRW is the permission mask the mode diagnostic checks: read or
+// write for group or others. Execute bits grant nothing on a data file.
+const groupOrOtherRW os.FileMode = 0o066
+
+func permissive(perm os.FileMode) bool { return perm&groupOrOtherRW != 0 }
 
 // CredentialSource yields a currently-valid Codex credential and lets a caller
 // report one as rejected.
@@ -141,24 +197,45 @@ type Source struct {
 
 	mu          sync.Mutex
 	cached      *cachedCred
-	invalidated map[string]struct{} // access tokens forced stale by Invalidate
+	invalidated map[rejectedToken]struct{} // tokens forced stale by Invalidate, per account
 	// invalGen counts Invalidate calls. A loader captures it before it decides a
 	// token is usable and passes it to store, which refuses to cache (or clear
 	// the stale-marker of) a token that a concurrent Invalidate marked in the
 	// meantime — closing the load-vs-Invalidate race.
 	invalGen uint64
+	// lastMode is the permission bits the most recent successful stat saw
+	// (valid once modeSeen), so the group/other warning is logged when the
+	// condition first appears or the mode changes, not on every read or poll.
+	lastMode os.FileMode
+	modeSeen bool
 }
+
+// rejectedToken is what Invalidate marks: a token as presented for one
+// account. The same token string under another account is a different
+// credential, and a 401 for one says nothing about the other.
+type rejectedToken struct{ scope, token string }
+
+func (c Credential) signature() rejectedToken { return rejectedToken{c.Scope(), c.AccessToken} }
 
 type cachedCred struct {
 	cred Credential
 	stat statInfo
 }
 
-// statInfo is the cheap external-change fingerprint: a changed size or mtime
-// means the file was rewritten (e.g. by the Codex CLI) and must be re-read.
+// statInfo is the cheap external-change fingerprint: a changed size, mtime or
+// (on unix) device and inode means the file was rewritten or replaced (e.g. by
+// the Codex CLI) and must be re-read. An atomic replace always changes the
+// inode; an in-place rewrite that keeps both size and mtime is not noticed.
 type statInfo struct {
-	size  int64
-	mtime time.Time
+	size     int64
+	mtime    time.Time
+	dev, ino uint64
+}
+
+// statOf is the fingerprint of the file fi describes.
+func statOf(fi os.FileInfo) statInfo {
+	dev, ino := fileIdentity(fi)
+	return statInfo{fi.Size(), fi.ModTime(), dev, ino}
 }
 
 var (
@@ -183,7 +260,7 @@ func New(opts Options) (*Source, error) {
 		httpClient:  opts.HTTPClient,
 		now:         opts.Now,
 		log:         opts.Logger,
-		invalidated: map[string]struct{}{},
+		invalidated: map[rejectedToken]struct{}{},
 	}
 	if s.refreshSkew <= 0 {
 		s.refreshSkew = defaultRefreshSkew
@@ -218,6 +295,11 @@ func New(opts Options) (*Source, error) {
 const getAttempts = 2
 
 // Get returns a valid credential, refreshing if necessary.
+//
+// On error the returned Credential carries no token, only the Scope of the
+// account the file names, if any: a refresh can fail (no refresh token, a busy
+// OAuth endpoint) while the file still says which account is logged in, and a
+// caller deciding whether to resend after a 401 needs to know that.
 func (s *Source) Get(ctx context.Context) (Credential, error) {
 	var cred Credential
 	for attempt := 0; attempt < getAttempts; attempt++ {
@@ -227,17 +309,21 @@ func (s *Source) Get(ctx context.Context) (Credential, error) {
 		// singleflight ensures N concurrent Gets for this file drive at most one
 		// disk read + refresh; the rest share its result.
 		v, err, _ := s.group.Do(s.path, func() (any, error) {
-			return s.load(ctx)
+			loaded, err := s.load(ctx)
+			if err != nil {
+				loaded = Credential{scope: s.Peek().Scope}
+			}
+			return loaded, err
 		})
-		if err != nil {
-			return Credential{}, err
-		}
 		cred = v.(Credential)
+		if err != nil {
+			return cred, err
+		}
 		// A shared load may have STARTED before this caller's Invalidate landed,
 		// in which case its result is the very token we just reported rejected.
 		// Serving it would hand the caller a known-dead credential and cost them
 		// a 401 that one more load would have fixed, so drive the loader again.
-		if !s.isInvalidated(cred.AccessToken) {
+		if !s.isInvalidated(cred.signature()) {
 			return cred, nil
 		}
 	}
@@ -263,11 +349,11 @@ func (s *Source) Invalidate(cred Credential) {
 	}
 	s.mu.Lock()
 	s.invalGen++
-	if _, known := s.invalidated[cred.AccessToken]; !known && len(s.invalidated) >= maxInvalidated {
-		s.invalidated = make(map[string]struct{}, 1)
+	if _, known := s.invalidated[cred.signature()]; !known && len(s.invalidated) >= maxInvalidated {
+		s.invalidated = make(map[rejectedToken]struct{}, 1)
 	}
-	s.invalidated[cred.AccessToken] = struct{}{}
-	if s.cached != nil && s.cached.cred.AccessToken == cred.AccessToken {
+	s.invalidated[cred.signature()] = struct{}{}
+	if s.cached != nil && s.cached.cred.signature() == cred.signature() {
 		s.cached = nil
 	}
 	s.mu.Unlock()
@@ -279,21 +365,33 @@ func (s *Source) Invalidate(cred Credential) {
 // it cheaply. A missing or invalid file reports StateMissing; a token that is
 // at/near expiry or has been Invalidate-marked reports StateStale; a usable,
 // comfortably-fresh token reports StateOK.
+//
+// It also reports the file's permission bits from that same stat, flagging a
+// mode that grants group or other access; see Status.GroupOrOtherAccess.
+//
+// A poll changes no operational state: credentials, invalidation, the catalog,
+// quota and routes are untouched. It may update the file-mode diagnostic and
+// log that diagnostic's one-time warning.
 func (s *Source) Peek() Status {
-	af, _, _, err := s.readFile()
+	af, mode, _, err := s.readFile()
+	modeStatus := Status{FileMode: mode, GroupOrOtherAccess: permissive(mode)}
 	if err != nil {
-		return Status{State: StateMissing}
+		modeStatus.State = StateMissing
+		return modeStatus
 	}
+	// The account id alone says whose login this is, even when the file
+	// lacks a usable token.
+	modeStatus.Scope = accountScope(af.tokenString(keyAccountID))
 	cred, err := s.credFrom(af)
 	if err != nil {
-		return Status{State: StateMissing}
+		modeStatus.State = StateMissing
+		return modeStatus
 	}
-	st := Status{
-		ExpiresIn: cred.Exp.Sub(s.now()),
-		HasExpiry: !cred.Exp.IsZero(),
-	}
+	st := modeStatus
+	st.ExpiresIn = cred.Exp.Sub(s.now())
+	st.HasExpiry = !cred.Exp.IsZero()
 	switch {
-	case s.isInvalidated(cred.AccessToken):
+	case s.isInvalidated(cred.signature()):
 		st.State, st.Reason = StateStale, "invalidated"
 	case s.fresh(cred):
 		st.State = StateOK
@@ -307,19 +405,16 @@ func (s *Source) Peek() Status {
 // the token is not invalidated, and it is comfortably before expiry. Any doubt
 // falls through to the singleflight-guarded slow path.
 func (s *Source) fastPath() (Credential, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.cached == nil {
-		return Credential{}, false
-	}
 	st, err := os.Stat(s.path)
 	if err != nil {
 		return Credential{}, false
 	}
-	if (statInfo{st.Size(), st.ModTime()}) != s.cached.stat {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cached == nil || statOf(st) != s.cached.stat {
 		return Credential{}, false
 	}
-	if _, bad := s.invalidated[s.cached.cred.AccessToken]; bad {
+	if _, bad := s.invalidated[s.cached.cred.signature()]; bad {
 		return Credential{}, false
 	}
 	if !s.freshLocked(s.cached.cred) {
@@ -341,7 +436,7 @@ func (s *Source) load(ctx context.Context) (Credential, error) {
 	if err != nil {
 		return Credential{}, err
 	}
-	if s.fresh(cred) && !s.isInvalidated(cred.AccessToken) {
+	if s.fresh(cred) && !s.isInvalidated(cred.signature()) {
 		s.store(cred, stat, gen)
 		return cred, nil
 	}
@@ -380,7 +475,7 @@ func (s *Source) refreshUnderLock(ctx context.Context, mode os.FileMode) (Creden
 	if err != nil {
 		return Credential{}, err
 	}
-	if s.fresh(cred) && !s.isInvalidated(cred.AccessToken) {
+	if s.fresh(cred) && !s.isInvalidated(cred.signature()) {
 		// Someone else refreshed it; adopt without touching the network.
 		s.store(cred, stat, gen)
 		s.log.Debug("codex token already fresh under lock; skipping network refresh",
@@ -443,7 +538,8 @@ func (s *Source) refreshUnderLock(ctx context.Context, mode os.FileMode) (Creden
 			"codex auth.json was updated by another process during refresh; please retry")
 	}
 
-	if err := writeAuthFileAtomic(s.path, data, mode); err != nil {
+	written, err := writeAuthFileAtomic(s.path, data, mode)
+	if err != nil {
 		// The refresh itself SUCCEEDED — the old refresh token was already
 		// redeemed and (if rotated) is now dead upstream. Discarding the result
 		// here would strand us with a dead token on disk and force a re-login, so
@@ -455,12 +551,9 @@ func (s *Source) refreshUnderLock(ctx context.Context, mode os.FileMode) (Creden
 		return newCred, nil
 	}
 
-	st, statErr := os.Stat(s.path)
-	if statErr == nil {
-		s.store(newCred, statInfo{st.Size(), st.ModTime()}, gen)
-	} else {
-		s.store(newCred, statInfo{}, gen)
-	}
+	// The fingerprint is of the file we wrote, taken before the rename. A later
+	// stat of the path could describe a file another process put there since.
+	s.store(newCred, written, gen)
 	s.log.Info("refreshed codex token",
 		obs.HashAttr("account", newCred.AccountID),
 		slog.Time("expires_at", newCred.Exp))
@@ -475,7 +568,7 @@ func (s *Source) fileChangedSince(base statInfo) bool {
 	if err != nil {
 		return true
 	}
-	return statInfo{st.Size(), st.ModTime()} != base
+	return statOf(st) != base
 }
 
 // adoptFromDisk re-reads the file and, if it now holds a usable, fresh, not-
@@ -490,7 +583,7 @@ func (s *Source) adoptFromDisk(gen uint64) (Credential, bool) {
 	if err != nil {
 		return Credential{}, false
 	}
-	if !s.fresh(cred) || s.isInvalidated(cred.AccessToken) {
+	if !s.fresh(cred) || s.isInvalidated(cred.signature()) {
 		return Credential{}, false
 	}
 	s.store(cred, stat, gen)
@@ -499,7 +592,10 @@ func (s *Source) adoptFromDisk(gen uint64) (Credential, bool) {
 
 // readFile stats, reads, and parses the auth file. A missing or unreadable file
 // becomes an actionable authentication error. The returned mode is the file's
-// permission bits (0 when unknown).
+// permission bits (0 when the stat failed); it is returned alongside a read or
+// parse error too, so Peek can report the mode of a file it cannot use. The
+// stat also feeds the group/other mode warning (noteMode), so that check costs
+// no syscall of its own.
 func (s *Source) readFile() (*authFile, os.FileMode, statInfo, error) {
 	st, err := os.Stat(s.path)
 	if err != nil {
@@ -509,16 +605,35 @@ func (s *Source) readFile() (*authFile, os.FileMode, statInfo, error) {
 		}
 		return nil, 0, statInfo{}, apierr.Wrap(err, apierr.TypeAPI, "codex: stat auth.json")
 	}
+	mode := st.Mode().Perm()
+	s.noteMode(mode)
 	b, err := os.ReadFile(s.path)
 	if err != nil {
-		return nil, 0, statInfo{}, apierr.Wrap(err, apierr.TypeAPI, "codex: read auth.json")
+		return nil, mode, statInfo{}, apierr.Wrap(err, apierr.TypeAPI, "codex: read auth.json")
 	}
 	af, err := parseAuthFile(b)
 	if err != nil {
-		return nil, 0, statInfo{}, apierr.Authentication(
+		return nil, mode, statInfo{}, apierr.Authentication(
 			"codex auth.json is not valid JSON; run `codex login`")
 	}
-	return af, st.Mode().Perm(), statInfo{st.Size(), st.ModTime()}, nil
+	return af, mode, statOf(st), nil
+}
+
+// noteMode records the auth file's permission bits and logs one warning when
+// a mode granting group or other access is first seen, or when the mode
+// changes to another such mode. Repeated reads of an unchanged mode — every
+// health poll calls Peek — log nothing. The file belongs to the Codex CLI, so
+// utraque reports the mode and never changes it.
+func (s *Source) noteMode(mode os.FileMode) {
+	s.mu.Lock()
+	changed := !s.modeSeen || mode != s.lastMode
+	s.lastMode, s.modeSeen = mode, true
+	s.mu.Unlock()
+	if changed && permissive(mode) {
+		s.log.Warn("codex auth.json mode permits access by group/others; it holds your Codex refresh token, so consider chmod 600",
+			slog.String("path", s.path),
+			slog.String("mode", fmt.Sprintf("%04o", uint32(mode))))
+	}
 }
 
 // credFrom derives a Credential from a parsed file, requiring the fields the
@@ -538,7 +653,7 @@ func (s *Source) credFrom(af *authFile) (Credential, error) {
 	// A zero expiry (undecodable) leaves the credential looking already
 	// expired, which forces a refresh — the safe direction.
 	exp, _ := accessTokenExpiry(access, af.topString(keyLastRefresh), fallbackTTL)
-	return Credential{AccessToken: access, AccountID: account, Exp: exp}, nil
+	return Credential{AccessToken: access, AccountID: account, Exp: exp, scope: accountScope(account)}, nil
 }
 
 // fresh reports whether cred is comfortably before expiry.
@@ -552,7 +667,7 @@ func (s *Source) freshLocked(cred Credential) bool {
 	return cred.Exp.Sub(s.now()) >= s.refreshSkew
 }
 
-func (s *Source) isInvalidated(tok string) bool {
+func (s *Source) isInvalidated(tok rejectedToken) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	_, ok := s.invalidated[tok]
@@ -576,12 +691,12 @@ func (s *Source) store(cred Credential, stat statInfo, gen uint64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.invalGen != gen {
-		if _, bad := s.invalidated[cred.AccessToken]; bad {
+		if _, bad := s.invalidated[cred.signature()]; bad {
 			return
 		}
 	}
 	s.cached = &cachedCred{cred: cred, stat: stat}
-	delete(s.invalidated, cred.AccessToken)
+	delete(s.invalidated, cred.signature())
 }
 
 // storeMemoryOnly caches cred without a matching on-disk write. It fingerprints
@@ -590,7 +705,7 @@ func (s *Source) store(cred Credential, stat statInfo, gen uint64) {
 // persistence failed.
 func (s *Source) storeMemoryOnly(cred Credential, gen uint64) {
 	if st, err := os.Stat(s.path); err == nil {
-		s.store(cred, statInfo{st.Size(), st.ModTime()}, gen)
+		s.store(cred, statOf(st), gen)
 	} else {
 		s.store(cred, statInfo{}, gen)
 	}

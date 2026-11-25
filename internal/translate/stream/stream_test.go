@@ -89,7 +89,14 @@ func TestGolden(t *testing.T) {
 			if err != nil {
 				t.Fatalf("read %s: %v", in, err)
 			}
-			got, _, err := runToBytes(t, raw, goldenOptions())
+			opts := goldenOptions()
+			if name == "text_only" {
+				opts.PublicDetail = func(string) string {
+					t.Error("success text passed to the error redactor")
+					return "unexpected redaction"
+				}
+			}
+			got, _, err := runToBytes(t, raw, opts)
 			if err != nil {
 				t.Fatalf("run %s: unexpected error: %v", name, err)
 			}
@@ -112,6 +119,66 @@ func TestGolden(t *testing.T) {
 				t.Errorf("golden mismatch for %s\n--- got ---\n%s\n--- want ---\n%s", name, got, want)
 			}
 		})
+	}
+}
+
+type failingRead struct{}
+
+func (failingRead) Read([]byte) (int, error) { return 0, errors.New("read failed: private-fragment") }
+
+func TestReadFailureUsesPublicDetail(t *testing.T) {
+	for _, started := range []bool{false, true} {
+		opts := goldenOptions()
+		opts.PublicDetail = func(s string) string { return strings.ReplaceAll(s, "private-fragment", "[masked]") }
+		var prefix string
+		if started {
+			prefix = "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"delta\":\"hi\"}\n\n"
+		}
+		var out bytes.Buffer
+		_, err := stream.New(opts).Run(t.Context(), io.MultiReader(strings.NewReader(prefix), failingRead{}), stream.NewSSEWriter(&out))
+		public := fmt.Sprint(err) + out.String()
+		if strings.Contains(public, "private-fragment") || !strings.Contains(public, "[masked]") {
+			t.Errorf("read failure not sanitized (started=%v)", started)
+		}
+	}
+}
+
+type readErr struct{ err error }
+
+func (r readErr) Read([]byte) (int, error) { return 0, r.err }
+
+// A failure before any output keeps its cause for errors.Is — a wrapped
+// sentinel or a cancellation is still classified as one — while its text is
+// redacted, and an inner error's own unredacted text cannot be reached
+// through errors.As.
+func TestPreStartFailureKeepsCauseButRedactsText(t *testing.T) {
+	opts := goldenOptions()
+	opts.PublicDetail = func(s string) string { return strings.ReplaceAll(s, "private-fragment", "[masked]") }
+	for _, tc := range []struct {
+		cause, want error
+	}{
+		{fmt.Errorf("read private-fragment: %w", stream.ErrTruncated), stream.ErrTruncated},
+		{fmt.Errorf("read private-fragment: %w", stream.ErrIdleTimeout), stream.ErrIdleTimeout},
+		{fmt.Errorf("read private-fragment: %w", context.Canceled), context.Canceled},
+		{fmt.Errorf("read: %w", apierr.Authentication("private-fragment")), nil},
+	} {
+		_, err := stream.New(opts).Run(t.Context(), readErr{tc.cause}, stream.NewSSEWriter(io.Discard))
+		if err == nil || strings.Contains(err.Error(), "private-fragment") || !strings.Contains(err.Error(), "[masked]") {
+			t.Errorf("%v: public text %v", tc.cause, err)
+		}
+		if tc.want != nil && !errors.Is(err, tc.want) {
+			t.Errorf("%v: errors.Is lost the cause", tc.cause)
+		}
+		var ae *apierr.Error
+		if errors.As(err, &ae) {
+			t.Errorf("%v: errors.As reached an inner error with text %q", tc.cause, ae.Message)
+		}
+	}
+	// The bare sentinels pass through unchanged.
+	for _, sentinel := range []error{stream.ErrTruncated, stream.ErrIdleTimeout} {
+		if _, err := stream.New(opts).Run(t.Context(), readErr{sentinel}, stream.NewSSEWriter(io.Discard)); err != sentinel {
+			t.Errorf("bare %v became %v", sentinel, err)
+		}
 	}
 }
 

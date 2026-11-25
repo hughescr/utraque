@@ -94,6 +94,7 @@ func TestProductionReportCompositionUsesAllInjectedSources(t *testing.T) {
 	}
 	get := func(path string) *httptest.ResponseRecorder {
 		r := httptest.NewRequest(http.MethodGet, path, nil)
+		r.Host = "localhost"
 		r.RemoteAddr = "127.0.0.1:4000"
 		r.Header.Set(proxyhdr.LocalToken, cfg.LocalToken)
 		r.Header.Set("Authorization", "Bearer caller-token")

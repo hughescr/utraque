@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hughescr/utraque/internal/apierr"
 	"github.com/hughescr/utraque/internal/codex/auth"
 	"github.com/hughescr/utraque/internal/codex/catalog"
 	"github.com/hughescr/utraque/internal/codex/schema"
@@ -235,12 +236,12 @@ func TestBadRequestNamesClientVersionInError(t *testing.T) {
 	if err == nil {
 		t.Fatal("want error on HTTP 400")
 	}
-	got := err.Error()
+	got := apierr.From(err).Message
 	if !contains(got, "client_version") {
 		t.Errorf("error = %q, want it to name client_version so the cause is diagnosable from the error text alone", got)
 	}
-	if !contains(got, "400") {
-		t.Errorf("error = %q, want it to mention the 400 status", got)
+	if err.Error() != "bad_request (HTTP 400)" {
+		t.Errorf("log error = %q, want class and status only", err.Error())
 	}
 }
 
@@ -341,6 +342,40 @@ func TestETag304ReusesModels(t *testing.T) {
 	}
 }
 
+// A 304 keeps the validator: a second consecutive revalidation must offer the
+// original ETag again, not go out unconditional (which would refetch the whole
+// list, or, answered 304, be rejected as a protocol surprise).
+func TestSecondConsecutive304RevalidationSendsTheOriginalETag(t *testing.T) {
+	fake := newFakeCatalog(t, []cschema.CatalogModel{solModel()}, `W/"v1"`)
+	srv := httptest.NewServer(fake)
+	t.Cleanup(srv.Close)
+
+	clk := newClock()
+	c := catalog.New(catalog.Options{BaseURL: srv.URL, HTTPClient: srv.Client(), TTL: 60 * time.Second, Now: clk.now})
+	if _, err := c.Models(context.Background(), fakeCred()); err != nil {
+		t.Fatalf("first Models: %v", err)
+	}
+	fake.set([]cschema.CatalogModel{solModel()}, `W/"v1"`, true)
+
+	for round := 2; round <= 3; round++ {
+		clk.advance(120 * time.Second)
+		if _, err := c.Models(context.Background(), fakeCred()); err != nil {
+			t.Fatalf("stale Models (round %d): %v", round, err)
+		}
+		eventually(t, 2*time.Second, func() bool { return fake.callCount() >= round })
+		eventually(t, 2*time.Second, func() bool { return c.Age() < 60*time.Second })
+		fake.mu.Lock()
+		inm := fake.lastINM
+		fake.mu.Unlock()
+		if inm != `W/"v1"` {
+			t.Fatalf("revalidation %d sent If-None-Match %q, want the original ETag", round-1, inm)
+		}
+	}
+	if got := fake.callCount(); got != 3 {
+		t.Errorf("call count = %d, want 3 (one fetch, two revalidations)", got)
+	}
+}
+
 func TestUnauthorizedIsAuthenticationError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "nope", http.StatusUnauthorized)
@@ -415,6 +450,8 @@ func TestFreshDiskCacheServedWithoutNetwork(t *testing.T) {
 
 	// Pre-write a cache dated exactly "now" so it is within TTL.
 	cache := cschema.Cache{
+		AccountScope:  fakeCred().Scope(),
+		Endpoint:      "http://catalog.invalid",
 		ClientVersion: "x",
 		ETag:          `W/"disk"`,
 		FetchedAt:     clk.now(),
@@ -557,16 +594,16 @@ func TestDiskCacheIgnoredOnClientVersionMismatch(t *testing.T) {
 	cachePath := filepath.Join(dir, "utraque-models_cache.json")
 	clk := newClock()
 
-	// A fresh (within-TTL) disk cache tagged with an OLD client version.
-	cache := cschema.Cache{ClientVersion: "old", ETag: `W/"d"`, FetchedAt: clk.now(), Models: []cschema.CatalogModel{solModel()}}
+	fake := newFakeCatalog(t, []cschema.CatalogModel{solModel(), terraModel()}, `W/"v2"`)
+	srv := httptest.NewServer(fake)
+	t.Cleanup(srv.Close)
+
+	// A fresh same-account disk cache tagged with an OLD client version.
+	cache := cschema.Cache{Endpoint: srv.URL, AccountScope: fakeCred().Scope(), ClientVersion: "old", ETag: `W/"d"`, FetchedAt: clk.now(), Models: []cschema.CatalogModel{solModel()}}
 	b, _ := json.Marshal(cache)
 	if err := os.WriteFile(cachePath, b, 0o644); err != nil {
 		t.Fatal(err)
 	}
-
-	fake := newFakeCatalog(t, []cschema.CatalogModel{solModel(), terraModel()}, `W/"v2"`)
-	srv := httptest.NewServer(fake)
-	t.Cleanup(srv.Close)
 
 	c := catalog.New(catalog.Options{
 		BaseURL: srv.URL, HTTPClient: srv.Client(), Now: clk.now,
@@ -663,14 +700,14 @@ func TestClientVersionChangeForcesUnconditionalFetch(t *testing.T) {
 func TestClientVersionFuncRunsOnlyForAFetch(t *testing.T) {
 	clk := newClock()
 	cachePath := filepath.Join(t.TempDir(), "utraque-models_cache.json")
-	cache := cschema.Cache{ClientVersion: "0.155.0", ETag: `W/"d"`, FetchedAt: clk.now(), Models: []cschema.CatalogModel{solModel()}}
+	fake := newFakeCatalog(t, []cschema.CatalogModel{solModel()}, `W/"v1"`)
+	srv := httptest.NewServer(fake)
+	t.Cleanup(srv.Close)
+	cache := cschema.Cache{Endpoint: srv.URL, AccountScope: fakeCred().Scope(), ClientVersion: "0.155.0", ETag: `W/"d"`, FetchedAt: clk.now(), Models: []cschema.CatalogModel{solModel()}}
 	b, _ := json.Marshal(cache)
 	if err := os.WriteFile(cachePath, b, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	fake := newFakeCatalog(t, []cschema.CatalogModel{solModel()}, `W/"v1"`)
-	srv := httptest.NewServer(fake)
-	t.Cleanup(srv.Close)
 
 	var calls atomic.Int64
 	c := catalog.New(catalog.Options{
@@ -679,7 +716,7 @@ func TestClientVersionFuncRunsOnlyForAFetch(t *testing.T) {
 		ClientVersionFunc: func(context.Context) string { calls.Add(1); return "0.155.0" },
 	})
 
-	c.Snapshot()
+	c.Snapshot("")
 	c.Age()
 	if got := c.ClientVersion(); got != "0.155.0" {
 		t.Errorf("ClientVersion() = %q, want the seed", got)
@@ -779,15 +816,15 @@ func TestDiskCacheIgnoredWhenFetchedAtInFuture(t *testing.T) {
 	cachePath := filepath.Join(dir, "utraque-models_cache.json")
 	clk := newClock()
 
-	cache := cschema.Cache{ETag: `W/"d"`, FetchedAt: clk.now().Add(time.Hour), Models: []cschema.CatalogModel{solModel()}}
+	fake := newFakeCatalog(t, []cschema.CatalogModel{solModel(), terraModel()}, `W/"v2"`)
+	srv := httptest.NewServer(fake)
+	t.Cleanup(srv.Close)
+
+	cache := cschema.Cache{Endpoint: srv.URL, AccountScope: fakeCred().Scope(), ETag: `W/"d"`, FetchedAt: clk.now().Add(time.Hour), Models: []cschema.CatalogModel{solModel()}}
 	b, _ := json.Marshal(cache)
 	if err := os.WriteFile(cachePath, b, 0o644); err != nil {
 		t.Fatal(err)
 	}
-
-	fake := newFakeCatalog(t, []cschema.CatalogModel{solModel(), terraModel()}, `W/"v2"`)
-	srv := httptest.NewServer(fake)
-	t.Cleanup(srv.Close)
 
 	c := catalog.New(catalog.Options{
 		BaseURL: srv.URL, HTTPClient: srv.Client(), Now: clk.now,

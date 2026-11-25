@@ -40,7 +40,13 @@ The `go` group checks every recursive `*.go` file except files under `.git` or
 disposable output, and runs ordinary and race-enabled tests. It never formats
 source or replaces `bin/utraque`. The `shell` group recursively finds `*.sh`
 under `deploy`, `scripts`, and `tests`, plus every file under `.githooks`; it
-runs `bash -n` separately on each file before ShellCheck. The `hooks` group
+runs `bash -n` separately on each file before ShellCheck, then runs
+`tests/install-loopback.sh`; the group stops if that file is missing or not
+executable. The regression checks the installer's loopback classifier through
+`deploy/install.sh --check-node` on every host, including the Ubuntu CI job,
+then exercises the whole installer against a disposable `HOME` with a stub
+`launchctl`; that second part needs `plutil` and is skipped, with a note,
+where it is absent. The `hooks` group
 exercises real pushes against disposable local repositories and bare remotes.
 
 To enable the version-controlled pre-push hook in this repository, run:
@@ -65,6 +71,25 @@ and every credential is a throwaway written under `t.TempDir()`. The real
 `chatgpt.com`, `auth.openai.com`, `api.anthropic.com`, `api.deepseek.com` and
 your own `~/.codex/auth.json` are never read, written, or contacted.
 
+Credential isolation and redaction, among other properties, also have fuzz
+tests (`func FuzzXxx`). Plain `go test` replays their seed corpus and any saved
+failures under a package's `testdata/fuzz/` directory, so they run in the
+ordinary suite. List the targets with:
+
+```sh
+grep -rn 'func Fuzz' --include='*_test.go' .
+```
+
+To run one target's random search, name its package and the target (one target
+per run):
+
+```sh
+go test ./internal/obs -run '^$' -fuzz '^FuzzScrubCredential$' -fuzztime 60s
+```
+
+A failure found this way is saved under `testdata/fuzz/` next to the target;
+commit that file with the fix so it is replayed from then on.
+
 The tests that *do* talk to the real backends are behind a build tag and need
 your own subscription credentials:
 
@@ -80,8 +105,13 @@ they are the tripwire for upstream protocol drift.
 **`internal/codex/auth`.** This reads, refreshes, and writes back the Codex
 CLI's own `auth.json`. Getting it wrong logs a user out of their own Codex CLI.
 Any change here must preserve the flock, the re-read under lock, the atomic
-temp-write plus rename, and the passthrough of unknown JSON keys. There are
-tests for cross-process and concurrent refresh; keep them passing.
+temp-write plus rename, the passthrough of unknown JSON keys, and the file's
+mode and group. There are
+tests for cross-process and concurrent refresh; keep them passing. Keep the
+account pin and scope rule too: one credential snapshot per request, a retry
+only for the same account, and catalog and quota state tagged with the account
+that produced it and never served for another (`cmd/utraque/account_switch_test.go`,
+`cmd/utraque/account_flap_test.go`, `internal/codex/catalog/account_test.go`).
 
 **`internal/translate/stream`.** A state machine converting Codex SSE into
 Anthropic SSE incrementally. It is covered by golden files, a grammar-invariant
@@ -125,7 +155,8 @@ stamping*), so cutting a release is just:
 
 ## Reporting bugs
 
-Include the `/healthz` output with any token values removed, the redacted
+Include the full `/healthz` output (send `X-Utraque-Token` if a local token is
+set, or you get only the version and uptime) with any token values removed, the redacted
 request line from the log, and what you expected instead. If it involves the
 Codex leg, say which model name you used and whether it was typed, set in agent
 frontmatter, or chosen from the picker.

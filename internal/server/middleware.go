@@ -221,8 +221,9 @@ func (s *Server) withBodyLimit(next http.Handler) http.Handler {
 	})
 }
 
-// withAuth enforces the optional loopback shared secret. Any local process
-// could otherwise spend both subscriptions through the loopback port.
+// withAuth checks the configured shared secret on non-exempt routes. The
+// binary requires a token outside loopback; on loopback it also lets the
+// operator distinguish trusted native clients from other local processes.
 func (s *Server) withAuth(next http.Handler) http.Handler {
 	want := []byte(s.cfg.LocalToken)
 	if len(want) == 0 {

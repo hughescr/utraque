@@ -6,7 +6,6 @@ package config
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -17,6 +16,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/hughescr/utraque/internal/localaddr"
 )
 
 // Defaults. Every one is overridable by the matching Env* variable.
@@ -761,9 +762,10 @@ func (c Config) Validate() error {
 	// the catalog client (and to keep re-resolving it afterwards). Keeping
 	// discovery out of config makes Default and LoadFrom deterministic and
 	// free of subprocess side effects.
-	// Both Codex endpoints must be plain https/http URLs with no embedded
-	// credentials — the same rule as the Anthropic base URL, since a
-	// misconfigured value is printed to stderr on failure.
+	// Both Codex endpoints carry a token (the access token to the backend, the
+	// refresh token to the OAuth endpoint), so they follow the same rule as the
+	// Anthropic and DeepSeek URLs: https, or http only on loopback, with no
+	// embedded credentials.
 	if err := validateEndpoint(EnvCodexBaseURL, c.Codex.BaseURL); err != nil {
 		return err
 	}
@@ -793,29 +795,37 @@ func (c Config) Validate() error {
 	return nil
 }
 
-// validateEndpoint checks one configured URL: present, parseable, http(s), with
-// a host and without userinfo, query or fragment. Every message renders the URL
-// through RedactURL (or only url.Error's inner cause), because a misconfigured
-// value can carry credentials and these errors are printed to stderr.
+// validateEndpoint checks one configured upstream URL. Every endpoint it is
+// called for carries a credential (the caller's Anthropic bearer, the DeepSeek
+// API key, the Codex access or refresh token), so the URL must be an absolute
+// https URL with a host and without userinfo, query or fragment; plain http is
+// allowed only for a loopback host (see localaddr.LoopbackHost), where the bytes never
+// leave the machine.
+//
+// Every message is static text naming the variable: none quotes the value or
+// any part of it, nor url.Parse's own error (which quotes its input, a port
+// for instance). A misconfigured value can carry a credential in places no
+// redaction recognises — "https:<secret>", a secret typed where the port goes —
+// and these errors are printed to stderr and launchd's log.
 func validateEndpoint(name, raw string) error {
 	if raw == "" {
 		return fmt.Errorf("config: %s must not be empty", name)
 	}
 	u, err := url.Parse(raw)
 	if err != nil {
-		var ue *url.Error
-		if errors.As(err, &ue) {
-			return fmt.Errorf("config: %s is not a valid URL: %w", name, ue.Err)
-		}
-		return fmt.Errorf("config: %s is not a valid URL", name)
+		return fmt.Errorf("config: %s is not a valid URL; set it to an absolute https:// URL such as https://api.example.com/v1", name)
 	}
 	switch u.Scheme {
-	case "http", "https":
+	case "https":
+	case "http":
+		if u.Host != "" && !localaddr.LoopbackHost(u.Hostname()) {
+			return fmt.Errorf("config: %s must use https://; plain http:// is allowed only for a loopback host (127.0.0.1, [::1] or localhost) because this endpoint receives a credential", name)
+		}
 	default:
-		return fmt.Errorf("config: %s %q: scheme must be http or https", name, RedactURL(raw))
+		return fmt.Errorf("config: %s must be an https:// URL (http:// only for a loopback host)", name)
 	}
 	if u.Host == "" {
-		return fmt.Errorf("config: %s %q: missing host", name, RedactURL(raw))
+		return fmt.Errorf("config: %s has no host; set it to an absolute https:// URL such as https://api.example.com/v1", name)
 	}
 	if u.User != nil {
 		return fmt.Errorf("config: %s must not contain userinfo credentials", name)

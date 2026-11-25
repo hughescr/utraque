@@ -58,15 +58,6 @@ var hopByHop = map[string]struct{}{
 	"Upgrade":             {},
 }
 
-// utraque's own loopback headers (internal/proxyhdr) describe the
-// caller-to-proxy hop and must never cross the trust boundary:
-//
-//   - proxyhdr.LocalToken is the shared secret that authorizes a local process
-//     to spend the user's subscriptions. Forwarding it would disclose
-//     utraque's own credential to a third party on every single request.
-//   - proxyhdr.RequestID is minted by the proxy; letting an upstream response
-//     overwrite it would make the client-visible id disagree with the logs.
-
 // IsHopByHop reports whether name is a connection-scoped header. name is
 // canonicalized before the lookup.
 func IsHopByHop(name string) bool {
@@ -361,7 +352,7 @@ func (l *Leg) upstreamURL(in *url.URL) string {
 }
 
 // copyRequestHeaders relays every caller header except the connection-scoped
-// set, the headers named in the caller's own Connection token list, and
+// set, Connection nominations, the reserved X-Utraque-* namespace, and
 // Content-Length (the sanitizer may have changed the length; the outbound
 // length comes from Request.ContentLength).
 //
@@ -369,27 +360,21 @@ func (l *Leg) upstreamURL(in *url.URL) string {
 // anthropic-beta headers as distinct values — joining them into one
 // comma-separated line changes the OAuth capability signal upstream reads.
 func copyRequestHeaders(dst, src http.Header) {
-	drop := connectionTokens(src)
-	for k, vv := range src {
-		ck := http.CanonicalHeaderKey(k)
-		if IsHopByHop(ck) || ck == "Content-Length" || ck == proxyhdr.LocalToken {
-			continue
-		}
-		if _, ok := drop[ck]; ok {
-			continue
-		}
-		dst[ck] = slices.Clone(vv)
-	}
+	copyPeerHeaders(dst, src, true)
 }
 
 // copyResponseHeaders relays upstream response headers minus the
-// connection-scoped set. Content-Length is kept: the body is copied verbatim,
-// so upstream's length still describes it.
+// connection-scoped and reserved fields. Content-Length is kept: the body is
+// copied verbatim, so upstream's length still describes it.
 func copyResponseHeaders(dst, src http.Header) {
-	drop := connectionTokens(src)
+	copyPeerHeaders(dst, src, false)
+}
+
+func copyPeerHeaders(dst, src http.Header, omitLength bool) {
+	drop := proxyhdr.ConnectionTokens(src)
 	for k, vv := range src {
 		ck := http.CanonicalHeaderKey(k)
-		if IsHopByHop(ck) || ck == proxyhdr.RequestID {
+		if proxyhdr.IsReserved(ck) || IsHopByHop(ck) || (omitLength && ck == "Content-Length") {
 			continue
 		}
 		if _, ok := drop[ck]; ok {
@@ -397,22 +382,6 @@ func copyResponseHeaders(dst, src http.Header) {
 		}
 		dst[ck] = slices.Clone(vv)
 	}
-}
-
-// connectionTokens returns the canonicalized header names listed in Connection,
-// which RFC 7230 also makes hop-by-hop for this message.
-func connectionTokens(h http.Header) map[string]struct{} {
-	out := map[string]struct{}{}
-	for _, line := range h.Values("Connection") {
-		for _, tok := range strings.Split(line, ",") {
-			tok = strings.TrimSpace(tok)
-			if tok == "" {
-				continue
-			}
-			out[http.CanonicalHeaderKey(tok)] = struct{}{}
-		}
-	}
-	return out
 }
 
 // flushWriter flushes after every write so SSE frames reach the caller as they

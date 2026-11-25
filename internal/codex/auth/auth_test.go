@@ -880,7 +880,7 @@ func TestPeekReportsStaleReason(t *testing.T) {
 			refresh:   "refresh-invalidated",
 			accountID: "acct-invalidated",
 		}.bytes())
-		s.Invalidate(Credential{AccessToken: access})
+		s.Invalidate(Credential{AccessToken: access, AccountID: "acct-invalidated"})
 
 		st := s.Peek()
 		if st.State != StateStale || st.Reason != "invalidated" {

@@ -687,7 +687,7 @@ func TestCodexUpgradeReachesTheNextCatalogFetch(t *testing.T) {
 				mu.Lock()
 				n := len(requests)
 				mu.Unlock()
-				_, age, _ := cat.Snapshot()
+				_, age, _ := cat.Snapshot("")
 				if n >= 2 && age < time.Minute {
 					break
 				}
@@ -706,7 +706,7 @@ func TestCodexUpgradeReachesTheNextCatalogFetch(t *testing.T) {
 			if second.inm != tc.wantINM {
 				t.Errorf("revalidation If-None-Match = %q, want %q", second.inm, tc.wantINM)
 			}
-			if n, _, _ := cat.Snapshot(); n != tc.wantModels {
+			if n, _, _ := cat.Snapshot(""); n != tc.wantModels {
 				t.Errorf("held models = %d, want %d", n, tc.wantModels)
 			}
 			if got := cat.ClientVersion(); got != tc.wantVersion {
@@ -931,4 +931,260 @@ func TestRunRediscoversCodexVersionBeforeALaterCatalogFetch(t *testing.T) {
 	if len(recordsWithMsgPrefix(logRecords(t, logs.String()), "codex client version changed")) != 1 {
 		t.Errorf("want one version-change log line; logs:\n%s", logs.String())
 	}
+}
+
+// --- probe environment ----------------------------------------------------
+
+// probeEnvCanaries are secrets the daemon's own environment can hold, by name
+// and value. None may reach the `codex --version` child.
+var probeEnvCanaries = map[string]string{
+	"DEEPSEEK_API_KEY":         "canary-deepseek-7Hq2",
+	"UTRAQUE_LOCAL_TOKEN":      "canary-local-token-9Zr4",
+	"ANTHROPIC_CUSTOM_HEADERS": "x-utraque-token: canary-header-3Kp8",
+	"OPENAI_API_KEY":           "canary-openai-5Wd1",
+	"GITHUB_TOKEN":             "canary-github-2Mx6",
+	"NODE_OPTIONS":             "--require=/canary/preload-4Lc9.js",
+	// A prefix family is no licence for a credential: mise really does read
+	// MISE_GITHUB_TOKEN.
+	"MISE_GITHUB_TOKEN": "canary-mise-token-8Nb3",
+	"NVM_AUTH_KEY":      "canary-nvm-key-1Qa7",
+}
+
+// setProbeEnv gives the test process a realistic daemon environment: the
+// canaries above plus a private HOME, a PATH, and version-manager variables
+// that must pass through. It returns the values the child should see.
+func setProbeEnv(t *testing.T, path string) (home string) {
+	t.Helper()
+	for k, v := range probeEnvCanaries {
+		t.Setenv(k, v)
+	}
+	home = t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", path)
+	t.Setenv("VOLTA_HOME", filepath.Join(home, ".volta"))
+	t.Setenv("NVM_DIR", filepath.Join(home, ".nvm"))
+	t.Setenv("CODEX_HOME", filepath.Join(home, ".codex"))
+	t.Setenv("UNLISTED_SETTING", "canary-unlisted-6Ty5")
+	return home
+}
+
+// writeEnvDumpingCodex installs a codex that writes its whole environment to
+// dump and then answers --version. It uses absolute paths only, so it works
+// whatever PATH the child is given.
+func writeEnvDumpingCodex(t *testing.T, path, dump, version string) {
+	t.Helper()
+	script := fmt.Sprintf("#!/bin/sh\n/usr/bin/env > %q\nprintf '%%s\\n' %q\n", dump, "codex-cli "+version)
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(script), 0o700); err != nil {
+		t.Fatalf("write Codex fixture: %v", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		t.Fatalf("install Codex fixture: %v", err)
+	}
+}
+
+func readEnvDump(t *testing.T, dump string) (raw string, vars map[string]string) {
+	t.Helper()
+	b, err := os.ReadFile(dump)
+	if err != nil {
+		t.Fatalf("the fake codex did not run: %v", err)
+	}
+	vars = map[string]string{}
+	for _, line := range strings.Split(string(b), "\n") {
+		if k, v, ok := strings.Cut(line, "="); ok {
+			vars[k] = v
+		}
+	}
+	return string(b), vars
+}
+
+// assertProbeEnv checks one dumped child environment: no canary by name or
+// value, and the real HOME, PATH and version-manager settings present.
+func assertProbeEnv(t *testing.T, dump, home, path string) {
+	t.Helper()
+	raw, vars := readEnvDump(t, dump)
+	for k, v := range probeEnvCanaries {
+		if _, ok := vars[k]; ok {
+			t.Errorf("%s reached the codex --version child", k)
+		}
+		if strings.Contains(raw, v) {
+			t.Errorf("the value of %s reached the codex --version child", k)
+		}
+	}
+	if _, ok := vars["UNLISTED_SETTING"]; ok || strings.Contains(raw, "canary-unlisted-6Ty5") {
+		t.Error("a variable outside the allow-list reached the child")
+	}
+	for k, want := range map[string]string{
+		"HOME":       home,
+		"PATH":       path,
+		"VOLTA_HOME": filepath.Join(home, ".volta"),
+		"NVM_DIR":    filepath.Join(home, ".nvm"),
+		"CODEX_HOME": filepath.Join(home, ".codex"),
+	} {
+		if got := vars[k]; got != want {
+			t.Errorf("child %s = %q, want the daemon's %q", k, got, want)
+		}
+	}
+}
+
+// TestCodexVersionProbeGetsOnlyAllowListedEnvironment: the probe runs a
+// user-installed executable, often a Node script behind a version-manager
+// shim, so it needs HOME, PATH and the version manager's settings — and
+// nothing else from a daemon environment that can hold the local token, a
+// DeepSeek key or a header string carrying either.
+func TestCodexVersionProbeGetsOnlyAllowListedEnvironment(t *testing.T) {
+	dir := t.TempDir()
+	path := "/usr/bin:/bin"
+	home := setProbeEnv(t, path)
+	exe := filepath.Join(dir, "codex")
+	dump := filepath.Join(dir, "env-initial")
+	writeEnvDumpingCodex(t, exe, dump, "0.160.0")
+
+	cfg := config.Default()
+	cfg.Codex.Executable = exe
+	probe, err := resolveCodexClientVersion(context.Background(), &cfg, slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatalf("resolveCodexClientVersion: %v", err)
+	}
+	if cfg.Codex.ClientVersion != "0.160.0" {
+		t.Fatalf("ClientVersion = %q", cfg.Codex.ClientVersion)
+	}
+	assertProbeEnv(t, dump, home, path)
+
+	// The runtime re-probe after an upgrade spawns the same way.
+	redump := filepath.Join(dir, "env-reprobe")
+	writeEnvDumpingCodex(t, exe, redump, "0.161.0")
+	if got := probe.ClientVersion(context.Background()); got != "0.161.0" {
+		t.Fatalf("re-probed version = %q, want 0.161.0", got)
+	}
+	assertProbeEnv(t, redump, home, path)
+}
+
+func TestCodexProbeEnvFilter(t *testing.T) {
+	in := []string{
+		"HOME=/h", "PATH=/p", "USER=u", "LOGNAME=u", "SHELL=/bin/zsh", "TMPDIR=/t",
+		"LANG=C", "LC_ALL=C", "LC_CTYPE=UTF-8", "CODEX_HOME=/c",
+		"XDG_CONFIG_HOME=/x1", "XDG_DATA_HOME=/x2", "XDG_CACHE_HOME=/x3", "XDG_STATE_HOME=/x4",
+		"SSL_CERT_FILE=/s1", "SSL_CERT_DIR=/s2",
+		"NVM_DIR=/n", "NVM_BIN=/nb", "VOLTA_HOME=/v", "FNM_DIR=/f", "FNM_MULTISHELL_PATH=/fm",
+		"ASDF_DIR=/a", "ASDF_DATA_DIR=/ad", "MISE_DATA_DIR=/m", "NODENV_ROOT=/nr",
+		"N_PREFIX=/np", "PNPM_HOME=/pn", "BUN_INSTALL=/b", "NODE_PATH=/nm",
+		// Dropped: secrets, utraque's and the providers' own settings, code
+		// injection, near-misses on the allow-list, and malformed entries.
+		"UTRAQUE_LOCAL_TOKEN=x", "UTRAQUE_LISTEN=x", "DEEPSEEK_API_KEY=x", "OPENAI_API_KEY=x",
+		"OPENAI_BASE_URL=x", "ANTHROPIC_CUSTOM_HEADERS=x", "ANTHROPIC_BASE_URL=x",
+		"GITHUB_TOKEN=x", "AWS_SECRET_ACCESS_KEY=x", "NPM_TOKEN=x", "NODE_OPTIONS=x",
+		"MISE_GITHUB_TOKEN=x", "NVM_AUTH_KEY=x", "VOLTA_SECRET=x", "ASDF_PASSWORD=x",
+		"NVMRC=x", "NVM=x", "VOLTA=x", "N_PREFIXES=x", "NODE_PATHS=x", "PNPM_HOME2=x",
+		"XDG_RUNTIME_DIR=x", "LC_MESSAGES=x", "HOMEBREW_PREFIX=x", "HTTPS_PROXY=x",
+		"DYLD_INSERT_LIBRARIES=x", "LD_PRELOAD=x", "BASH_ENV=x", "ENV=x",
+		"home=/lower", "NOEQUALS", "=leading",
+	}
+	got := codexProbeEnv(in)
+	want := in[:29]
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Errorf("codexProbeEnv kept\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+// TestCodexVersionProbeRunsAVersionManagerShim: the allow-list must still let
+// a real install work. The shim found on PATH execs a script under HOME whose
+// `#!/usr/bin/env fakenode` line finds its interpreter through PATH again,
+// the way an npm-installed codex behind nvm, Volta or fnm runs.
+func TestCodexVersionProbeRunsAVersionManagerShim(t *testing.T) {
+	dir := t.TempDir()
+	shims := filepath.Join(dir, "shims")
+	nodeBin := filepath.Join(dir, "node", "bin")
+	for _, d := range []string{shims, nodeBin} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	path := shims + ":" + nodeBin + ":/usr/bin:/bin"
+	home := setProbeEnv(t, path)
+	toolchain := filepath.Join(home, ".volta", "tools", "codex")
+	if err := os.MkdirAll(toolchain, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for file, body := range map[string]string{
+		filepath.Join(shims, "codex"): "#!/bin/sh\n" +
+			"[ -n \"$VOLTA_HOME\" ] || { echo 'shim: VOLTA_HOME unset' >&2; exit 3; }\n" +
+			"exec \"$HOME/.volta/tools/codex/codex.js\" \"$@\"\n",
+		filepath.Join(toolchain, "codex.js"): "#!/usr/bin/env fakenode\n",
+		filepath.Join(nodeBin, "fakenode"): "#!/bin/sh\n" +
+			"[ \"$2\" = --version ] || exit 4\n" +
+			"printf '%s\\n' 'codex-cli 0.162.1'\n",
+	} {
+		if err := os.WriteFile(file, []byte(body), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cfg := config.Default()
+	cfg.Codex.Executable = "codex"
+	if _, err := resolveCodexClientVersion(context.Background(), &cfg, slog.New(slog.DiscardHandler)); err != nil {
+		t.Fatalf("resolveCodexClientVersion through a shim: %v", err)
+	}
+	if cfg.Codex.ClientVersion != "0.162.1" {
+		t.Errorf("ClientVersion = %q, want 0.162.1", cfg.Codex.ClientVersion)
+	}
+}
+
+// TestCodexVersionProbeFailureNeverQuotesChildOutput: a broken or wrapped
+// codex can print anything, including an environment dump or a token, and the
+// startup failure goes to stderr and launchd's log while the runtime failure
+// goes to the log. Both describe the output's shape, never its text, and the
+// startup failure names both escape hatches.
+func TestCodexVersionProbeFailureNeverQuotesChildOutput(t *testing.T) {
+	const canary = "sk-CANARYprobe0utput"
+	for name, output := range map[string]string{
+		"extra field":      "codex-cli 0.163.0 " + canary,
+		"token as version": "codex-cli " + canary,
+		"wrong tool":       canary + " 0.163.0",
+		"env dump":         "OPENAI_API_KEY=" + canary + "\nHOME=/x",
+		"control bytes":    "codex-cli \x1b[31m" + canary,
+	} {
+		t.Run(name, func(t *testing.T) {
+			exe := writeCodexVersionFixture(t, fmt.Sprintf("printf '%%s\\n' %q\nprintf '%%s\\n' %q >&2\n", output, canary))
+			cfg := config.Default()
+			cfg.Codex.Executable = exe
+			_, err := resolveCodexClientVersion(context.Background(), &cfg, slog.New(slog.DiscardHandler))
+			if err == nil {
+				t.Fatal("malformed output accepted")
+			}
+			msg := err.Error()
+			if strings.Contains(msg, "CANARY") || strings.Contains(msg, "\x1b") {
+				t.Errorf("startup error quotes the child's output: %q", msg)
+			}
+			for _, hatch := range []string{config.EnvCodexClientVersion, config.EnvCodexExecutable} {
+				if !strings.Contains(msg, hatch) {
+					t.Errorf("startup error %q does not name %s", msg, hatch)
+				}
+			}
+		})
+	}
+
+	t.Run("runtime re-probe", func(t *testing.T) {
+		dir := t.TempDir()
+		counter := filepath.Join(dir, "runs")
+		exe := filepath.Join(dir, "codex")
+		installCountingCodex(t, exe, counter, "codex-cli 0.163.0")
+		logs := &syncBuffer{}
+		cfg := config.Default()
+		cfg.Codex.Executable = exe
+		probe, err := resolveCodexClientVersion(context.Background(), &cfg, slog.New(slog.NewJSONHandler(logs, nil)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		installCountingCodex(t, exe, counter, "codex-cli "+canary)
+		if got := probe.ClientVersion(context.Background()); got != "0.163.0" {
+			t.Errorf("version = %q, want the last good one", got)
+		}
+		if !strings.Contains(logs.String(), "codex client version discovery failed") {
+			t.Fatalf("no failure warning logged: %s", logs.String())
+		}
+		if strings.Contains(logs.String(), "CANARY") {
+			t.Errorf("runtime warning quotes the child's output: %s", logs.String())
+		}
+	})
 }

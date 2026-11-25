@@ -1,0 +1,6 @@
+go test fuzz v1
+string("debug: other=1H؝j\xd4c\xba\x90;\x00\xff")
+string("\"00000000000000000000000000000")
+byte('9')
+uint32(42323)
+uint16(0)

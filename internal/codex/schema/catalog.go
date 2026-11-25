@@ -87,11 +87,11 @@ type ModelsResponse struct {
 }
 
 // Cache is the on-disk catalog shape: the model list plus the metadata needed
-// to revalidate it. Its field set and JSON tags match the Codex CLI's own
-// models_cache.json ({client_version, etag, fetched_at, models}), so a file
-// utraque writes is structurally interoperable with the CLI's cache. utraque
-// still keeps its OWN cache file by default and never overwrites the CLI's.
+// to revalidate it for one login and endpoint. Readers of the original shape
+// ignore the additional fields; scoped readers never trust an unscoped file.
 type Cache struct {
+	AccountScope  string         `json:"account_scope"`
+	Endpoint      string         `json:"endpoint"`
 	ClientVersion string         `json:"client_version,omitempty"`
 	ETag          string         `json:"etag,omitempty"`
 	FetchedAt     time.Time      `json:"fetched_at"`

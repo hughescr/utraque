@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hughescr/utraque/internal/accountscope"
 	"github.com/hughescr/utraque/internal/anthropic/schema"
 	"github.com/hughescr/utraque/internal/apierr"
 	"github.com/hughescr/utraque/internal/codex/auth"
@@ -652,10 +653,10 @@ func TestHealthzReportsCodexAuthAndCatalog(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(cachePath), 0o755); err != nil {
 		t.Fatalf("mkdir cache: %v", err)
 	}
-	cacheBody := fmt.Sprintf(`{"fetched_at":%q,"models":[`+
+	cacheBody := fmt.Sprintf(`{"account_scope":%q,"endpoint":%q,"fetched_at":%q,"models":[`+
 		`{"slug":"gpt-5.6-sol","visibility":"list"},`+
 		`{"slug":"gpt-5.5","visibility":"list"}]}`,
-		time.Now().Add(-30*time.Second).Format(time.RFC3339))
+		accountscope.Key("codex", "acct-123"), config.Default().Codex.BaseURL, time.Now().Add(-30*time.Second).Format(time.RFC3339))
 	if err := os.WriteFile(cachePath, []byte(cacheBody), 0o600); err != nil {
 		t.Fatalf("write cache: %v", err)
 	}
@@ -670,22 +671,35 @@ func TestHealthzReportsCodexAuthAndCatalog(t *testing.T) {
 	cfg.Codex.AuthFile = authPath
 	cfg.Codex.CacheFile = cachePath
 
-	srv, err := newServer(cfg, slog.New(slog.DiscardHandler), nil)
+	restoreRegistry(t) // the warm publishes the record's aliases
+	a, err := newApp(cfg, slog.New(slog.DiscardHandler), nil, nil, nil)
 	if err != nil {
-		t.Fatalf("newServer: %v", err)
+		t.Fatalf("newApp: %v", err)
 	}
-	front := httptest.NewServer(srv)
+	front := httptest.NewServer(a.srv)
 	defer front.Close()
 
-	resp, err := noRedirectClient().Get(front.URL + server.HealthPath)
-	if err != nil {
-		t.Fatalf("get healthz: %v", err)
+	get := func() []byte {
+		resp, err := noRedirectClient().Get(front.URL + server.HealthPath)
+		if err != nil {
+			t.Fatalf("get healthz: %v", err)
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		if bytes.Contains(body, []byte(accessToken)) {
+			t.Fatalf("healthz body leaked the access token: %s", body)
+		}
+		return body
 	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-
-	if bytes.Contains(body, []byte(accessToken)) {
-		t.Fatalf("healthz body leaked the access token: %s", body)
+	// A health poll reads only what is held; it never loads the disk record
+	// itself. The startup warm does, for the account auth.json names.
+	if body := get(); !bytes.Contains(body, []byte(`"loaded":false`)) {
+		t.Fatalf("a health poll loaded the catalog: %s", body)
+	}
+	a.warm(t.Context())
+	body := get()
+	for deadline := time.Now().Add(2 * time.Second); !bytes.Contains(body, []byte(`"loaded":true`)) && time.Now().Before(deadline); body = get() {
+		time.Sleep(5 * time.Millisecond)
 	}
 
 	var health struct {
@@ -694,6 +708,8 @@ func TestHealthzReportsCodexAuthAndCatalog(t *testing.T) {
 			State     string  `json:"state"`
 			Reason    *string `json:"reason"`
 			ExpiresIn int64   `json:"expires_in_s"`
+			FileMode  string  `json:"file_mode"`
+			Warning   *string `json:"mode_warning"`
 		} `json:"codex_auth"`
 		CodexCatalog struct {
 			Models int      `json:"models"`
@@ -706,6 +722,9 @@ func TestHealthzReportsCodexAuthAndCatalog(t *testing.T) {
 
 	if health.Status != server.StatusOK {
 		t.Errorf("status = %q, want %q", health.Status, server.StatusOK)
+	}
+	if health.CodexAuth.FileMode != "0600" || health.CodexAuth.Warning != nil {
+		t.Errorf("owner-only file: mode = %q, warning = %v", health.CodexAuth.FileMode, health.CodexAuth.Warning)
 	}
 	if health.CodexAuth.State != "ok" {
 		t.Errorf("codex_auth.state = %q, want ok", health.CodexAuth.State)
@@ -914,8 +933,10 @@ func TestHealthzReportsMissingCodexAuthWithoutAuthFile(t *testing.T) {
 
 	var health struct {
 		CodexAuth struct {
-			State     string `json:"state"`
-			ExpiresIn *int64 `json:"expires_in_s"`
+			State     string  `json:"state"`
+			ExpiresIn *int64  `json:"expires_in_s"`
+			Mode      *string `json:"file_mode"`
+			Warning   *string `json:"mode_warning"`
 		} `json:"codex_auth"`
 		CodexCatalog struct {
 			Models int `json:"models"`
@@ -926,6 +947,9 @@ func TestHealthzReportsMissingCodexAuthWithoutAuthFile(t *testing.T) {
 	}
 	if health.CodexAuth.State != "missing" {
 		t.Errorf("codex_auth.state = %q, want missing", health.CodexAuth.State)
+	}
+	if health.CodexAuth.Mode != nil || health.CodexAuth.Warning != nil {
+		t.Error("codex_auth must omit mode diagnostics when no file was inspected")
 	}
 	if health.CodexAuth.ExpiresIn != nil {
 		t.Errorf("codex_auth.expires_in_s = %v, want omitted when missing", *health.CodexAuth.ExpiresIn)

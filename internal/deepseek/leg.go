@@ -32,7 +32,6 @@ import (
 const (
 	DefaultBaseURL          = "https://api.deepseek.com/anthropic"
 	defaultMaxResponseBytes = 128 << 20
-	copyBufferSize          = 32 << 10
 )
 
 // Option configures a Leg.
@@ -65,6 +64,8 @@ type Leg struct {
 	log          *slog.Logger
 	upstreamIdle time.Duration
 	estimator    tokens.Estimator
+	// errorBodyDeadline is a field only so tests can shorten it.
+	errorBodyDeadline time.Duration
 }
 
 var _ router.Leg = (*Leg)(nil)
@@ -78,7 +79,7 @@ func New(baseURL, apiKey string, tr transport.Transport, opts ...Option) (*Leg, 
 	}
 	u, err := url.Parse(strings.TrimSpace(baseURL))
 	if err != nil {
-		return nil, fmt.Errorf("utraque/deepseek: parse base url: %w", err)
+		return nil, errors.New("utraque/deepseek: invalid base url")
 	}
 	if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		return nil, errors.New("utraque/deepseek: base url must be an absolute http or https URL")
@@ -100,6 +101,8 @@ func New(baseURL, apiKey string, tr transport.Transport, opts ...Option) (*Leg, 
 		client:    &client,
 		log:       slog.New(slog.DiscardHandler),
 		estimator: tokens.Default(),
+
+		errorBodyDeadline: errorBodyReadDeadline,
 	}
 	for _, opt := range opts {
 		opt(l)
@@ -200,18 +203,23 @@ func (l *Leg) forward(w http.ResponseWriter, r *http.Request, rq *router.Request
 	defer resp.Body.Close()
 	obs.SummaryFrom(r.Context()).SetUpstreamStatus(resp.StatusCode)
 
-	if enc := strings.TrimSpace(resp.Header.Get("Content-Encoding")); enc != "" && !strings.EqualFold(enc, "identity") {
-		return apierr.WithStatus(http.StatusBadGateway, apierr.TypeAPI,
-			"deepseek upstream returned an unexpected content encoding")
-	}
+	enc := strings.TrimSpace(resp.Header.Get("Content-Encoding"))
+	identity := enc == "" || strings.EqualFold(enc, "identity")
 	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
 		return apierr.WithStatus(http.StatusBadGateway, apierr.TypeAPI,
 			"deepseek upstream returned a redirect, which utraque will not follow")
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		copyResponseHeaders(w.Header(), resp.Header)
-		w.WriteHeader(resp.StatusCode)
-		return l.copyBody(w, r, idle, resp.Body)
+		failure := l.publicError(resp, idle, identity)
+		if ctxErr := r.Context().Err(); ctxErr != nil {
+			return fmt.Errorf("%w: %w", router.ErrClientGone, ctxErr)
+		}
+		l.copyErrorHeaders(w.Header(), resp.Header)
+		return failure
+	}
+	if !identity {
+		return apierr.WithStatus(http.StatusBadGateway, apierr.TypeAPI,
+			"deepseek upstream returned an unexpected content encoding")
 	}
 	if responseHasModel && rq.Stream {
 		if kind := mediaType(resp.Header); kind != "" && kind != "text/event-stream" {
@@ -273,20 +281,52 @@ func (l *Leg) jsonResponse(w http.ResponseWriter, r *http.Request, idle *relay.U
 	if len(b) > defaultMaxResponseBytes {
 		return apierr.WithStatus(http.StatusBadGateway, apierr.TypeAPI, "deepseek response exceeded the safety limit")
 	}
+	// A 2xx body that is itself an error object goes through the error
+	// pipeline, status unchanged: the upstream's text is never relayed raw.
+	// The message route's model rewrite already decodes the body once and
+	// notices the error type in that same pass, so success bodies cost nothing
+	// extra; a route that relays without the rewrite (none does today) pays one
+	// extra decode that keeps only the top-level type.
 	if rewriteModel {
-		b, err = rewriteMessageResponse(b, canonical)
-		if err != nil {
-			e := apierr.Wrap(err, apierr.TypeAPI, "deepseek returned an invalid message response")
+		rewritten, rewriteErr := rewriteMessageResponse(b, canonical)
+		if errors.Is(rewriteErr, errUpstreamErrorObject) {
+			return l.relayErrorObject(w, resp, b)
+		}
+		if rewriteErr != nil {
+			e := apierr.Wrap(rewriteErr, apierr.TypeAPI, "deepseek returned an invalid message response")
 			e.Status = http.StatusBadGateway
 			return e
 		}
+		b = rewritten
 		observeMessage(r.Context(), b)
+	} else {
+		var probe struct {
+			Type json.RawMessage `json:"type"`
+		}
+		if json.Unmarshal(b, &probe) == nil && isErrorType(probe.Type) {
+			return l.relayErrorObject(w, resp, b)
+		}
 	}
 	copyResponseHeaders(w.Header(), resp.Header)
 	w.Header().Set("Content-Length", fmt.Sprint(len(b)))
 	w.WriteHeader(resp.StatusCode)
 	_, err = w.Write(b)
 	if err != nil {
+		return fmt.Errorf("%w: writing deepseek response: %w", router.ErrResponseStarted, err)
+	}
+	return nil
+}
+
+// relayErrorObject answers a 2xx response whose body is an Anthropic error
+// object with the sanitised envelope and the upstream's status. The message is
+// kept only when it is usable; otherwise a fixed one stands in.
+func (l *Leg) relayErrorObject(w http.ResponseWriter, resp *http.Response, body []byte) error {
+	e := apierr.WithStatus(resp.StatusCode, apierr.TypeAPI, "deepseek upstream returned an error object")
+	if typ, message, ok := errorDetail(body); ok {
+		l.setPublicDetail(e, typ, message)
+	}
+	l.copyErrorHeaders(w.Header(), resp.Header)
+	if err := e.Render(w, resp.StatusCode); err != nil {
 		return fmt.Errorf("%w: writing deepseek response: %w", router.ErrResponseStarted, err)
 	}
 	return nil
@@ -302,7 +342,7 @@ func (l *Leg) streamResponse(w http.ResponseWriter, r *http.Request, idle *relay
 	sawStart, sawTerminal, sawError := false, false, false
 	for scanner.Scan() {
 		frame := scanner.Frame()
-		data, eventType, err := rewriteStreamFrame(frame, canonical)
+		data, eventType, err := l.rewriteStreamFrame(frame, canonical)
 		if err != nil {
 			return fmt.Errorf("%w: invalid deepseek stream: %w", router.ErrResponseStarted, err)
 		}
@@ -344,17 +384,6 @@ func (l *Leg) streamResponse(w http.ResponseWriter, r *http.Request, idle *relay
 	return nil
 }
 
-func (l *Leg) copyBody(w http.ResponseWriter, r *http.Request, idle *relay.UpstreamIdleGuard, src io.Reader) error {
-	_, err := io.CopyBuffer(w, idle.Wrap(src), make([]byte, copyBufferSize))
-	if err == nil {
-		return nil
-	}
-	if ctxErr := r.Context().Err(); ctxErr != nil {
-		return fmt.Errorf("%w: %w: %w", router.ErrResponseStarted, router.ErrClientGone, ctxErr)
-	}
-	return fmt.Errorf("%w: relaying deepseek response: %w", router.ErrResponseStarted, err)
-}
-
 var requestHeaderAllow = map[string]struct{}{
 	"Accept":            {},
 	"Anthropic-Beta":    {},
@@ -365,7 +394,11 @@ var requestHeaderAllow = map[string]struct{}{
 }
 
 func copyRequestHeaders(dst, src http.Header) {
+	drop := proxyhdr.ConnectionTokens(src)
 	for name := range requestHeaderAllow {
+		if _, nominated := drop[name]; nominated {
+			continue
+		}
 		if values, ok := src[name]; ok {
 			dst[name] = slices.Clone(values)
 		}
@@ -373,8 +406,12 @@ func copyRequestHeaders(dst, src http.Header) {
 }
 
 func copyResponseHeaders(dst, src http.Header) {
+	drop := proxyhdr.ConnectionTokens(src)
 	for name, values := range src {
 		canonical := http.CanonicalHeaderKey(name)
+		if _, nominated := drop[canonical]; nominated {
+			continue
+		}
 		lower := strings.ToLower(canonical)
 		switch {
 		case canonical == "Content-Type", canonical == "Cache-Control", canonical == "Retry-After",

@@ -54,8 +54,13 @@ func resolveCodexClientVersion(ctx context.Context, cfg *config.Config, log *slo
 	probe := newCodexVersionProbe(cfg.Codex.Executable, log)
 	version, err := probe.discoverInitial(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("discover Codex client version with %s --version: %w; install/configure Codex or set %s explicitly",
-			config.EnvCodexExecutable, err, config.EnvCodexClientVersion)
+		// This stops startup, so it names both ways out. The probe runs codex
+		// with an allow-listed environment (codexProbeEnvNames), so a codex that
+		// needs some other variable to start fails here although it works in a
+		// shell; pointing UTRAQUE_CODEX_EXECUTABLE at the real binary or
+		// skipping the probe with UTRAQUE_CODEX_CLIENT_VERSION both fix that.
+		return nil, fmt.Errorf("discover Codex client version with %s --version: %w; install Codex, set %s to its absolute path, or set %s (e.g. 0.160.0) to skip the probe",
+			config.EnvCodexExecutable, err, config.EnvCodexExecutable, config.EnvCodexClientVersion)
 	}
 	cfg.Codex.ClientVersion = version
 	return probe, nil
@@ -232,6 +237,10 @@ func discoverCodexClientVersion(ctx context.Context, executable string) (string,
 	stdout.max = codexVersionMaxText
 	stderr.max = codexVersionMaxText
 	cmd := exec.CommandContext(runCtx, executable, "--version")
+	// Never the daemon's own environment; see codexProbeEnvNames. The
+	// executable itself was already resolved against the daemon's PATH, which
+	// is also the PATH the child gets.
+	cmd.Env = codexProbeEnv(os.Environ())
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	cmd.WaitDelay = 100 * time.Millisecond
@@ -248,12 +257,94 @@ func discoverCodexClientVersion(ctx context.Context, executable string) (string,
 	return parseCodexVersion(stdout.String())
 }
 
+// The `codex --version` child gets an explicit environment rather than the
+// daemon's, which can hold UTRAQUE_LOCAL_TOKEN, an environment-sourced
+// DEEPSEEK_API_KEY and whatever else the starting shell exported
+// (ANTHROPIC_CUSTOM_HEADERS can carry the local token). The child does need
+// the user's real environment for one job: finding and starting codex, which
+// is often a Node script behind a version-manager shim. So it gets exactly
+// the variables below, with their real values.
+//
+// Rule for adding to these lists: a variable belongs here only if locating or
+// starting the codex executable (the shell, a version-manager shim, the Node
+// runtime, TLS roots, locale) needs it, and it never holds a credential. Add
+// an exact name whenever possible; a prefix family only for a version manager
+// that defines many path settings under one prefix. Never add anything that
+// changes what code runs (NODE_OPTIONS, LD_PRELOAD, DYLD_*, BASH_ENV), a
+// provider's or utraque's own settings (ANTHROPIC_*, OPENAI_*, DEEPSEEK_*,
+// UTRAQUE_*), or a proxy setting. Names ending in a codexProbeEnvDenySuffixes
+// entry are dropped even inside a prefix family (mise reads
+// MISE_GITHUB_TOKEN, for one).
+var (
+	codexProbeEnvNames = map[string]bool{
+		"HOME": true, "PATH": true, "USER": true, "LOGNAME": true, "SHELL": true, "TMPDIR": true,
+		"LANG": true, "LC_ALL": true, "LC_CTYPE": true,
+		"CODEX_HOME":      true,
+		"XDG_CONFIG_HOME": true, "XDG_DATA_HOME": true, "XDG_CACHE_HOME": true, "XDG_STATE_HOME": true,
+		"SSL_CERT_FILE": true, "SSL_CERT_DIR": true,
+		"N_PREFIX": true, "PNPM_HOME": true, "BUN_INSTALL": true, "NODE_PATH": true,
+	}
+	codexProbeEnvPrefixes     = []string{"NVM_", "VOLTA_", "FNM_", "ASDF_", "MISE_", "NODENV_"}
+	codexProbeEnvDenySuffixes = []string{"_TOKEN", "_KEY", "_SECRET", "_PASSWORD"}
+)
+
+// codexProbeEnv filters an os.Environ-style list down to the allow-list
+// above, keeping order and values.
+func codexProbeEnv(environ []string) []string {
+	out := make([]string, 0, len(codexProbeEnvNames)+8)
+	for _, kv := range environ {
+		name, _, ok := strings.Cut(kv, "=")
+		if ok && codexProbeEnvAllowed(name) {
+			out = append(out, kv)
+		}
+	}
+	return out
+}
+
+func codexProbeEnvAllowed(name string) bool {
+	for _, suffix := range codexProbeEnvDenySuffixes {
+		if strings.HasSuffix(name, suffix) {
+			return false
+		}
+	}
+	if codexProbeEnvNames[name] {
+		return true
+	}
+	for _, prefix := range codexProbeEnvPrefixes {
+		if strings.HasPrefix(name, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// parseCodexVersion extracts the version from `codex-cli <semver>`. Its error
+// describes the output's shape only, never its text: the output comes from
+// whatever executable is configured (or a wrapper around it) and can contain
+// anything, while this error reaches stderr, launchd's log and the daemon log.
 func parseCodexVersion(output string) (string, error) {
 	fields := strings.Fields(output)
 	if len(fields) != 2 || fields[0] != "codex-cli" || !codexSemver.MatchString(fields[1]) {
-		return "", fmt.Errorf("unexpected version output %q; want %q", strings.TrimSpace(output), "codex-cli <semantic-version>")
+		return "", fmt.Errorf("unexpected version output (%d bytes, %d lines, %d fields, %s); want %q",
+			len(output), strings.Count(strings.TrimRight(output, "\n"), "\n")+1, len(fields),
+			codexVersionShape(fields), "codex-cli <semantic-version>")
 	}
 	return fields[1], nil
+}
+
+// codexVersionShape says which part of `codex-cli <semver>` did not match,
+// in fixed words.
+func codexVersionShape(fields []string) string {
+	switch {
+	case len(fields) == 0:
+		return "empty"
+	case fields[0] != "codex-cli":
+		return "first field is not codex-cli"
+	case len(fields) < 2 || !codexSemver.MatchString(fields[1]):
+		return "second field is not a semantic version"
+	default:
+		return "trailing fields after the version"
+	}
 }
 
 // boundedBuffer drains subprocess output without allowing a broken executable

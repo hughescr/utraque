@@ -27,6 +27,29 @@ func newBufLogger(t *testing.T) (*slog.Logger, *bytes.Buffer) {
 	return l, &buf
 }
 
+// FuzzScrubStable exercises both public entry points on arbitrary bytes. The
+// large seed mixes matches with near misses; a wall-clock assertion here would
+// measure host contention, not algorithmic complexity.
+func FuzzScrubStable(f *testing.F) {
+	for _, seed := range []string{
+		"", "\x00\xff\r\n", "Bearer short", "sK-[REDACTED]", fakeJWT,
+		`{"refresh_token":"[REDACTED]","model":"ok"}`, "?access_token=first&api_key=second",
+		strings.Repeat(" eyJalmost. sk-short Bearer FAKE_token==;", 2048),
+		"x Bearer abcdefgh",
+	} {
+		f.Add(seed)
+	}
+	f.Fuzz(func(t *testing.T, in string) {
+		once := obs.Scrub(in)
+		if string(obs.ScrubBytes([]byte(in))) != once {
+			t.Fatal("byte and string scrubbers disagree")
+		}
+		if obs.Scrub(once) != once {
+			t.Fatal("scrubbing a second time changed the output")
+		}
+	})
+}
+
 func TestScrubRedactsTokenShapes(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -38,6 +61,10 @@ func TestScrubRedactsTokenShapes(t *testing.T) {
 		{"jwt", "token is " + fakeJWT + " expiring soon", "eyJleHAiOjIwMDAwMDAwMDAs", "expiring soon"},
 		{"sk key", "key sk-ant-api03-ABCDEFGHIJKLMNOP failed", "ABCDEFGHIJKLMNOP", "failed"},
 		{"json field", `{"access_token":"` + fakeJWT + `","other":"kept"}`, fakeJWT, `"other"`},
+		{"truncated json field", `{"password":"TRUNCATED`, "TRUNCATED", `"password": "[REDACTED]"`},
+		{"truncated json escape", `{"password":"abc\"SUFFIX\`, `SUFFIX\`, `"password": "[REDACTED]"`},
+		{"backslash LF in password", `{"password":"abc\` + "\n" + `SECRETPROBE"}`, "SECRETPROBE", `"password": "[REDACTED]"`},
+		{"backslash LF in note", `note "secret": "x\` + "\n" + `SECRETPROBE" end`, "SECRETPROBE", `"[REDACTED]" end`},
 		{"query field", "POST /token?refresh_token=rt_abcdefghijklmnop&x=1", "rt_abcdefghijklmnop", "x=1"},
 	}
 	for _, tc := range cases {

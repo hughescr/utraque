@@ -10,6 +10,8 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+
+	"github.com/hughescr/utraque/internal/localaddr"
 )
 
 // Timeouts applied to the http.Server. There is deliberately no WriteTimeout:
@@ -28,12 +30,15 @@ func SignalContext(parent context.Context) (context.Context, context.CancelFunc)
 // exported so cmd can attach a listener inherited from launchd.
 func (s *Server) HTTPServer(ctx context.Context) *http.Server {
 	return &http.Server{
-		Handler:           s,
-		ReadHeaderTimeout: readHeaderTimeout,
-		IdleTimeout:       connIdleTimeout,
-		ErrorLog:          slog.NewLogLogger(s.log.Handler(), slog.LevelWarn),
+		Handler:                      s,
+		DisableGeneralOptionsHandler: true, // OPTIONS * must pass the browser guard too.
+		ReadHeaderTimeout:            readHeaderTimeout,
+		IdleTimeout:                  connIdleTimeout,
+		ErrorLog:                     slog.NewLogLogger(s.log.Handler(), slog.LevelWarn),
 		// Request contexts must survive shutdown so in-flight streams drain.
-		BaseContext: func(net.Listener) context.Context { return context.WithoutCancel(ctx) },
+		BaseContext: func(ln net.Listener) context.Context {
+			return context.WithValue(context.WithoutCancel(ctx), listenerClassKey{}, localaddr.BoundClass(ln.Addr()))
+		},
 	}
 }
 

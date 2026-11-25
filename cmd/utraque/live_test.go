@@ -278,7 +278,12 @@ func (e *liveEnv) requireCodexCredential(t *testing.T) {
 // breakdown.
 func (e *liveEnv) unknownEventCounters(t *testing.T) (int, map[string]int) {
 	t.Helper()
-	resp, err := http.Get(e.front.URL + server.HealthPath)
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, e.front.URL+server.HealthPath, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.setHeaders(req.Header)
+	resp, err := e.front.Client().Do(req)
 	if err != nil {
 		t.Fatalf("GET /healthz: %v", err)
 	}
@@ -292,6 +297,9 @@ func (e *liveEnv) unknownEventCounters(t *testing.T) (int, map[string]int) {
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&health); err != nil {
 		t.Fatalf("decode /healthz: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK || health.CodexStream.ByType == nil {
+		t.Fatal("full health response with codex_stream.unknown_event_types required")
 	}
 	return health.CodexStream.UnknownEvents, health.CodexStream.ByType
 }

@@ -141,6 +141,8 @@ var (
 // Options configure a Translator. The zero value is usable except for
 // UpstreamModel, which should be the upstream slug echoed back in message_start.
 type Options struct {
+	// PublicDetail removes attempt credentials from upstream failures only.
+	PublicDetail func(string) string
 	// UpstreamModel is echoed in message_start.model. It is not
 	// the client-requested model string: translatorOptions, internal/codex/leg's
 	// only PRODUCTION caller, deliberately passes the upstream (Codex catalog)
@@ -182,7 +184,7 @@ type Options struct {
 	MaxPendingBytes int
 	// MaxPendingItems bounds the number of buffered items; zero uses the default.
 	MaxPendingItems int
-	// Logger receives once-per-type unknown-event notices and bound warnings.
+	// Logger receives once-per-bucket unknown-event notices and bound warnings.
 	Logger *slog.Logger
 }
 
@@ -202,7 +204,7 @@ const (
 
 // Result summarises a Run: whether anything was emitted, which terminus (if
 // any) was reached, how the answer ended, and the unknown-event counts (keyed
-// by type) for /healthz.
+// by bounded protocol identifier or reserved bucket) for /healthz.
 //
 // StopReason and OutputTokens are reported for the SAME reason the two sinks
 // share one state machine: the caller's request log must say how the answer
@@ -269,6 +271,7 @@ func (r Result) Errored() bool { return r.Terminus == TerminusErrored }
 // A Translator runs one stream at a time; construct one per request (Run resets
 // its state defensively but is not safe for concurrent Runs).
 type Translator struct {
+	publicDetail    func(string) string
 	model           string
 	inputTokens     int
 	inputTokensFunc func() int
@@ -308,6 +311,7 @@ type Translator struct {
 func New(opts Options) *Translator {
 	t := &Translator{
 		model:           opts.UpstreamModel,
+		publicDetail:    opts.PublicDetail,
 		inputTokens:     opts.InputTokens,
 		inputTokensFunc: opts.InputTokensFunc,
 		emitReasoning:   opts.EmitReasoning,
@@ -493,7 +497,7 @@ func (t *Translator) handle(sink Sink, fr sse.Frame) (bool, error) {
 	var ev cschema.StreamEvent
 	if len(fr.Data) > 0 {
 		if err := json.Unmarshal(fr.Data, &ev); err != nil {
-			t.countUnknown("<malformed-json>")
+			t.countUnknown("") // no usable event name
 			return false, nil
 		}
 	}
@@ -740,6 +744,9 @@ func (t *Translator) onItemDone(sink Sink, ev *cschema.StreamEvent) error {
 // Before message_start it is failure mode 1 (return an error for the caller to
 // render); after, it is mode 2 (close the active block, emit an error frame).
 func (t *Translator) fail(sink Sink, msg string) (bool, error) {
+	if t.publicDetail != nil {
+		msg = t.publicDetail(msg)
+	}
 	if !t.started {
 		// 502, not the api_error default of 500: the UPSTREAM failed, and the
 		// distinction is what tells the caller whether retrying could help. It
@@ -760,6 +767,13 @@ func (t *Translator) handleEnd(sink Sink, cause error) error {
 		if cause == nil {
 			return ErrNoData
 		}
+		// Only the bare sentinels, whose text is fixed, pass through as they
+		// are. Anything else — a wrapped sentinel included, since its wrapper
+		// can carry upstream text — is redacted, while errors.Is still sees
+		// the cause.
+		if t.publicDetail != nil && cause != ErrIdleTimeout && cause != ErrTruncated {
+			return &redactedCause{public: t.publicDetail(cause.Error()), cause: cause}
+		}
 		return cause
 	}
 	// A clean EOF with on_truncate=finish synthesises a clean terminus; every
@@ -767,8 +781,27 @@ func (t *Translator) handleEnd(sink Sink, cause error) error {
 	if cause == nil && t.truncateMode == TruncateFinish {
 		return t.finalizeClean(sink)
 	}
-	return t.emitMidStreamError(sink, endMessage(cause))
+	msg := endMessage(cause)
+	if t.publicDetail != nil && cause != nil {
+		msg = t.publicDetail(msg)
+	}
+	return t.emitMidStreamError(sink, msg)
 }
+
+// redactedCause is an end-of-stream cause whose text has been redacted for the
+// client. It answers errors.Is through the original cause, so a wrapped
+// ErrIdleTimeout or context.Canceled is still classified as one, but it has no
+// Unwrap: errors.As must not reach an inner error whose own text, rendered,
+// would undo the redaction.
+type redactedCause struct {
+	public string
+	cause  error
+}
+
+func (e *redactedCause) Error() string { return e.public }
+
+// Is reports whether the private cause matches target.
+func (e *redactedCause) Is(target error) bool { return errors.Is(e.cause, target) }
 
 // endMessage phrases the mid-stream error for an end-of-stream cause.
 func endMessage(cause error) string {
@@ -920,12 +953,12 @@ func (t *Translator) ensureStarted(sink Sink) error {
 	})
 }
 
-// countUnknown records an unrecognised event type and logs it once per type.
+// countUnknown classifies a wire name before storing it or logging its first occurrence.
 func (t *Translator) countUnknown(typ string) {
-	n := t.unknown[typ]
-	t.unknown[typ] = n + 1
-	if n == 0 {
-		t.log.Debug("unknown Codex stream event type", "type", typ)
+	bucket := unknownBucket(t.unknown, typ)
+	t.unknown[bucket]++
+	if t.unknown[bucket] == 1 {
+		t.log.Debug("unknown Codex stream event type", "type", bucket)
 	}
 }
 

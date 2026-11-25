@@ -52,6 +52,23 @@ var hashedAttrKeys = map[string]struct{}{
 	"chatgpt_account_id": {},
 }
 
+// Keep the fixed introducers separate from their unbounded suffixes. The trace
+// writer needs to recognise even an introducer whose value is not yet present.
+const (
+	bearerStart = `\bbearer`
+	jwtStart    = `\beyJ`
+	skStart     = `\bsk-`
+	queryKeys   = `access_token|refresh_token|id_token|api_key|client_secret`
+	jsonStart   = `"(?:` + queryKeys + `|authorization|password|secret)"`
+	queryStart  = `\b(?:` + queryKeys + `)=`
+	jsonChars   = `(?:[^"\\]|\\[\s\S])*`
+	jsonOpen    = jsonStart + `\s*(?::\s*(?:"` + jsonChars + `\\?)?)?`
+	bearerChar  = `[A-Za-z0-9._~+/=-]`
+	jwtChar     = `[A-Za-z0-9_-]`
+	skChar      = `[A-Za-z0-9._-]`
+	queryChar   = `[^&\s"']`
+)
+
 // scrubRE matches the shapes a credential takes in this codebase's blast
 // radius. It is a backstop, not the primary defence — the primary defence is
 // that nothing ever passes a token to a logger — so it errs towards matching:
@@ -63,13 +80,29 @@ var hashedAttrKeys = map[string]struct{}{
 //   - an sk- key — Anthropic and OpenAI API keys, including sk-ant-oat01-*.
 //   - a JSON or query-string field named for a token — auth.json bodies and
 //     OAuth token-endpoint exchanges.
-var scrubRE = regexp.MustCompile(strings.Join([]string{
-	`(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{8,}`,
-	`\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?:\.[A-Za-z0-9_-]*)?`,
-	`\bsk-[A-Za-z0-9._-]{12,}`,
-	`(?i)"(?:access_token|refresh_token|id_token|api_key|client_secret|authorization|password|secret)"\s*:\s*"[^"]*"`,
-	`(?i)\b(?:access_token|refresh_token|id_token|api_key|client_secret)=[^&\s"']+`,
+var scrubRE = regexp.MustCompile(`(?i)` + strings.Join([]string{
+	bearerStart + `\s+` + bearerChar + `{8,}`,
+	jwtStart + jwtChar + `{8,}\.` + jwtChar + `{8,}(?:\.` + jwtChar + `*)?`,
+	skStart + skChar + `{12,}`,
+	jsonStart + `\s*:\s*"` + jsonChars + `(?:"|\\?\z)`,
+	queryStart + queryChar + `+`,
 }, "|"))
+
+var scrubStartRE = regexp.MustCompile(`(?i)` + strings.Join([]string{bearerStart, jwtStart, skStart, jsonStart, queryStart}, "|"))
+
+// Only two alternatives can cross a physical LF: Bearer's separator, and a
+// JSON field awaiting its colon, value or unescaped closing quote. A suffix
+// that could still become either is not a record boundary. False positives
+// merely delay a flush; a dangling backslash can escape the next byte.
+var openAtLF = regexp.MustCompile(`(?i)(?:` + bearerStart + `\s*|` + jsonOpen + `)\z`)
+
+// An overapproximation of extendable matches with a full introducer. Include
+// below-minimum-length token segments; the next Write may yet qualify them.
+var openAtCut = regexp.MustCompile(`(?i)(?:` + strings.Join([]string{
+	bearerStart + `(?:\s+` + bearerChar + `*)?`,
+	jwtStart + jwtChar + `*(?:\.` + jwtChar + `*){0,2}`,
+	skStart + skChar + `*`, jsonOpen, queryStart + queryChar + `*`,
+}, "|") + `)\z`)
 
 // minScrubLen skips strings too short to hold any of the shapes above.
 const minScrubLen = 8

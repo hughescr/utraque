@@ -177,7 +177,7 @@ func TestStreamResponseCarriesMetadata(t *testing.T) {
 	var seen []RateLimits
 	var mu sync.Mutex
 	c := newClient(t, srv.URL, func(o *Options) {
-		o.OnRateLimits = func(rl RateLimits) {
+		o.OnRateLimits = func(_ string, rl RateLimits) {
 			mu.Lock()
 			seen = append(seen, rl)
 			mu.Unlock()
@@ -241,7 +241,7 @@ func TestClassValuesAreTheLoggedSpelling(t *testing.T) {
 // (HTTP 503)" while every other class reads as its value.
 func TestUpstreamErrorTextKeepsTheUpstreamSpelling(t *testing.T) {
 	e := classifyResponse(http.StatusServiceUnavailable, http.Header{"Content-Type": {"application/json"}},
-		RateLimits{}, []byte(`{"error":{"message":"overloaded"}}`))
+		RateLimits{}, []byte(`{"error":{"message":"overloaded"}}`), testCred())
 	if e.Class != ClassServerError {
 		t.Fatalf("Class = %q, want server_error", e.Class)
 	}
@@ -452,7 +452,7 @@ func TestStream429ForwardsRetryAfterAndQuotaHeaders(t *testing.T) {
 
 	var hookSeen int
 	c := newClient(t, srv.URL, func(o *Options) {
-		o.OnRateLimits = func(RateLimits) { hookSeen++ }
+		o.OnRateLimits = func(string, RateLimits) { hookSeen++ }
 	})
 
 	_, err := c.Stream(context.Background(), testCred(), testRequest())
@@ -1189,10 +1189,8 @@ func TestStream200WithoutContentTypeIsStreamed(t *testing.T) {
 	}
 }
 
-// TestRefreshRetriesWhenOnlyTheAccountChanged: the request is signed by the
-// token AND the account id, so a refresh that corrects only the account id still
-// makes the retry a different call.
-func TestRefreshRetriesWhenOnlyTheAccountChanged(t *testing.T) {
+// Even when both logins have the same access token, a prompt must not cross accounts.
+func TestRefreshRefusesWhenOnlyTheAccountChanged(t *testing.T) {
 	var attempts atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if attempts.Add(1) == 1 {
@@ -1208,17 +1206,63 @@ func TestRefreshRetriesWhenOnlyTheAccountChanged(t *testing.T) {
 	defer srv.Close()
 
 	src := &accountRotatingSource{token: fakeToken, first: "acct_wrong", second: "acct_right"}
-	body, err := newClient(t, srv.URL).StreamWithRefresh(context.Background(), src, testRequest())
-	if err != nil {
-		t.Fatalf("StreamWithRefresh: %v", err)
+	_, err := newClient(t, srv.URL).StreamWithRefresh(context.Background(), src, testRequest())
+	if err == nil || apierr.From(err).HTTPStatus() != http.StatusBadRequest {
+		t.Fatalf("expected a non-retryable 400, got %v", err)
 	}
-	defer func() { _ = body.Close() }()
-
-	if n := attempts.Load(); n != 2 {
-		t.Errorf("upstream attempts = %d, want exactly 2 (original + one retry)", n)
+	if n := attempts.Load(); n != 1 {
+		t.Errorf("upstream attempts = %d, want only the original", n)
 	}
 	if !src.invalidated {
 		t.Error("the rejected credential was never invalidated")
+	}
+}
+
+// A 401 does not prove a token dead. After a same-account retry, whatever the
+// upstream says — an error or a stream's in-band failure — is redacted for
+// the rejected token as well as the one that signed the retry.
+func TestRetryRedactsTheRejectedToken(t *testing.T) {
+	const stale, fresh = "rejected-token-value-0001", "fresh-token-value-0002"
+	for _, retryOK := range []bool{false, true} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ") == stale {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusUnauthorized)
+				_, _ = io.WriteString(w, `{"error":{"message":"invalid access token"}}`)
+				return
+			}
+			if retryOK {
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = io.WriteString(w, "event: response.created\ndata: {}\n\n")
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = io.WriteString(w, `{"error":{"message":"earlier token `+stale+` was revoked; now using `+fresh+`"}}`)
+		}))
+		src := &fakeSource{tokens: []string{stale, fresh}}
+		cred := auth.Credential{AccessToken: stale, AccountID: fakeAccount, Exp: time.Now().Add(time.Hour)}
+		resp, err := newClient(t, srv.URL).StreamPinned(t.Context(), cred, src, testRequest())
+		srv.Close()
+		if retryOK {
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = resp.Close()
+			if got := resp.PublicDetail("echo " + stale + " " + fresh); strings.Contains(got, stale) || strings.Contains(got, fresh) {
+				t.Errorf("stream redactor kept a token: %q", got)
+			}
+			continue
+		}
+		ue, ok := AsUpstream(err)
+		if !ok {
+			t.Fatalf("want an upstream error, got %v", err)
+		}
+		for _, public := range []string{err.Error(), ue.UpstreamMessage, ue.APIError().Message} {
+			if strings.Contains(public, stale) || strings.Contains(public, fresh) {
+				t.Errorf("retry error kept a token: %q", public)
+			}
+		}
 	}
 }
 

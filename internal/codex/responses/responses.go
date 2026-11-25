@@ -15,8 +15,8 @@
 //
 // It does NOT retry. Retry policy belongs to the leg, which can see the whole
 // request. The single exception is the documented credential-refresh hook:
-// StreamWithRefresh invalidates the credential and retries EXACTLY once on an
-// upstream 401, because only this package can tell a 401 from any other 4xx.
+// StreamPinned invalidates a rejected credential and permits one retry with
+// a different token for the same account. A changed login requires resubmission.
 //
 // A bot/TLS gate (a Cloudflare challenge rather than an API answer) is detected,
 // typed as ClassGate with an actionable message, and reported to the transport.
@@ -75,6 +75,8 @@ const (
 	// maxErrorMessage bounds (in runes) how much upstream text reaches an error
 	// envelope or a log line.
 	maxErrorMessage = 512
+
+	loginChangedMessage = "the Codex login changed while this request was in flight; it was not sent under the new account — resubmit to send it under the current login"
 )
 
 // Options configures a Client. Every field is optional.
@@ -88,10 +90,10 @@ type Options struct {
 	// MaxErrorBody bounds the bytes read from a failing response. Defaults to
 	// defaultMaxErrorBody.
 	MaxErrorBody int64
-	// OnRateLimits, when set, is called with the forwarded quota headers of
-	// every upstream response — success or failure — so /healthz and the
-	// request log can report the real usage window. It must not block.
-	OnRateLimits func(RateLimits)
+	// OnRateLimits, when set, gets the signing credential's account scope and
+	// the quota headers of every upstream response, success or failure, so
+	// /healthz and the request log can report the usage window. It must not block.
+	OnRateLimits func(scope string, rl RateLimits)
 	// Now supplies the current time, used to resolve an HTTP-date Retry-After.
 	// Defaults to time.Now.
 	Now func() time.Time
@@ -108,17 +110,15 @@ type Client struct {
 	// logging "std" after every request had moved to uTLS.
 	tr           transport.Transport
 	maxErrorBody int64
-	onRateLimits func(RateLimits)
+	onRateLimits func(string, RateLimits)
 	now          func() time.Time
 	log          *slog.Logger
 }
 
-// Streamer is the surface the Codex leg depends on. Stream opens the upstream
-// SSE stream for an already-resolved credential; StreamWithRefresh resolves the
-// credential itself and drives the single 401 retry.
+// Streamer opens the SSE stream using the snapshot used for translation.
+// The source is consulted only after a refreshable rejection.
 type Streamer interface {
-	Stream(ctx context.Context, cred auth.Credential, req *cschema.ResponsesRequest) (io.ReadCloser, error)
-	StreamWithRefresh(ctx context.Context, src auth.CredentialSource, req *cschema.ResponsesRequest) (io.ReadCloser, error)
+	StreamPinned(ctx context.Context, cred auth.Credential, src auth.CredentialSource, req *cschema.ResponsesRequest) (*Response, error)
 }
 
 var _ Streamer = (*Client)(nil)
@@ -156,6 +156,9 @@ func New(opts Options) *Client {
 // Response is an opened upstream stream plus the metadata that came with its
 // headers. Body is the raw SSE stream; the caller owns it and MUST Close it.
 type Response struct {
+	// PublicDetail redacts errors with the credential that signed this attempt
+	// and any token an earlier, rejected attempt of the same request presented.
+	PublicDetail func(string) string
 	// Status is the upstream HTTP status (always 200 here — any other status is
 	// returned as an *UpstreamError instead).
 	Status int
@@ -194,6 +197,12 @@ func (c *Client) Stream(ctx context.Context, cred auth.Credential, req *cschema.
 // StreamResponse is Stream plus the response metadata (status, headers, and the
 // forwarded rate-limit headers) the leg reports on /healthz.
 func (c *Client) StreamResponse(ctx context.Context, cred auth.Credential, req *cschema.ResponsesRequest) (*Response, error) {
+	return c.streamAttempt(ctx, cred, req)
+}
+
+// streamAttempt is StreamResponse whose public-detail redaction also covers
+// rejected, the tokens earlier attempts of the same request presented.
+func (c *Client) streamAttempt(ctx context.Context, cred auth.Credential, req *cschema.ResponsesRequest, rejected ...string) (*Response, error) {
 	if req == nil {
 		return nil, apierr.InvalidRequest("codex responses: no request to send")
 	}
@@ -249,11 +258,11 @@ func (c *Client) StreamResponse(ctx context.Context, cred auth.Credential, req *
 	}
 
 	rl := ParseRateLimits(resp.Header, c.now())
-	c.observe(rl)
+	c.observe(cred, rl)
 
 	// The status the BACKEND gave, which is not always the status utraque
 	// answers with: an upstream 200 whose body carries no events becomes a 502
-	// downstream, and an upstream 401 becomes a refresh and a retry. Recording
+	// downstream, and a 401 can lead to a same-account token retry. Recording
 	// it here — the only layer that sees it — is what makes that difference
 	// legible on the one request line.
 	obs.SummaryFrom(ctx).SetUpstreamStatus(resp.StatusCode)
@@ -267,17 +276,18 @@ func (c *Client) StreamResponse(ctx context.Context, cred auth.Credential, req *
 	if resp.StatusCode == http.StatusOK && isStreamContentType(resp.Header.Get(headerContentType)) {
 		handedOff = true
 		return &Response{
-			Status:     resp.StatusCode,
-			Header:     resp.Header.Clone(),
-			RateLimits: rl,
-			Body:       &streamBody{rc: resp.Body, cancel: cancel, proto: resp.ProtoMajor},
+			PublicDetail: attemptRedactor(cred, rejected...),
+			Status:       resp.StatusCode,
+			Header:       resp.Header.Clone(),
+			RateLimits:   rl,
+			Body:         &streamBody{rc: resp.Body, cancel: cancel, proto: resp.ProtoMajor},
 		}, nil
 	}
 
 	raw := readBounded(resp.Body, c.maxErrorBody)
 	_ = resp.Body.Close()
 
-	ue := classifyResponse(resp.StatusCode, resp.Header, rl, raw)
+	ue := classifyResponse(resp.StatusCode, resp.Header, rl, raw, cred, rejected...)
 	c.logFailure(ue, cred)
 	c.noteGate(ue)
 	return nil, ue
@@ -297,11 +307,8 @@ func (c *Client) noteGate(ue *UpstreamError) {
 	transport.ReportGate(c.tr)
 }
 
-// StreamWithRefresh resolves a credential from src, opens the stream, and — on
-// an upstream 401 and only then — invalidates that credential and retries
-// EXACTLY once with a freshly refreshed one. This is the one retry the plan
-// sanctions, and it lives here because only this package can tell a 401 from
-// any other failure.
+// StreamWithRefresh acquires the initial snapshot for callers that have not
+// already resolved one. It uses StreamPinned's same-account retry policy.
 func (c *Client) StreamWithRefresh(ctx context.Context, src auth.CredentialSource, req *cschema.ResponsesRequest) (io.ReadCloser, error) {
 	resp, err := c.StreamResponseWithRefresh(ctx, src, req)
 	if err != nil {
@@ -319,13 +326,18 @@ func (c *Client) StreamResponseWithRefresh(ctx context.Context, src auth.Credent
 	if err != nil {
 		return nil, err
 	}
+	return c.StreamPinned(ctx, cred, src, req)
+}
+
+// StreamPinned opens the first attempt without re-reading the credential source.
+func (c *Client) StreamPinned(ctx context.Context, cred auth.Credential, src auth.CredentialSource, req *cschema.ResponsesRequest) (*Response, error) {
 	resp, err := c.StreamResponse(ctx, cred, req)
 	if err == nil {
 		return resp, nil
 	}
 
 	ue, ok := AsUpstream(err)
-	if !ok || !ue.NeedsCredentialRefresh() {
+	if !ok || !ue.NeedsCredentialRefresh() || src == nil {
 		return nil, err
 	}
 
@@ -333,13 +345,25 @@ func (c *Client) StreamResponseWithRefresh(ctx context.Context, src auth.Credent
 	src.Invalidate(cred)
 	fresh, gerr := src.Get(ctx)
 	if gerr != nil {
-		// A refresh failure is more actionable than the 401 that provoked it.
+		// File-backed acquisition can verify the local account even when its
+		// OAuth refresh fails. Do not let a retryable refresh failure replay an
+		// old prompt when we already know that the login changed.
+		if scope := fresh.Scope(); scope != "" && scope != cred.Scope() {
+			c.log.Info("codex login changed during refresh; not retrying",
+				obs.HashAttr("original_account_scope", cred.Scope()), obs.HashAttr("current_account_scope", scope))
+			return nil, apierr.InvalidRequest(loginChangedMessage)
+		}
 		return nil, gerr
 	}
-	// The request is signed by BOTH the token and the account id, so either one
-	// changing makes the retry a different call. Comparing only the token would
-	// decline a retry that a corrected or rotated account id would have fixed.
-	if fresh.AccessToken == cred.AccessToken && fresh.AccountID == cred.AccountID {
+	// A rotated token can authorize the same account; a different login cannot
+	// authorize replay of an already accepted prompt. Return a non-retryable
+	// 400 so sending under the new login requires a new client request.
+	if fresh.AccountID != cred.AccountID {
+		c.log.Info("codex login changed during request; not retrying",
+			obs.HashAttr("original_account", cred.AccountID), obs.HashAttr("current_account", fresh.AccountID))
+		return nil, apierr.InvalidRequest(loginChangedMessage)
+	}
+	if fresh.AccessToken == cred.AccessToken {
 		// Nothing changed, so the same call would fail the same way. Report the
 		// original rejection rather than spending a second upstream request.
 		c.log.Warn("codex rejected the credential and no refreshed token was available; not retrying")
@@ -347,15 +371,15 @@ func (c *Client) StreamResponseWithRefresh(ctx context.Context, src auth.Credent
 	}
 	c.log.Info("codex rejected the credential; retrying once with a refreshed token",
 		obs.HashAttr("account", fresh.AccountID))
-	return c.StreamResponse(ctx, fresh, req)
+	return c.streamAttempt(ctx, fresh, req, cred.AccessToken)
 }
 
 // observe hands the forwarded quota headers to the caller's hook, if any.
-func (c *Client) observe(rl RateLimits) {
+func (c *Client) observe(cred auth.Credential, rl RateLimits) {
 	if c.onRateLimits == nil || rl.Empty() {
 		return
 	}
-	c.onRateLimits(rl)
+	c.onRateLimits(cred.Scope(), rl)
 }
 
 // logFailure records a classified failure. It logs the class, the upstream

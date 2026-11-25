@@ -1,12 +1,13 @@
 // Package server wires utraque's HTTP surface: a http.ServeMux carrying the
 // Anthropic-compatible routes plus /healthz, the middleware chain (request id,
 // response observation, panic recovery, idle-activity accounting, body limit,
-// optional local shared-secret auth), and graceful shutdown.
+// browser guard, local shared-secret auth), and graceful shutdown.
 package server
 
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"path"
@@ -19,8 +20,8 @@ import (
 )
 
 // Header names and well-known paths. The X-Utraque-* names live in
-// internal/proxyhdr: the loopback secret is proxyhdr.LocalToken and the id
-// stamped on every response is proxyhdr.RequestID.
+// internal/proxyhdr: the shared secret is proxyhdr.LocalToken and the id
+// stamped after browser admission is proxyhdr.RequestID.
 const (
 	// RequestIDHeader is honoured on inbound requests when it looks sane.
 	RequestIDHeader = obs.RequestIDHeader
@@ -130,8 +131,9 @@ type Options struct {
 	// Default: /healthz.
 	AuthExempt func(*http.Request) bool
 
-	// HealthExtra contributes additional /healthz fields. It may not
-	// override the HealthResponse fields (status, version, uptime_s).
+	// HealthExtra contributes additional /healthz fields. When a local token
+	// is configured, only requests presenting it invoke HealthExtra. The
+	// callback may not override HealthResponse fields (status, version, uptime_s).
 	HealthExtra func(context.Context) map[string]any
 
 	ShutdownGrace time.Duration // default DefaultShutdownGrace
@@ -276,8 +278,11 @@ func cleanPath(p string) string {
 	return np
 }
 
-// chain wraps h outermost-first: request id, observation, panic recovery,
-// idle activity, body limit, local auth.
+// chain wraps h outermost-first: browser guard, general OPTIONS handler,
+// report cache policy, request id, observation, panic recovery, idle activity,
+// body limit, local auth. The OPTIONS * handler sits behind the guard because
+// net/http would otherwise answer it before any handler runs, skipping the
+// Origin, Sec-Fetch-Site and Host checks.
 func (s *Server) chain(h http.Handler) http.Handler {
 	h = s.withAuth(h)
 	h = s.withBodyLimit(h)
@@ -286,7 +291,22 @@ func (s *Server) chain(h http.Handler) http.Handler {
 	h = s.withObserve(h)
 	h = s.withRequestID(h)
 	h = withProviderReportNoStore(h)
-	return h
+	return s.withBrowserGuard(withGeneralOptions(h))
+}
+
+// net/http normally answers OPTIONS * without calling Handler. Preserve its
+// empty response and bounded drain, but only after the browser guard passes.
+func withGeneralOptions(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodOptions || r.RequestURI != "*" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		w.Header().Set("Content-Length", "0")
+		if r.ContentLength != 0 {
+			_, _ = io.Copy(io.Discard, http.MaxBytesReader(w, r.Body, 4<<10))
+		}
+	})
 }
 
 // IsProviderReport reports whether r targets one of the provider report

@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -68,6 +69,30 @@ func noRedirectClient() *http.Client {
 		CheckRedirect: func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
+	}
+}
+
+// Use raw map keys as well as wire-canonical names: middleware can supply both.
+func TestReservedHeadersAtCopyBoundary(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		copy func(http.Header, http.Header)
+	}{{"request", copyRequestHeaders}, {"response", copyResponseHeaders}} {
+		t.Run(tc.name, func(t *testing.T) {
+			src := http.Header{
+				"Connection":      {"x-first, x-second"},
+				"cOnNeCtIoN":      {" X-Third\t", "x-fourth"},
+				"X-Utraquex-Keep": {"one", "two"},
+			}
+			for _, k := range []string{proxyhdr.LocalToken, proxyhdr.Route, proxyhdr.Model, proxyhdr.RequestID, proxyhdr.TokenCountMethod, "x-uTrAqUe-Unlisted", "X-First", "X-Second", "X-Third", "X-Fourth"} {
+				src[k] = []string{"foreign"}
+			}
+			dst := http.Header{proxyhdr.RequestID: {"proxy-minted"}}
+			tc.copy(dst, src)
+			if len(dst) != 2 || !slices.Equal(dst.Values(proxyhdr.RequestID), []string{"proxy-minted"}) || !slices.Equal(dst.Values("X-Utraquex-Keep"), []string{"one", "two"}) {
+				t.Errorf("copied headers = %v; want only minted ID and both near-prefix values", dst)
+			}
+		})
 	}
 }
 

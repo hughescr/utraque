@@ -19,6 +19,7 @@ import (
 
 	"github.com/hughescr/utraque/internal/apierr"
 	"github.com/hughescr/utraque/internal/codex/auth"
+	"github.com/hughescr/utraque/internal/codex/responses"
 	"github.com/hughescr/utraque/internal/codex/schema"
 	"github.com/hughescr/utraque/internal/effort"
 	"github.com/hughescr/utraque/internal/obs"
@@ -52,8 +53,9 @@ func (s *stubStreamer) Stream(context.Context, auth.Credential, *cschema.Respons
 	return io.NopCloser(strings.NewReader(s.body)), nil
 }
 
-func (s *stubStreamer) StreamWithRefresh(ctx context.Context, _ auth.CredentialSource, req *cschema.ResponsesRequest) (io.ReadCloser, error) {
-	return s.Stream(ctx, auth.Credential{}, req)
+func (s *stubStreamer) StreamPinned(ctx context.Context, cred auth.Credential, _ auth.CredentialSource, req *cschema.ResponsesRequest) (*responses.Response, error) {
+	body, err := s.Stream(ctx, cred, req)
+	return &responses.Response{Body: body}, err
 }
 
 func TestNewRejectsNilClient(t *testing.T) {
@@ -306,9 +308,9 @@ type signalStreamer struct {
 	once sync.Once
 }
 
-func (s *signalStreamer) StreamWithRefresh(ctx context.Context, src auth.CredentialSource, req *cschema.ResponsesRequest) (io.ReadCloser, error) {
+func (s *signalStreamer) StreamPinned(ctx context.Context, cred auth.Credential, src auth.CredentialSource, req *cschema.ResponsesRequest) (*responses.Response, error) {
 	s.once.Do(func() { close(s.sent) })
-	return s.stubStreamer.StreamWithRefresh(ctx, src, req)
+	return s.stubStreamer.StreamPinned(ctx, cred, src, req)
 }
 
 // gatedEstimator blocks every count until released, standing in for a

@@ -42,6 +42,8 @@
 #   --log-format FORMAT  json|text (default: json)
 #   --load               after writing, run the launchctl bootstrap for you
 #   --force              rewrite the plist even when it is already identical
+#   --check-node HOST    exit 0 if HOST is a loopback address, 1 if not; touches
+#                        nothing else (the regression test uses this)
 #   -h, --help           this text
 
 set -euo pipefail
@@ -81,6 +83,31 @@ say() { printf '%s\n' "$*"; }
 
 usage() { sed -n '2,/^set -euo/{/^set -euo/d;s/^#//;s/^ //;p;}' "${BASH_SOURCE[0]}"; }
 
+# is_loopback_node HOST succeeds only for an address that cannot leave this
+# machine: a dotted quad 127.a.b.c with every octet 0-255 (no leading zeros,
+# which some resolvers read as octal), ::1 or its expanded spelling, or
+# localhost in any case. It is literal on purpose: '127.example.net' and
+# '127.0.0.1.example' are DNS names that can resolve anywhere, so they are
+# not loopback, and nothing here resolves names. It sits above the option loop
+# so --check-node can use it before the installer does anything else.
+is_loopback_node() {
+	local host octet_re quad_re i
+	# The sentinel dot keeps command substitution from stripping a trailing
+	# newline, which would turn '127.0.0.1<newline>' into a loopback address.
+	host=$(printf '%s.' "$1" | tr '[:upper:]' '[:lower:]')
+	host=${host%.}
+	case "$host" in
+		localhost|::1|0:0:0:0:0:0:0:1) return 0 ;;
+	esac
+	octet_re='(0|[1-9][0-9]?|[1-9][0-9][0-9])'
+	quad_re="^127\\.$octet_re\\.$octet_re\\.$octet_re\$"
+	[[ $host =~ $quad_re ]] || return 1
+	for i in 1 2 3; do
+		[ "${BASH_REMATCH[$i]}" -le 255 ] || return 1
+	done
+	return 0
+}
+
 while [ $# -gt 0 ]; do
 	case "$1" in
 		--binary)      binary="${2:-}"; shift 2 ;;
@@ -109,6 +136,10 @@ while [ $# -gt 0 ]; do
 		--log-format)  log_format="${2:-}"; shift 2 ;;
 		--load)        do_load=1; shift ;;
 		--force)       force=1; shift ;;
+		--check-node)
+			[ $# -ge 2 ] || die "--check-node requires a value"
+			if is_loopback_node "$2"; then exit 0; fi
+			exit 1 ;;
 		-h|--help)     usage; exit 0 ;;
 		*)             die "unknown option $1 (try --help)" ;;
 	esac
@@ -251,12 +282,10 @@ fi
 # shared secret that is unauthenticated spending by anything that can route to
 # this machine, so it is refused rather than warned about. A token makes it a
 # deliberate choice, which is the user's to make.
-case "$node" in
-	localhost|Localhost|LOCALHOST|127.*|::1|0:0:0:0:0:0:0:1) ;;
-	*)
-		[ -n "$local_token" ] || die "--node '$node' is not loopback, so the port would be reachable from your network with no authentication at all. Pass a shared secret too (--local-token-file, or \$UTRAQUE_LOCAL_TOKEN), or bind loopback."
-		say "WARNING: --node '$node' is not loopback. Both subscriptions will be reachable from your network, gated only by the shared secret." ;;
-esac
+if ! is_loopback_node "$node"; then
+	[ -n "$local_token" ] || die "--node '$node' is not loopback, so the port would be reachable from your network with no authentication at all. Pass a shared secret too (--local-token-file, or \$UTRAQUE_LOCAL_TOKEN), or bind loopback (127.0.0.1, ::1 or localhost)."
+	say "WARNING: --node '$node' is not loopback. Both subscriptions will be reachable from your network, gated only by the shared secret."
+fi
 
 # launchd re-executes the recorded path, so a binary inside a build directory
 # that gets cleaned leaves the agent broken until the next install.
@@ -425,4 +454,14 @@ say "    curl -s http://$listen/healthz      # first request; this is what start
 say "    tail -f $stdout_path"
 say ""
 say "Point Claude Code at it with:  ANTHROPIC_BASE_URL=http://$listen"
+# A DNS name (not an IP literal, which is judged by the bind address alone) may
+# resolve to loopback, where utraque refuses every Host except localhost and
+# loopback literals. Nothing here resolves it, so say what to do if it does.
+case "$node" in
+	*:*) ;;
+	*[!0-9.]*)
+		if ! is_loopback_node "$node"; then
+			say "If '$node' resolves to this machine's loopback address, use http://127.0.0.1:$port (or http://localhost:$port) in that URL and in the curl above instead: utraque refuses other Host names on a loopback listener."
+		fi ;;
+esac
 say "Uninstall with:               $here/uninstall.sh"

@@ -8,6 +8,27 @@ import (
 	"github.com/hughescr/utraque/internal/proxyhdr"
 )
 
+// IsReserved is documented to take any spelling: callers range over raw map
+// keys, which middleware can supply in any case.
+func TestIsReservedIgnoresCase(t *testing.T) {
+	for name, want := range map[string]bool{
+		"X-Utraque-Foo":  true,
+		"x-utraque-foo":  true,
+		"X-UTRAQUE-FOO":  true,
+		"x-UtRaQuE-":     true,
+		"X-Utraque-":     true,
+		"X-Utraque":      false,
+		"x-utraque":      false,
+		"X-Utraquex-Foo": false,
+		"Y-Utraque-Foo":  false,
+		"":               false,
+	} {
+		if got := proxyhdr.IsReserved(name); got != want {
+			t.Errorf("IsReserved(%q) = %t, want %t", name, got, want)
+		}
+	}
+}
+
 // TestNamesAreCanonicalAndPrefixed pins the header names: they are external
 // (clients and log readers match on them), so the values are restated here,
 // and each must already be in canonical form so header lookups by constant

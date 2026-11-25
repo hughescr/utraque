@@ -74,6 +74,17 @@ request; `utraque` forwards that request byte-for-byte to
 `anthropic-beta` headers. The proxy stores no Anthropic secret of its own —
 the credential lives entirely in the client and passes through untouched.
 
+The exceptions are stated. The sanitizer strips synthetic thinking blocks (see
+*Prompt caching*). Connection-scoped headers (hop-by-hop and any header named in
+`Connection`) are not relayed in either direction, and the request's `Host` is
+replaced by the upstream's. The reserved `X-Utraque-*` namespace never crosses
+the proxy: it is not forwarded upstream, and an upstream-supplied `X-Utraque-*`
+header never reaches the client (on the other legs too). The `model` field that
+routes the request is read with Go's JSON binding, so a key spelled in another
+case matches and the last duplicate wins, while the body is forwarded as sent
+(the sanitizer aside); a body with duplicate or case-variant `model` keys is
+unsupported caller input.
+
 A response body is relayed exactly as upstream encoded it, compression
 included. So when a stream dies part-way — a dropped link, an upstream that
 goes silent past the upstream idle timeout — `utraque` drops the connection rather than
@@ -85,10 +96,61 @@ one.
 
 **Codex/GPT leg.** Rather than a metered API key, this leg
 reads the Codex CLI's own login token from `~/.codex/auth.json`, refreshes it
-when it's near expiry (writing the refreshed token back to that file safely,
-so it never clobbers the Codex CLI's own state), and uses it to call OpenAI's
-backend on your behalf. This bills usage against your ChatGPT/Codex
+when it's near expiry (writing the refreshed token back to that file by atomic
+rename, under utraque's own lock file, keeping the file's unknown keys, mode and
+group), and uses it to call OpenAI's backend on your behalf. A writer that does
+not take that lock is detected best-effort, by a changed size, modification time
+or (on macOS and Linux) file identity, and utraque then declines to overwrite
+it; a small window remains between that last check and the rename. The same
+comparison tells utraque whether the login it holds is still the file's: on
+macOS and Linux a replaced file (a temp file renamed into place, which is how
+both the Codex CLI and utraque write it) is always noticed, while an in-place
+rewrite that keeps both the size and the modification time is not; on other
+platforms only size and modification time are compared. A warning is logged when the file's mode is
+first seen to permit group or other read or write access, and again if the mode
+changes (`chmod 600` it). This bills usage against your ChatGPT/Codex
 subscription, not a separate API key.
+
+Each accepted request uses one credential snapshot for the model lookup, the
+translation and the upstream send, so a login change part-way through never
+splits a request across two accounts. If Codex rejects the request in a way that
+calls for a credential refresh (a 401; a challenge page served with status 401
+becomes a 502 and triggers no refresh), the snapshot is invalidated and the
+credential re-read, refreshing it if needed; a new token for the *same* account
+is retried once, and a refresh that yields the same token is not retried (the
+original rejection is returned). If the stored login now belongs to a different
+account (you ran `codex login` while the request was in flight), the request is
+not re-sent under it: the first attempt went out under the original login and
+was rejected, and the client receives HTTP 400 `invalid_request_error` with "the
+Codex login changed while this request was in flight; it was not sent under the
+new account — resubmit to send it under the current login". What is guaranteed
+is that once a request has a login it is never re-sent under a different
+account, so a prompt accepted under one account is never silently re-sent under
+another account's billing and retention. What is not guaranteed is that a
+request starting at the very moment of a login switch picks up the new login: it
+uses the login utraque read for it, which during a switch can be the previous
+one (a credential load already in progress is shared with requests that arrive
+while it runs).
+
+The model list, its ETag and its on-disk cache, and the quota and catalog
+status shown on `/healthz`, are tagged with the account that fetched them and
+are not reused for another account: after a `codex login` switch the new
+account's list is fetched by the next request that actually consults the catalog
+under that login (a Codex request that is routed, a picker open or the startup
+warm; a `count_tokens` call or an unroutable model name does not), never
+offering the old account's ETag, and `/healthz` shows `codex_quota` `reported:
+false` and no catalog until the new account has its own. The short model names
+published from the previous account's list are not dropped on a switch. The bare
+short names are replaced when a non-empty list for the new account is published;
+the decorated picker names (the `anthropic-compat.` rows) are replaced only when
+the picker is opened under the new login; a successful but empty list replaces
+neither (a picker open that serves no Codex rows drops the old decorated routes
+without replacing them, and those names then resolve through the bare short
+names). Until then they keep routing, and a request naming one of them is sent
+under the current login, where the upstream rejects a model that account lacks.
+A file caught mid-rewrite (empty, unparseable, or naming no account) changes
+none of this: a request that reads it gets the usual credential error, and
+`/healthz` keeps showing the catalog and quota it last recorded.
 
 **DeepSeek leg.** This leg owns a prepaid API key and sends it only to
 DeepSeek's documented Anthropic-format endpoint. Set `DEEPSEEK_API_KEY` for a
@@ -97,6 +159,26 @@ manually started process, or put the plain key in a private file and set
 environment value and a missing, unreadable, or empty file is a startup error.
 DeepSeek does not publish a standard `~/.deepseek.json` credential location,
 so utraque does not guess one.
+
+Headers named in a `Connection` header are not forwarded in either direction.
+A non-2xx upstream response is read up to 64 KiB, for at most 10 seconds in
+total, and re-emitted as an Anthropic error envelope carrying the upstream's
+status, its error type when it is a recognised one, and its message with the
+leg's own key removed, credential-shaped text scrubbed and the result capped at
+512 characters. A message that ends in the first 16 or more bytes of the key has
+that fragment removed too. Both the Anthropic shape (`{"type":"error","error":
+{"type","message"}}`) and the OpenAI shape (`{"error":{"message",...}}` with no
+top-level `type`) are recognised; for the OpenAI shape the error type comes from
+the HTTP status, never from the body. A body that is longer than that, slower
+than that, compressed, or not a recognisable error becomes `deepseek upstream
+returned HTTP <status>`. The error type for a status is the usual one
+(`rate_limit_error` for 429, and so on); any other 4xx is `invalid_request_error`.
+`Retry-After`, the rate-limit headers and the request id
+are kept when well-formed; nothing else from an error response is relayed.
+An `error` event inside an already-open stream is rebuilt the same way, carrying
+only its type (a recognised one, otherwise `api_error`) and its message, and so
+is a `2xx` JSON body that is itself an error object (its status is kept).
+Other successful responses are unchanged.
 
 The compatibility endpoint documents some Anthropic fields as ignored. Utraque
 allows performance hints such as `cache_control` and thinking
@@ -231,7 +313,7 @@ go build -ldflags "-X main.version=1.0.0" -o bin/utraque ./cmd/utraque
 
 | Variable | Why |
 | --- | --- |
-| `ANTHROPIC_BASE_URL=http://127.0.0.1:8317` | **Required.** Sends every request through `utraque`. Match `UTRAQUE_LISTEN`. |
+| `ANTHROPIC_BASE_URL=http://127.0.0.1:8317` | **Required.** Sends every request through `utraque`. Use the port of `UTRAQUE_LISTEN`, with `127.0.0.1` or `localhost` as the host. |
 | `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL=1` | **Required.** See below — without it every Claude model silently loses most of its context window. |
 | `CLAUDE_CODE_MAX_CONTEXT_TOKENS` | Optional, and **GPT-only**. See below. |
 | `ANTHROPIC_CUSTOM_HEADERS="X-Utraque-Token: <token>"` | Required **only** if you set `UTRAQUE_LOCAL_TOKEN`. Without it Claude Code cannot authenticate to your own proxy. |
@@ -296,19 +378,53 @@ the conversation outright.
 
 With `UTRAQUE_LOCAL_TOKEN` set, every request must carry it back in the
 `X-Utraque-Token` header — a dedicated header, so the client's `Authorization`
-passes through untouched — and `/healthz` is the only exempt route. Claude Code
-can send it:
+passes through untouched — and `/healthz` is the only route that answers
+without it. Claude Code can send it:
 
 ```sh
 export ANTHROPIC_CUSTOM_HEADERS="X-Utraque-Token: $(< ~/.utraque-token)"
 ```
 
-Because `/healthz` is exempt, a healthy-looking probe does **not** prove the
-token is wired. Verify with a real request.
+Generate the token randomly (`openssl rand -hex 16`): the startup log's
+`local_token` is the first four bytes of an unsalted SHA-256 of it, which cannot
+be reversed for a random token but can be guess-checked for a weak one.
+
+Because `/healthz` answers without the token, a healthy-looking probe does
+**not** prove the token is wired. Verify with a real request. Without the token,
+`/healthz` returns only `status`, `version` and `uptime_s`; send the token for
+the full document (see *Health*).
 
 With no Anthropic API key set in the environment, Claude Code's own Max
 subscription OAuth credential remains the active credential and is forwarded
 untouched, as described above.
+
+#### Browsers, Host names and non-loopback listeners
+
+Every route refuses a request that carries any `Origin` header, or a
+`Sec-Fetch-Site` other than `same-origin` or `none`, with a 403
+`permission_error`. Unless the request arrived on a listener known to be
+non-loopback (see below), the `Host` header must also be
+`localhost` (any case), an address in `127.0.0.0/8`, or `::1` (bracketed or
+not); the port is ignored. No other name is accepted and no name is ever
+resolved. A listener of unknown kind gets the same check as a loopback one.
+This stops a web page in your browser, by a cross-site request or DNS
+rebinding, from spending your subscriptions or reading the provider report. It
+does not stop other local processes, which send neither header: that is the
+local token's job. A client whose base URL names `127.0.0.1`, `localhost` or
+`[::1]` is unaffected. A client that reaches utraque by another name (a
+container using `host.docker.internal`, an `/etc/hosts` alias, a reverse proxy)
+is refused, even if that name resolves to loopback; reach utraque through a
+loopback address instead, for example a local port-forward.
+
+A listener that is not bound to loopback requires `UTRAQUE_LOCAL_TOKEN`, and the
+binary enforces it. At startup every acquired listener is classified by its bound
+address; a wildcard, non-loopback or unclassifiable one without the token stops
+startup with an error naming the variable, and with the token it serves and logs
+one warning. Under launchd a refused start waits up to a minute before exiting,
+so it does not respawn in a tight loop. The token over plain HTTP protects
+against unauthenticated spending, not against someone who can read the traffic:
+on a shared network they can read the token and the caller's Anthropic bearer
+credential off the wire.
 
 ### Using a GPT route
 
@@ -474,12 +590,22 @@ startup with a named error rather than being quietly ignored.
 
 This is the whole surface.
 
+The four upstream URLs — `UTRAQUE_ANTHROPIC_BASE_URL`,
+`UTRAQUE_DEEPSEEK_BASE_URL` (which also decides the DeepSeek balance endpoint),
+`UTRAQUE_CODEX_BASE_URL` and `UTRAQUE_CODEX_TOKEN_URL` — each receive a
+credential, so each must be `https://`. Plain `http://` is accepted only for a
+`127.0.0.0/8` address, `[::1]` or `localhost`, where the bytes never leave the
+machine. Anything else fails startup with an error naming the variable, and the
+error never echoes the configured value. A private plain-`http` gateway on
+another host needs TLS in front of it, or a local tunnel or port-forward with the
+variable pointed at `http://127.0.0.1:<port>`.
+
 ### Server
 
 | Variable | Default | What it does |
 | --- | --- | --- |
-| `UTRAQUE_LISTEN` | `127.0.0.1:8317` | The `host:port` to bind. Also the address `ANTHROPIC_BASE_URL` must name. |
-| `UTRAQUE_LOCAL_TOKEN` | *(none)* | Optional loopback shared secret, required in `X-Utraque-Token` on every request except `/healthz`. Recommended on: without it, any local process can spend the configured Codex subscription or DeepSeek balance and read whatever provider-report data is available. Anthropic operations still require the caller's own bearer credential. |
+| `UTRAQUE_LISTEN` | `127.0.0.1:8317` | The `host:port` to bind. `ANTHROPIC_BASE_URL` must use its port, with `127.0.0.1` or `localhost` as the host on a loopback listener. Under launchd it is not used to bind (launchd's socket is), but it is still validated and logged at startup. It does not affect which `Host` names are accepted. Binding off loopback needs `UTRAQUE_LOCAL_TOKEN`; see *Browsers, Host names and non-loopback listeners*. |
+| `UTRAQUE_LOCAL_TOKEN` | *(none)* | Shared secret, required in `X-Utraque-Token` on every request except `/healthz`, which without it returns only `status`, `version` and `uptime_s`. Required when any listener is not loopback; recommended on otherwise: without it, any local process can spend the configured Codex subscription or DeepSeek balance and read whatever provider-report data is available. Anthropic operations still require the caller's own bearer credential. Generate it randomly (`openssl rand -hex 16`); the startup log shows the first four bytes of its unsalted SHA-256. |
 | `UTRAQUE_MAX_BODY_BYTES` | `67108864` (64 MiB) | Largest request body accepted. |
 | `UTRAQUE_UPSTREAM_IDLE_TIMEOUT` | `120s` | Bounds the wait for an upstream's first byte **and** silence within a stream, so a stalled SSE response cannot pin a request forever. There is deliberately no overall request timeout: a legitimate stream can run for many minutes. |
 | `UTRAQUE_LOG_LEVEL` | `info` | `debug` \| `info` \| `warn` \| `error`. |
@@ -489,7 +615,7 @@ This is the whole surface.
 
 | Variable | Default | What it does |
 | --- | --- | --- |
-| `UTRAQUE_ANTHROPIC_BASE_URL` | `https://api.anthropic.com` | Where the passthrough forwards. Rejected at startup if it carries userinfo, a query or a fragment — a credential must never ride in a configured URL. |
+| `UTRAQUE_ANTHROPIC_BASE_URL` | `https://api.anthropic.com` | Where the passthrough forwards. Rejected at startup unless it is `https` (or `http` on loopback), and if it carries userinfo, a query or a fragment — a credential must never ride in a configured URL. |
 
 ### DeepSeek leg
 
@@ -497,7 +623,7 @@ This is the whole surface.
 | --- | --- | --- |
 | `DEEPSEEK_API_KEY` | *(none)* | Conventional DeepSeek API key variable. Never forwarded from the incoming request and never rendered in config or logs. |
 | `UTRAQUE_DEEPSEEK_API_KEY_FILE` | *(none)* | Path to a plain private key file. A leading `~/` is expanded. When set, it wins over `DEEPSEEK_API_KEY` and any read failure is fatal rather than falling back to a different credential. For launchd, add this variable to the plist because launchd does not inherit the shell environment. |
-| `UTRAQUE_DEEPSEEK_BASE_URL` | `https://api.deepseek.com/anthropic` | DeepSeek's documented Anthropic-format endpoint. The override exists for hermetic testing and private compatible gateways; in normal use, leave it alone. Credential-bearing URLs are rejected. |
+| `UTRAQUE_DEEPSEEK_BASE_URL` | `https://api.deepseek.com/anthropic` | DeepSeek's documented Anthropic-format endpoint. The override exists for hermetic testing and private compatible gateways; in normal use, leave it alone. Must be `https` (or `http` on loopback); credential-bearing URLs are rejected. |
 
 ### Codex/GPT leg
 
@@ -505,11 +631,11 @@ This is the whole surface.
 | --- | --- | --- |
 | `UTRAQUE_CODEX_AUTH_FILE` | `$CODEX_HOME/auth.json`, else `~/.codex/auth.json` | The Codex login token — the same file the Codex CLI reads and writes. A leading `~/` is expanded. |
 | `CODEX_HOME` | *(unset)* | The Codex CLI's own variable, honoured unprefixed so pointing both tools at one directory works. |
-| `UTRAQUE_CODEX_CACHE_FILE` | `<user cache dir>/utraque/models_cache.json` | `utraque`'s **own** catalog cache. Never the Codex CLI's `models_cache.json`. An empty value counts as unset, so the default applies; the catalog runs memory-only only when no user cache directory can be determined. |
-| `UTRAQUE_CODEX_BASE_URL` | `https://chatgpt.com/backend-api/codex` | The backend root used for both the model catalog and inference. It exists so the test suite can aim the leg at a fake upstream; in normal use, leave it alone. |
-| `UTRAQUE_CODEX_TOKEN_URL` | `https://auth.openai.com/oauth/token` | Where a refresh token is exchanged. |
+| `UTRAQUE_CODEX_CACHE_FILE` | `<user cache dir>/utraque/models_cache.json` | `utraque`'s **own** catalog cache. Never the Codex CLI's `models_cache.json`. An empty value counts as unset, so the default applies; the catalog runs memory-only only when no user cache directory can be determined. The record carries the account scope (a SHA-256 derived from the account id, never the id) and the backend endpoint, next to the CLI-shaped `client_version`, `etag`, `fetched_at` and `models`. A record without them, or written for another account or endpoint, is ignored and replaced on the next successful fetch. An older binary reads the new record but ignores the scope, so delete this file when downgrading if its contents must not be reused across logins. |
+| `UTRAQUE_CODEX_BASE_URL` | `https://chatgpt.com/backend-api/codex` | The backend root used for both the model catalog and inference. It exists so the test suite can aim the leg at a fake upstream; in normal use, leave it alone. Must be `https` (or `http` on loopback). |
+| `UTRAQUE_CODEX_TOKEN_URL` | `https://auth.openai.com/oauth/token` | Where a refresh token is exchanged. Must be `https` (or `http` on loopback). |
 | `UTRAQUE_CODEX_REFRESH_SKEW` | `2m` | Refresh pre-emptively once the access token is this close to expiry. |
-| `UTRAQUE_CODEX_LOCK_TIMEOUT` | `10s` | How long a refresh waits for the cross-process advisory lock on `auth.json` before giving up, so `utraque` and the Codex CLI never clobber each other. |
+| `UTRAQUE_CODEX_LOCK_TIMEOUT` | `10s` | How long a refresh waits for the cross-process advisory lock on `auth.json` before giving up. The lock is utraque's own (`auth.json.lock`); a writer that does not take it is only caught best-effort (see *How it works / credentials*). |
 | `UTRAQUE_CODEX_TRANSPORT` | `auto` | `auto` \| `std` \| `utls`. See *Transport* below. A typo is a startup error, never a silent fallback. |
 | `UTRAQUE_CODEX_CLIENT_VERSION` | detected from `UTRAQUE_CODEX_EXECUTABLE --version` | Sent as the `client_version` query parameter on every model-catalog request. Discovery is bounded and requires `codex-cli <semantic-version>` on stdout; startup fails if discovery cannot supply a real version, because stale versions can hide newly released models. Set this explicitly to bypass executable discovery. |
 
@@ -538,6 +664,18 @@ upgrade needed a utraque restart.) An explicit `UTRAQUE_CODEX_CLIENT_VERSION`
 bypasses discovery entirely — the executable is never run or even stat'ed for
 it — and remains in force until the override is changed or removed.
 `/healthz` reports the version in use as `codex_catalog.client_version`.
+
+`codex --version` runs with an allow-listed environment, not utraque's own, so
+utraque's secrets (the local token, an environment-sourced DeepSeek key) are never
+passed to it. The child gets `HOME`, `PATH`, `USER`, `LOGNAME`, `SHELL`, `TMPDIR`,
+`LANG`, `LC_ALL`, `LC_CTYPE`, `CODEX_HOME`, the XDG base directories
+(`XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_CACHE_HOME`, `XDG_STATE_HOME`),
+`SSL_CERT_FILE`, `SSL_CERT_DIR`, `N_PREFIX`, `PNPM_HOME`,
+`BUN_INSTALL`, `NODE_PATH`, and the version-manager families `NVM_*`, `VOLTA_*`,
+`FNM_*`, `ASDF_*`, `MISE_*` and `NODENV_*` — but never a name ending in `_TOKEN`,
+`_KEY`, `_SECRET` or `_PASSWORD`. A Codex that needs any other variable to start
+fails the probe although it works in your shell; set `UTRAQUE_CODEX_EXECUTABLE`
+to the real binary or set `UTRAQUE_CODEX_CLIENT_VERSION` to skip the probe.
 
 ### Routing
 
@@ -687,8 +825,9 @@ record) and below (the stream record).
 Two of those fields earn their place by being *differences*. `upstream_status`
 is the status the BACKEND gave, which is not always the one you were answered
 with — an upstream 200 whose body carried no events becomes a 502 downstream,
-and an upstream 401 becomes a refresh and a retry. `interrupted` separates "you
-hung up" from "it broke", so a cancelled turn never reads as an incident.
+and an upstream 401 (a challenge page is a 502 instead) becomes a refresh and,
+for the same account, one retry. `interrupted` separates "you hung up" from "it
+broke", so a cancelled turn never reads as an incident.
 
 On the Codex and DeepSeek legs, `input_tokens`, `cache_read_input_tokens` and
 `cache_creation_input_tokens` are the three components of the prompt under
@@ -728,8 +867,10 @@ the slog handler is wrapped in a scrubber that blanks any attribute whose key
 names a credential — including under a namespacing prefix, so `codex_token` is
 blanked by the same rule as `token`, while a count like `output_tokens` is not —
 and rewrites any credential-shaped value (a bearer token, a JWT, an `sk-` key, a
-token field in a JSON body or query string) before it can reach the output. The
-Codex `account_id` appears only as a hash prefix.
+token field in a JSON body or query string) before it can reach the output. A
+Codex `account_id` logged as an attribute appears only as a hash prefix; an
+account id echoed inside upstream error text is removed only when it is at
+least 4 bytes long (see below).
 
 Be precise about what that buys. The header layer is a true allowlist: a header
 not on the list of four is never valued, whatever it holds. The attribute layer
@@ -738,10 +879,16 @@ site that both invented an un-denied key *and* put a credential of an
 unrecognised shape under it would get through. No call site does, and the tests
 say so; it is a rule enforced at the edge, not a type system.
 
-Request and response **bodies** are never logged, at any level. One thing that
-does come off an upstream response is the first 512 characters of its error
-body, which becomes the request line's `err` — it goes through the scrubber like
-every other string, on the log path and on the trace path alike.
+Be equally precise about what reaches a log. Normal logs carry request metadata
+and no request or response body content. Debug-level records add diagnostic
+metadata that comes from the request, such as tool names and schema paths. An
+error summary can carry upstream-derived text: the request line's `err` can hold
+an upstream error message of up to 512 characters, which goes through the
+scrubber like every other string, on the log path and on the trace path alike.
+Opt-in trace files, below, are the only place a conversation is written.
+
+The scrubber's JSON-field pattern honours escaped quotes, and an unterminated
+value is redacted to the end of the input.
 
 **Trace dumps** are the exception, and they are behind their own switch. Setting
 `UTRAQUE_TRACE_DIR` writes `<stem>.request.json` for every request, and — for a
@@ -749,8 +896,13 @@ Codex request that got as far as opening a stream — `<stem>.upstream.sse` and
 `<stem>.downstream.sse` beside it (a non-streaming answer lands in
 `<stem>.downstream.json`). An Anthropic passthrough, a `/healthz` poll, a
 `/v1/models` open, or a Codex request that failed before the stream opened leave
-the manifest alone. The same redaction is applied, manifest included. They are
-source material for test fixtures: the bytes received and the bytes sent, side
+the manifest alone. The same scrubber is applied, manifest included, so a
+trace is scrubbed for credential shapes only, not anonymised. A credential
+cannot be split across a write boundary: the writer holds a possible credential
+back until it can be recognised. A credential-shaped value with no newline that
+runs past 1 MiB cannot be resolved, so the rest of that trace stream is replaced
+by `[REDACTED]`; the live response is unaffected. Traces are source material
+for test fixtures: the bytes received and the bytes sent, side
 by side, can turn a translation bug into a reproducible case. **A trace holds
 the prompt text and the model's output in the clear**, which is why enabling it
 logs a loud `WARN` at startup.
@@ -770,7 +922,7 @@ that is itself credential-shaped is refused and a generated one used instead.
 That is a backstop and not a guarantee: an opaque high-entropy string is
 exactly what a request id looks like.
 
-**Debug response headers.** Each non-passthrough leg stamps its own debug headers before it commits a response: Codex and DeepSeek Messages responses set `X-Utraque-Route` (`codex` or `deepseek`) and `X-Utraque-Model` to the upstream model actually requested. Anthropic passthrough responses set neither header. Locally estimated `/v1/messages/count_tokens` responses set `X-Utraque-Token-Count-Method`: DeepSeek reports `estimated; estimator=chars/4`, while Codex reports `estimated; estimator=o200k_base`.
+**Debug response headers.** Each non-passthrough leg stamps its own debug headers before it commits a response: Codex and DeepSeek Messages responses set `X-Utraque-Route` (`codex` or `deepseek`) and `X-Utraque-Model` to the upstream model actually requested. Anthropic passthrough responses set neither header. Locally estimated `/v1/messages/count_tokens` responses set `X-Utraque-Token-Count-Method`: DeepSeek reports `estimated; estimator=chars/4`, while Codex reports `estimated; estimator=o200k_base`. The `X-Utraque-*` namespace is reserved: a caller's or an upstream's header in it is never forwarded in either direction, so every such header a client sees was set by the proxy.
 
 **Other per-request records.** The Codex leg writes one record per stream at
 DEBUG (`codex stream translated`) or, when the translator met event types it
@@ -807,6 +959,27 @@ is one of the values on the published
 `billing_error` and `conflict_error`; both were `api_error` (and, on a Codex
 rejection, `invalid_request_error`) before the taxonomy was checked against
 that page.
+
+The detail a Codex failure shows the client is scrubbed: the Codex access token
+and account id are removed from upstream error text (a credential value is
+removed by exact match only when it is at least 4 bytes long), an unexpected
+redirect is reported without its target, and a network or TLS failure shows its
+classification without the raw cause. Error text that arrives inside an
+already-open stream (a `response.failed` or `error` event) gets the same
+treatment as an HTTP error body: the credential that signed that request and
+its account id are removed, credential-shaped text is scrubbed and the upstream
+detail is capped at 512 runes (the cap applies to that detail, not to the whole
+message utraque renders around it). A message ending in the first 16 or more
+bytes of the access token has that fragment removed too. The same holds for the DeepSeek leg's
+error envelope and its in-stream `error` event (see *How it works /
+credentials*) and for catalog failures on `/healthz`.
+
+That is a guarantee about error messages and logs. It does not reach the
+content of a successful completion, which is relayed unscrubbed, or an opt-in
+trace, which is scrubbed for credential shapes only. Removal of a
+known credential matches its exact text, so an encoded or otherwise transformed
+copy is caught only if it has a credential's shape. A DeepSeek non-streaming
+`2xx` response whose JSON body is itself an error object is relayed as received.
 
 ## Prompt caching
 
@@ -978,12 +1151,17 @@ back, and the stateless design does not hold.
 ## Short model names
 
 Short names (`sol`, `sol-6.1`, `sol-high`) are derived from the model list the
-Codex backend itself serves, not from a table compiled into the binary. Every
-successful catalog read — the per-request lookup that clamps reasoning effort,
-and a picker open — republishes them, so a codename OpenAI ships today starts
-resolving as soon as anything reads the catalog, and a retired slug stops.
-Until the first read succeeds, a compiled-in seed applies. Raw `gpt-*` slugs
-always route regardless.
+Codex backend itself serves, not from a table compiled into the binary. Each
+non-empty list the proxy commits — from a fetch, a revalidation or the disk
+cache, triggered by the per-request lookup that clamps reasoning effort, a
+picker open or the startup warm — republishes them, so a codename OpenAI ships
+today starts resolving as soon as anything reads the catalog, and a retired slug
+stops. A successful but empty list publishes nothing and leaves the current
+names in place. Until the first
+catalog loads, a compiled-in seed applies. After a `codex login` switch the
+previous account's names keep routing until a non-empty list for the new
+account is published (see the Codex/GPT leg description above). Raw `gpt-*`
+slugs always route regardless.
 
 A model name that resolves to no leg at all is answered locally with a 404
 `not_found_error` whose message lists the accepted model names — the
@@ -1005,37 +1183,82 @@ them as `bare_aliases` (was `families`).
 `GET /healthz` is answered locally and never contacts any upstream. It
 reports process status, version and uptime, plus, for the Codex leg:
 
+```sh
+curl -fsS http://127.0.0.1:8317/healthz
+curl -fsS -H "X-Utraque-Token: $UTRAQUE_LOCAL_TOKEN" http://127.0.0.1:8317/healthz
+```
+
+With no local token configured the first form returns everything below. With one
+configured, a request without the correct `X-Utraque-Token` gets only `status`,
+`version` and `uptime_s`, and the full document needs the second form.
+
 - `codex_auth` — `state`: the credential state (`ok` / `stale` / `missing`),
-  `reason` when it is `stale` (`expiring` for a token at or past expiry,
+  `reason` when it is `stale` (`expiring` for a token within the refresh skew
+  of expiry — `UTRAQUE_CODEX_REFRESH_SKEW`, 2 minutes by default — or past it,
   `invalidated` when the backend rejected it; omitted otherwise), and
   `expires_in_s`, the seconds until the access token expires. The token value
-  never appears. (`state` was `status`, and there was no `reason`, before the
-  healthz revision that aligned it with `codex_catalog.state`.)
+  never appears. `file_mode` is the auth file's permission bits (e.g. `"0600"`);
+  it is omitted when the mode is `0000` or could not be read. `mode_warning`
+  appears, with fixed text, when that mode permits group or other read or write
+  access. A health poll changes no operational state (credentials,
+  invalidation, catalog, quota, routes); it may update the file-mode diagnostic
+  and log its one-time mode warning. (`state` was `status`, and there was no `reason`,
+  before the healthz revision that aligned it with `codex_catalog.state`.)
 - `codex_catalog` — how many models the held snapshot holds, how old it is, and
   `state`: **why** it looks like that. A bare `models: 0` is several different
   situations wearing one face, so they are named — `loaded`, `empty` (a fetch
   succeeded and the backend really listed nothing), `failed` (with
   `last_error`), `unavailable` (no `codex login` here), `warming`, or `cold`.
+  After a failed or refused attempt, `last_error` is fixed explanatory text,
+  `last_error_code` is one of a closed set (`bad_request`,
+  `credential_rejected`, `redirect_refused`, `upstream_status`,
+  `unexpected_not_modified`, `transport`, `timeout`, `canceled`,
+  `credential_acquisition_failed`, `no_credential`, `decode`,
+  `invalid_request`), and `last_error_status` is the real upstream HTTP status
+  (omitted when there was no response). `last_attempt_age_s` is the seconds
+  since the last attempt, once there has been one. Upstream response text and
+  redirect targets never appear on health or in the log.
   The catalog is also warmed in the background at startup, so the count is a
   fact about the backend rather than a fact about whether anyone has used the
   proxy yet. `client_version` is the Codex client version the catalog sends
   (e.g. `"client_version": "0.155.0"`), which decides which models the backend
   lists; a stale one hides newly released models. It is read from the catalog,
   so a health poll never runs the Codex executable, and it is omitted when no
-  version is known.
+  version is known. The snapshot and the last attempt are shown only for the
+  account `auth.json` names now: after a `codex login` switch they read
+  `loaded: false`, `models: 0`, `state` `cold` and no `last_error` until there
+  has been an attempt for that account (a failed first fetch shows `failed` and
+  `last_error`). When `auth.json` is missing or cannot be read, whatever was last
+  recorded stays visible, for the catalog and for `codex_quota` alike, so
+  `codex_auth.state` and the age fields (`expires_in_s`, the catalog's `age_s`
+  and `last_attempt_age_s`, the quota's `age_s`) are what tell a monitor how
+  current it is. A health poll only reads what is held: it fetches nothing
+  and does not read the disk cache, which the startup warm, a picker open or
+  the first Codex request loads.
 - `codex_routing` — `bare_aliases`, the bare (rolling) aliases the router
   currently resolves: the quickest way to see whether the live catalog has
-  been loaded or the compiled-in seed is still in force. (The key was
+  been loaded or the compiled-in seed is still in force. It is process-wide,
+  not per account: after a login switch it lists the previous account's names
+  until a non-empty list for the new account is published. (The key was
   `families` before the same revision.)
 - `codex_quota` — the rolling usage windows the backend reports on its own
   response headers, with the age of that reading, so subscription burn-down is
   visible. Always present, carrying `reported: false` until the backend has
-  said anything: an absent quota block reads as "quota is fine".
+  said anything: an absent quota block reads as "quota is fine". The reading
+  belongs to the account whose request carried it, and is shown only while
+  `auth.json` names that account (or cannot be read), so after a switch it
+  reads `reported: false` until a request under the new login answers. A quota
+  number the upstream sends that is not valid (NaN, infinite, negative or out
+  of range) is ignored rather than reported.
 - `codex_stream` — how many Codex stream events the translator did not
   recognise, by type (`unknown_events`, `unknown_event_types`,
-  `streams_with_unknowns`). A non-zero count is the early warning that the
-  upstream protocol has drifted; the live contract test below is the deliberate
-  version of the same check. The backend's two routine frames, `response.metadata`
+  `streams_with_unknowns`). A type name is shown only when it matches
+  `^[a-z][a-z0-9_.]{0,63}$`; others are counted under `(malformed)`, and at most
+  64 keys are kept, with the overflow counted under `(other)`. A non-zero count
+  is the early warning that the upstream protocol has drifted; the live contract
+  test below is the deliberate version of the same check. These counters are
+  process-wide, not per account, so after a login switch they can still reflect
+  the previous login. The backend's two routine frames, `response.metadata`
   and `keepalive`, are recognised and ignored, so they do not count.
 - `transport` — which HTTP transport is in force per leg (`anthropic`, always
   `std`; `codex`, which `kind` repeats because it is the only one that can
@@ -1064,7 +1287,10 @@ frozen, at `GET /utraque/providers/v1` and at its original path
 for the migration mapping. There is no query-parameter negotiation: the path
 is the version.
 
-Every report path is restricted to loopback clients. When
+Every report path is restricted to loopback clients, judged by the direct peer
+address, so behind a reverse proxy on the same host every caller looks like
+loopback; set a local token if one fronts utraque. The browser guard (see
+*Browsers, Host names and non-loopback listeners*) also applies. When
 `UTRAQUE_LOCAL_TOKEN` is configured, the ordinary server middleware also
 requires the matching `X-Utraque-Token`; without that optional setting, a
 loopback caller needs no local-auth header. The caller must supply its Claude
@@ -1085,7 +1311,8 @@ Every response is `Cache-Control: no-store`. The endpoint returns `200` even
 when one provider is partial or unavailable; each provider carries its own
 status and classified errors. It returns the normal local-auth `401` for a
 missing or wrong `X-Utraque-Token` when that optional protection is
-configured, `403` for a non-loopback caller, `405` for methods other than GET
+configured, `403` for a non-loopback caller or a request the browser guard
+refuses, `405` for methods other than GET
 or HEAD, `504` when collection exceeds `UTRAQUE_PROVIDER_REPORT_TIMEOUT`, and
 `503` when reporting is not configured or collection failed outright.
 
@@ -1463,8 +1690,12 @@ registry, so a chosen model remains usable after the daemon restarts.
 The validator checks every module Go file, builds `./cmd/utraque` into a
 disposable output (never over the deployed `bin/utraque`), runs the ordinary
 and native-cgo race suites, checks every deployment and project shell script,
-and exercises the pre-push hook against disposable local repositories. Use
-`./scripts/validate.sh go` or `./scripts/validate.sh shell` for one partition.
+and exercises the pre-push hook against disposable local repositories. The
+`shell` partition also runs `tests/install-loopback.sh`, which checks
+`deploy/install.sh`'s loopback classifier everywhere and drives the whole
+installer against a disposable `HOME` with a stub `launchctl` (that part skips
+itself where `plutil` is absent). Use `./scripts/validate.sh go` or
+`./scripts/validate.sh shell` for one partition.
 
 Run `./scripts/install-hooks.sh` once per repository to enable the
 version-controlled pre-push hook. The installer leaves an existing hooks path
@@ -1480,6 +1711,13 @@ resolve to `HEAD`; deletion-only pushes remain available.
 `~/.codex/auth.json` are never read, written or contacted by `go test ./...`,
 and the leak test drives the production logger at `debug` to prove no
 token-shaped material reaches a log line.
+
+**Fuzz tests** (`func FuzzXxx`) mostly cover credential isolation and redaction. Plain
+`go test` replays their seed corpus and any failures saved under a package's
+`testdata/fuzz/`. List the targets with `grep -rn 'func Fuzz'
+--include='*_test.go' .`, and run one target's random search with, for example,
+`go test ./internal/obs -run '^$' -fuzz '^FuzzScrubCredential$' -fuzztime 60s`.
+A failure found this way is saved under `testdata/fuzz/`; commit it with the fix.
 
 ### The live contract test
 

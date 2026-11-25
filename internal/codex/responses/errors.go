@@ -12,6 +12,9 @@ import (
 	"unicode"
 
 	"github.com/hughescr/utraque/internal/apierr"
+	"github.com/hughescr/utraque/internal/codex/auth"
+	"github.com/hughescr/utraque/internal/obs"
+	"github.com/hughescr/utraque/internal/publicdetail"
 )
 
 // Class is the coarse kind of an upstream failure. It is what the Codex leg
@@ -23,7 +26,7 @@ type Class string
 // The failure classes. Every *UpstreamError carries exactly one.
 const (
 	// ClassAuth is an upstream 401: the access token was rejected. The leg
-	// should auth.Invalidate the credential and retry EXACTLY once.
+	// may retry once if refreshing produces a new token for the same login.
 	ClassAuth Class = "auth"
 	// ClassRateLimit is an upstream 429: plan rate limit or quota exhausted.
 	// Retry-After and the usage-window headers are carried on RateLimits.
@@ -111,10 +114,8 @@ func (e *UpstreamError) Error() string {
 		b.WriteString(": ")
 		b.WriteString(e.api.Message)
 	}
-	if e.cause != nil {
-		b.WriteString(": ")
-		b.WriteString(e.cause.Error())
-	}
+	// Keep the transport cause available to errors.Is/As, not to request logs:
+	// net/http errors can include the complete URL, including its query.
 	return b.String()
 }
 
@@ -164,8 +165,8 @@ func (e *UpstreamError) Retryable() bool {
 }
 
 // NeedsCredentialRefresh reports the one documented retry hook: an upstream 401
-// means the leg should auth.Invalidate the credential and retry exactly once
-// (see Client.StreamWithRefresh, which does precisely that).
+// permits refreshing the credential. StreamPinned retries only a rotated token
+// for the original account.
 func (e *UpstreamError) NeedsCredentialRefresh() bool {
 	return e != nil && e.Class == ClassAuth
 }
@@ -207,10 +208,28 @@ func ClassOf(err error) Class {
 	return ""
 }
 
+// attemptRedactor masks the credential that signed this attempt, plus any
+// earlier tokens the same request presented (rejected): a 401 does not prove a
+// token dead, and the upstream may still echo it in a later answer.
+func attemptRedactor(cred auth.Credential, rejected ...string) func(string) string {
+	secrets := append([]string{cred.AccessToken, cred.AccountID}, rejected...)
+	return func(s string) string {
+		if s == "" {
+			return ""
+		}
+		return oneLine(obs.Scrub(publicdetail.Replace(s, obs.Redacted, secrets...)), maxErrorMessage)
+	}
+}
+
 // classifyResponse maps a non-streamable HTTP response onto a typed error. raw
-// is the (bounded) response body, already read.
-func classifyResponse(status int, h http.Header, rl RateLimits, raw []byte) *UpstreamError {
+// is the (bounded) response body, already read. rejected is as for
+// attemptRedactor.
+func classifyResponse(status int, h http.Header, rl RateLimits, raw []byte, cred auth.Credential, rejected ...string) *UpstreamError {
+	// Decode first, so JSON escapes cannot hide an echoed value; redact before
+	// normalizing or capping, so a cut through a credential cannot expose it.
+	public := attemptRedactor(cred, rejected...)
 	msg, typ, code := parseUpstreamMessage(h.Get("Content-Type"), raw)
+	msg, typ, code = public(msg), public(typ), public(code)
 	e := &UpstreamError{
 		Status:          status,
 		UpstreamMessage: msg,
@@ -257,14 +276,13 @@ func classifyResponse(status int, h http.Header, rl RateLimits, raw []byte) *Ups
 		// token at whatever host upstream named), so a 3xx is a dead end.
 		e.Class = ClassTerminal
 		e.api = apierr.WithStatus(http.StatusBadGateway, apierr.TypeAPI,
-			"codex returned an unexpected redirect (HTTP %d to %q); redirects are never followed",
-			status, h.Get("Location"))
+			"codex returned an unexpected redirect (HTTP %d); redirects are never followed", status)
 
 	default:
 		e.Class = ClassTerminal
 		e.api = apierr.WithStatus(http.StatusBadGateway, apierr.TypeAPI, "%s",
 			withDetail(fmt.Sprintf("codex returned an unexpected response (HTTP %d, content-type %q) where an %s stream was expected",
-				status, h.Get("Content-Type"), acceptSSE), msg))
+				status, public(h.Get("Content-Type")), acceptSSE), msg))
 	}
 	return e
 }
@@ -283,11 +301,11 @@ func classifyTransport(ctx context.Context, err error) *UpstreamError {
 			"codex responses request timed out before the stream opened")
 	case looksLikeTLSGate(err):
 		e.Class = ClassGate
-		e.api = apierr.WithStatus(http.StatusBadGateway, apierr.TypeAPI, "%s", tlsGateMessage(err))
+		e.api = apierr.WithStatus(http.StatusBadGateway, apierr.TypeAPI, "%s", tlsGateMessage)
 	default:
 		e.Class = ClassNetwork
 		e.api = apierr.WithStatus(http.StatusBadGateway, apierr.TypeAPI,
-			"codex responses request could not reach the upstream: %s", oneLine(err.Error(), maxErrorMessage))
+			"codex responses request could not reach the upstream")
 	}
 	return e
 }
@@ -305,12 +323,10 @@ func gateMessage(status int) string {
 		"(force it from the start with UTRAQUE_CODEX_TRANSPORT=utls)", status)
 }
 
-func tlsGateMessage(err error) string {
-	return fmt.Sprintf("codex upstream refused the TLS connection, which is how a fingerprint-based bot gate looks from the client side: %s. "+
-		"Retrying unchanged cannot help; the fix is the uTLS (browser-fingerprint) transport, "+
-		"which codex.transport=auto has already switched to for the rest of this process "+
-		"(force it from the start with UTRAQUE_CODEX_TRANSPORT=utls)", oneLine(err.Error(), maxErrorMessage))
-}
+const tlsGateMessage = "codex upstream refused the TLS connection, which is how a fingerprint-based bot gate looks from the client side. " +
+	"Retrying unchanged cannot help; the fix is the uTLS (browser-fingerprint) transport, " +
+	"which codex.transport=auto has already switched to for the rest of this process " +
+	"(force it from the start with UTRAQUE_CODEX_TRANSPORT=utls)"
 
 // tlsGateMarkers are handshake failures that indicate the peer refused us
 // rather than a routine network fault.
@@ -445,13 +461,13 @@ func parseUpstreamMessage(contentType string, raw []byte) (msg, typ, code string
 	if err := json.Unmarshal(trimmed, &eb); err == nil {
 		switch {
 		case eb.Error != nil && strings.TrimSpace(eb.Error.Message) != "":
-			return oneLine(eb.Error.Message, maxErrorMessage), eb.Error.Type, rawToString(eb.Error.Code)
+			return eb.Error.Message, eb.Error.Type, rawToString(eb.Error.Code)
 		case len(eb.Detail) > 0:
 			if d := detailMessage(eb.Detail); d != "" {
-				return oneLine(d, maxErrorMessage), eb.Type, ""
+				return d, eb.Type, ""
 			}
 		case strings.TrimSpace(eb.Message) != "":
-			return oneLine(eb.Message, maxErrorMessage), eb.Type, ""
+			return eb.Message, eb.Type, ""
 		}
 		// Valid JSON with no recognised message field: say nothing rather than
 		// echo an arbitrary object back at the client.
@@ -460,7 +476,7 @@ func parseUpstreamMessage(contentType string, raw []byte) (msg, typ, code string
 
 	// Not JSON: a short plain-text body is still the best explanation we have.
 	if strings.Contains(strings.ToLower(contentType), "text/plain") || len(trimmed) <= maxErrorMessage {
-		return oneLine(string(trimmed), maxErrorMessage), "", ""
+		return string(trimmed), "", ""
 	}
 	return "", "", ""
 }
@@ -514,22 +530,27 @@ func withDetail(base, msg string) string {
 // multi-byte character can't be sliced in half.
 func oneLine(s string, max int) string {
 	var b strings.Builder
-	b.Grow(len(s))
+	b.Grow(min(len(s), max))
 	space := false
 	runes := 0
+	last := 0 // byte offset of the last rune: truncation replaces it with an ellipsis
 	for _, r := range s {
 		if unicode.IsSpace(r) || !unicode.IsPrint(r) {
 			space = b.Len() > 0
 			continue
 		}
+		if runes == max {
+			return strings.TrimSpace(b.String()[:last]) + "…"
+		}
 		if space {
+			if runes+1 == max {
+				return b.String() + "…"
+			}
 			b.WriteByte(' ')
 			space = false
 			runes++
 		}
-		if max > 0 && runes >= max {
-			return strings.TrimSpace(b.String()) + "…"
-		}
+		last = b.Len()
 		b.WriteRune(r)
 		runes++
 	}

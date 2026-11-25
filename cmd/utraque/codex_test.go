@@ -99,6 +99,11 @@ type fakeCodex struct {
 	// catalogBody overrides the models list the fake backend serves. Empty means
 	// fakeCatalogBody. Set it before the first catalog read.
 	catalogBody string
+	// catalogFor, when set, chooses the models list by the request's account
+	// id; an empty answer falls back to catalogBody. Set it before the first
+	// catalog read.
+	catalogFor func(account string) string
+	onModels   func()
 
 	// catalogFail, when non-zero, makes the catalog endpoint answer with that
 	// status instead of a model list.
@@ -115,6 +120,9 @@ func newFakeCodex(t *testing.T) *fakeCodex {
 	mux := http.NewServeMux()
 	mux.HandleFunc(codexBasePath+"/models", func(w http.ResponseWriter, r *http.Request) {
 		f.catalog.Add(1)
+		if f.onModels != nil {
+			f.onModels()
+		}
 		if f.catalogFail != 0 {
 			w.WriteHeader(f.catalogFail)
 			_, _ = io.WriteString(w, `{"error":{"message":"catalog unavailable"}}`)
@@ -122,6 +130,11 @@ func newFakeCodex(t *testing.T) *fakeCodex {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		body := f.catalogBody
+		if f.catalogFor != nil {
+			if b := f.catalogFor(r.Header.Get("chatgpt-account-id")); b != "" {
+				body = b
+			}
+		}
 		if body == "" {
 			body = fakeCatalogBody
 		}
@@ -243,6 +256,8 @@ func (b *syncBuffer) String() string {
 
 // codexEnvOptions tunes the environment beyond the config.
 type codexEnvOptions struct {
+	// KeepToken makes the test OAuth endpoint return the rejected token.
+	KeepToken bool
 	// Level is the log level captured into env.logs. Zero means "capture
 	// nothing", which is what almost every test wants.
 	Level slog.Level
@@ -275,8 +290,11 @@ func newCodexEnvOpts(t *testing.T, mutate func(*config.Config), opts codexEnvOpt
 	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		n := env.refreshes.Add(1)
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = fmt.Fprintf(w, `{"access_token":%q,"refresh_token":"refresh-token-%d"}`,
-			jwtWithExp(time.Now().Add(3*time.Hour)), n+1)
+		token := jwtWithExp(time.Now().Add(3 * time.Hour))
+		if opts.KeepToken {
+			token = readAccessToken(t, env.authPath)
+		}
+		_, _ = fmt.Fprintf(w, `{"access_token":%q,"refresh_token":"refresh-token-%d"}`, token, n+1)
 	}))
 	t.Cleanup(tokenSrv.Close)
 

@@ -14,10 +14,12 @@ import (
 	"io"
 	"log/slog"
 	"math"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"runtime/debug"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -38,6 +40,7 @@ import (
 	"github.com/hughescr/utraque/internal/idle"
 	"github.com/hughescr/utraque/internal/launchd"
 	"github.com/hughescr/utraque/internal/leg"
+	"github.com/hughescr/utraque/internal/localaddr"
 	"github.com/hughescr/utraque/internal/obs"
 	"github.com/hughescr/utraque/internal/providerquota"
 	"github.com/hughescr/utraque/internal/providerreport"
@@ -45,6 +48,7 @@ import (
 	"github.com/hughescr/utraque/internal/router"
 	"github.com/hughescr/utraque/internal/server"
 	"github.com/hughescr/utraque/internal/tokens"
+	"github.com/hughescr/utraque/internal/translate/stream"
 	"github.com/hughescr/utraque/internal/transport"
 	"github.com/hughescr/utraque/internal/usagehistory"
 )
@@ -144,6 +148,10 @@ func main() {
 // server, arm the idle timer, and serve until a signal or the idle timeout
 // asks us to stop.
 func run(ctx context.Context, getenv func(string) string, stderr io.Writer) error {
+	return runWithListen(ctx, getenv, stderr, launchd.Listen)
+}
+
+func runWithListen(ctx context.Context, getenv func(string) string, stderr io.Writer, listen func(launchd.Options) ([]net.Listener, launchd.Source, error)) error {
 	cfg, err := config.LoadFrom(getenv)
 	if err != nil {
 		return err
@@ -156,14 +164,6 @@ func run(ctx context.Context, getenv func(string) string, stderr io.Writer) erro
 	slog.SetDefault(log)
 	warnDeprecatedEnv(log, getenv)
 
-	// Startup discovery still fails fast when there is no version at all. The
-	// probe it returns (nil for an explicit override) keeps the version current
-	// for the catalog after that; see codexVersionProbe.
-	versionProbe, err := resolveCodexClientVersion(ctx, &cfg, log)
-	if err != nil {
-		return err
-	}
-
 	// Two cancellation sources feed one context: SIGINT/SIGTERM from the
 	// operator or launchd, and the idle timer's self-exit. Either one starts
 	// the same graceful drain.
@@ -172,10 +172,9 @@ func run(ctx context.Context, getenv func(string) string, stderr io.Writer) erro
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	// Acquire the listening socket first: either the one launchd already holds
-	// or a fresh bind of cfg.Listen. Doing it before anything else means a port
-	// clash is reported before we have touched a credential file.
-	lns, src, err := launchd.Listen(launchd.Options{
+	// Acquire the whole set (launchd descriptors or a fresh bind) before
+	// constructing any request handlers or starting any catalog work.
+	lns, src, err := listen(launchd.Options{
 		SocketName: cfg.Launchd.SocketName,
 		Addr:       cfg.Listen,
 		Logger:     log,
@@ -184,6 +183,28 @@ func run(ctx context.Context, getenv func(string) string, stderr io.Writer) erro
 		return err
 	}
 
+	if err := validateListeners(lns, cfg.HasLocalToken(), log); err != nil {
+		_ = launchd.CloseAll(lns)
+		if src == launchd.SourceLaunchd {
+			// launchd retains its descriptors and a queued connection can
+			// reactivate us every second. Close our copies immediately, but
+			// rate-limit failed activations without delaying a SIGTERM.
+			log.Error("refusing socket activation; delaying exit for one minute", slog.Any("reason", err))
+			select {
+			case <-ctx.Done():
+			case <-time.After(time.Minute):
+			}
+		}
+		return err
+	}
+
+	// Only a daemon admitted to serve needs a version probe. The returned
+	// probe (nil for an explicit override) keeps the catalog version current.
+	versionProbe, err := resolveCodexClientVersion(ctx, &cfg, log)
+	if err != nil {
+		_ = launchd.CloseAll(lns)
+		return err
+	}
 	cfg.Idle = idlePolicy(cfg.Idle, src)
 
 	timer := idle.New(cfg.Idle.Timeout, func() {
@@ -215,6 +236,38 @@ func run(ctx context.Context, getenv func(string) string, stderr io.Writer) erro
 	defer timer.Stop()
 
 	return a.srv.ServeAll(ctx, lns...)
+}
+
+// validateListeners gates the whole set before any application or warm work
+// starts. A refusal names every distinct unsafe class and every unsafe
+// listener's address, so one attempt shows everything there is to fix.
+func validateListeners(lns []net.Listener, hasToken bool, log *slog.Logger) error {
+	var classes, addrs []string
+	for _, ln := range lns {
+		addr := ln.Addr()
+		class := localaddr.BoundClass(addr)
+		if class == localaddr.Loopback {
+			continue
+		}
+		if !slices.Contains(classes, class) {
+			classes = append(classes, class)
+		}
+		where := "unknown address"
+		if addr != nil {
+			where = addr.Network() + " " + addr.String()
+		}
+		addrs = append(addrs, class+" "+where)
+	}
+	if len(classes) == 0 {
+		return nil
+	}
+	if !hasToken {
+		return fmt.Errorf("%s listener refused (%s): configure UTRAQUE_LOCAL_TOKEN or bind only to loopback",
+			strings.Join(classes, ", "), strings.Join(addrs, "; "))
+	}
+	log.Warn("listener may be reachable beyond loopback; local token required",
+		slog.String("class", strings.Join(classes, ",")), slog.String("listeners", strings.Join(addrs, "; ")))
+	return nil
 }
 
 // warnDeprecatedEnv logs one WARN line for every deprecated environment
@@ -378,7 +431,27 @@ func newApp(cfg config.Config, log *slog.Logger, activity server.ActivityTracker
 	// cfg.Codex.ClientVersion is the startup version; clientVersion, when set,
 	// re-resolves it before each fetch so a Codex CLI upgrade is picked up
 	// without a restart.
+	//
+	// Every list the catalog commits (a fetch, a 304, or the disk record on a
+	// cold start) republishes the router's aliases. Without this the registry
+	// stays on the compiled-in static seed forever: a retired slug keeps
+	// resolving to a model the backend no longer serves, and a new codename
+	// never resolves at all — while /healthz and the leg's own effort clamping,
+	// which do read the live catalog, show the new one.
+	//
+	// The catalog itself is tagged with the account that fetched it, but the
+	// aliases it publishes stay in place across a `codex login` switch: a name
+	// that only the previous account's list supplied keeps routing until the
+	// new account's list loads (on its first Codex request, picker open or
+	// startup warm), and a request naming it in that window is sent under the
+	// request's own current login, where the upstream rejects a model that
+	// account lacks. That is the accepted tradeoff for a route table with no
+	// per-account state.
+	catState := newCatalogState()
+	reg := router.DefaultRegistry
 	cat := catalog.New(catalog.Options{
+		OnFetch:           catState.fetched,
+		OnModels:          newAliasLoader(reg, log),
 		BaseURL:           cfg.Codex.BaseURL,
 		CacheFile:         cfg.Codex.CacheFile,
 		ClientVersion:     cfg.Codex.ClientVersion,
@@ -391,7 +464,6 @@ func newApp(cfg config.Config, log *slog.Logger, activity server.ActivityTracker
 	// LoadCatalog consults whatever overrides the registry already holds. This
 	// is the escape hatch for a slug the alias grammar cannot parse, so a
 	// newly-shipped irregular model is routable without a new build.
-	reg := router.DefaultRegistry
 	for _, ov := range cfg.Routing.AliasOverrides {
 		reg.SetOverride(ov.Slug, ov.Codename, ov.Version, ov.Modifier)
 		log.Info("registered a routing alias override",
@@ -399,20 +471,7 @@ func newApp(cfg config.Config, log *slog.Logger, activity server.ActivityTracker
 			slog.String("version", ov.Version), slog.String("modifier", ov.Modifier))
 	}
 
-	// Every successful catalog read republishes the router's aliases. Without
-	// this the registry stays on the compiled-in static seed forever: a retired
-	// slug keeps resolving to a model the backend no longer serves, and a new
-	// codename never resolves at all — while /healthz and the leg's own effort
-	// clamping, which do read the live catalog, show the new one.
-	loadAliases := newAliasLoader(reg, log)
-
 	obsv := newCodexObserver()
-
-	// Why a catalog read succeeded, failed, or was never attempted. The catalog
-	// client itself only remembers what it HOLDS, so "models: 0" read the same
-	// whether the backend served an empty list, the fetch failed, or nothing had
-	// ever asked. That ambiguity was observed live and is what this records.
-	catState := newCatalogState()
 
 	// The Codex inference leg. It is built even without a credential source:
 	// "no `codex login` here" is a state it reports per request, with an
@@ -432,7 +491,6 @@ func newApp(cfg config.Config, log *slog.Logger, activity server.ActivityTracker
 			OnRateLimits: obsv.observeRateLimits,
 		}),
 		Catalog:             cat,
-		OnCatalog:           loadAliases,
 		OnUnknownEvents:     obsv.observeUnknownEvents,
 		Estimator:           tokens.Codex(),
 		UpstreamIdleTimeout: cfg.Limits.UpstreamIdleTimeout,
@@ -446,7 +504,7 @@ func newApp(cfg config.Config, log *slog.Logger, activity server.ActivityTracker
 		return nil, err
 	}
 
-	models, err := newDiscovery(cfg, tr, cat, credSource, loadAliases, catState, log)
+	models, err := newDiscovery(cfg, tr, cat, credSource, catState, log)
 	if err != nil {
 		return nil, err
 	}
@@ -493,7 +551,7 @@ func newApp(cfg config.Config, log *slog.Logger, activity server.ActivityTracker
 
 	return &app{
 		srv:  srv,
-		warm: newCatalogWarmer(cat, credSource, loadAliases, catState, log),
+		warm: newCatalogWarmer(cat, credSource, catState, log),
 		auth: credSource,
 	}, nil
 }
@@ -654,37 +712,35 @@ const catalogWarmTimeout = 30 * time.Second
 // It also detaches from the caller's context for cancellation while keeping its
 // values, so a warm in flight does not hold up shutdown and does not die the
 // instant run's context is replaced.
-func newCatalogWarmer(cat *catalog.Client, credSource *auth.Source, loadAliases func([]cschema.CatalogModel), st *catalogState, log *slog.Logger) func(context.Context) {
+func newCatalogWarmer(cat *catalog.Client, credSource *auth.Source, st *catalogState, log *slog.Logger) func(context.Context) {
 	return func(ctx context.Context) {
 		if credSource == nil {
-			st.unavailable("no codex credential is configured")
+			st.mark("", catalogUnavailable, catalog.NoCredential())
 			return
 		}
-		if peek := credSource.Peek(); peek.State != auth.StateOK {
-			st.unavailable(fmt.Sprintf("codex credential is %q", peek.State))
+		status := credSource.Peek()
+		if status.State != auth.StateOK {
+			st.mark(status.Scope, catalogUnavailable, catalog.NoCredential())
 			return
 		}
-		st.begin()
+		st.begin(status.Scope)
 		go func() {
 			wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), catalogWarmTimeout)
 			defer cancel()
 
 			cred, err := credSource.Get(wctx)
 			if err != nil {
-				st.fail(err)
-				log.Warn("codex catalog warm skipped: no usable credential",
-					slog.String("err", err.Error()))
+				failure := catalog.CredentialAcquisitionFailed()
+				st.mark(cred.Scope(), catalogFailed, failure)
+				log.Warn("codex catalog warm skipped: no usable credential", slog.String("err", failure.Error()))
 				return
 			}
 			models, err := cat.Models(wctx, cred)
 			if err != nil {
-				st.fail(err)
 				log.Warn("codex catalog warm failed; the catalog will be fetched on first use",
 					slog.String("err", err.Error()))
 				return
 			}
-			loadAliases(models)
-			st.succeed(len(models))
 			log.Info("codex catalog warmed at startup", slog.Int("models", len(models)))
 		}()
 	}
@@ -698,44 +754,34 @@ func newCatalogWarmer(cat *catalog.Client, credSource *auth.Source, loadAliases 
 // auth.Source.Get can trigger a refresh and an auth.json write-back shared with
 // the Codex CLI. A live token serves real rows; anything else serves none,
 // which the handler already degrades to gracefully.
-func newDiscovery(cfg config.Config, tr transport.Transport, cat *catalog.Client, credSource *auth.Source, loadAliases func([]cschema.CatalogModel), catState *catalogState, log *slog.Logger) (http.Handler, error) {
+func newDiscovery(cfg config.Config, tr transport.Transport, cat *catalog.Client, credSource *auth.Source, catState *catalogState, log *slog.Logger) (http.Handler, error) {
 	anthCat, err := anthropic.NewCatalog(cfg.Anthropic.BaseURL, tr, anthropic.WithCatalogLogger(log))
 	if err != nil {
 		return nil, err
 	}
 
+	// The rows come from cat.Models, whose commit already republished the
+	// router's aliases, and discovery derives the names it advertises FROM the
+	// registry — so a picker never offers yesterday's codenames.
 	codexCat := discovery.CodexCatalogFunc(func(ctx context.Context) ([]cschema.CatalogModel, error) {
 		if credSource == nil {
-			err := errors.New("no codex credential is configured")
-			catState.unavailable(err.Error())
-			return nil, err
+			failure := catalog.NoCredential()
+			catState.mark("", catalogUnavailable, failure)
+			return nil, failure
 		}
-		if st := credSource.Peek(); st.State != auth.StateOK {
-			err := fmt.Errorf("codex credential is %q; not refreshing it just to open the model picker", st.State)
-			catState.unavailable(err.Error())
-			return nil, err
+		status := credSource.Peek()
+		if status.State != auth.StateOK {
+			failure := catalog.NoCredential()
+			catState.mark(status.Scope, catalogUnavailable, failure)
+			return nil, failure
 		}
 		cred, err := credSource.Get(ctx)
 		if err != nil {
-			catState.fail(err)
-			return nil, err
+			failure := catalog.CredentialAcquisitionFailed()
+			catState.mark(cred.Scope(), catalogFailed, failure)
+			return nil, failure
 		}
-		models, err := cat.Models(ctx, cred)
-		if err != nil {
-			// A picker open is the other place a catalog read happens, so it is
-			// the other place a failure can be OBSERVED. Recording it here means
-			// /healthz explains a stubbornly empty catalog even on a daemon whose
-			// startup warm was never run.
-			catState.fail(err)
-			return nil, err
-		}
-		catState.succeed(len(models))
-		// A picker open is the other place a live catalog is already in hand, so
-		// it republishes the router's aliases too. Discovery derives the names it
-		// advertises FROM the registry, so loading first is what stops a picker
-		// offering yesterday's codenames.
-		loadAliases(models)
-		return models, nil
+		return cat.Models(ctx, cred)
 	})
 
 	return discovery.New(discovery.Options{
@@ -750,12 +796,13 @@ func newDiscovery(cfg config.Config, tr transport.Transport, cat *catalog.Client
 // newAliasLoader returns the hook that republishes the router's alias tiers from
 // a live Codex model list.
 //
-// It is deliberately driven by reads that already happen — the leg's per-request
-// effort-clamping lookup and a picker open — rather than by a timer: no extra
-// upstream request, no extra goroutine, and no work at all until something
-// actually needs the catalog. An unchanged list is a no-op, so the common case
-// costs one fingerprint comparison rather than rebuilding three maps under the
-// registry's write lock while every Resolve waits.
+// It is deliberately driven by the catalog's own commits, which only reads that
+// already happen cause — the leg's per-request effort-clamping lookup, a picker
+// open, the startup warm — rather than by a timer: no extra upstream request,
+// no extra goroutine, and no work at all until something actually needs the
+// catalog. An unchanged list is a no-op, so a 304 costs one fingerprint
+// comparison rather than rebuilding three maps under the registry's write lock
+// while every Resolve waits.
 func newAliasLoader(reg *router.Registry, log *slog.Logger) func([]cschema.CatalogModel) {
 	var (
 		mu   sync.Mutex
@@ -795,15 +842,13 @@ func catalogFingerprint(models []cschema.CatalogModel) string {
 	return strings.Join(parts, ",")
 }
 
-// codexObserver holds the non-secret operational state /healthz reports about
-// the Codex leg: the quota windows the backend last named, and the running
-// count of stream event types the translator did not recognise.
-//
-// Both are hooks off paths that already run, so observing costs nothing when
-// nothing is happening. No token, account id or request body is ever held here.
+// codexObserver holds parsed quota numbers and bounded drift counters from
+// paths that already run. Event names are a protocol-identifier exception:
+// the grammar and label budget limit what is retained, not its secrecy.
 type codexObserver struct {
 	mu       sync.Mutex
 	rl       responses.RateLimits
+	scope    string // account scope of the credential whose answer carried rl
 	seenRL   bool
 	unknown  map[string]int
 	streams  int64
@@ -815,12 +860,19 @@ func newCodexObserver() *codexObserver {
 	return &codexObserver{unknown: map[string]int{}, nowFn: time.Now}
 }
 
-// observeRateLimits records the quota headers of an upstream answer. It is
-// called from the responses client on every response, success or failure.
-func (o *codexObserver) observeRateLimits(rl responses.RateLimits) {
+// observeRateLimits records the quota headers of an upstream answer, tagged
+// with the account scope of the credential that signed the request. It is
+// called from the responses client on every response, success or failure. The
+// latest sample wins, whichever account it is for.
+func (o *codexObserver) observeRateLimits(scope string, rl responses.RateLimits) {
+	if !rl.Primary.Reported() && !rl.Secondary.Reported() && !rl.HasRetryAfter {
+		return // no valid sample; keep the last observation and its age
+	}
+	// Health holds only the parsed numbers, not the verbatim forwarding fields.
+	rl.Headers, rl.RetryAfterRaw = nil, ""
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	o.rl, o.seenRL, o.observed = rl, true, o.nowFn()
+	o.rl, o.scope, o.seenRL, o.observed = rl, scope, true, o.nowFn()
 }
 
 // observeUnknownEvents accumulates the per-type counts of unrecognised Codex
@@ -833,17 +885,16 @@ func (o *codexObserver) observeUnknownEvents(counts map[string]int) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	o.streams++
-	for typ, n := range counts {
-		o.unknown[typ] += n
-	}
+	stream.MergeUnknownEvents(o.unknown, counts)
 }
 
 // quota renders the last-seen usage windows, or nil when the backend has not
-// reported any yet.
-func (o *codexObserver) quota() map[string]any {
+// reported any yet or the last sample was for an account other than current
+// (see accountShown).
+func (o *codexObserver) quota(current string) map[string]any {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	if !o.seenRL {
+	if !o.seenRL || !accountShown(o.scope, current) {
 		return nil
 	}
 	out := map[string]any{"age_s": roundSeconds(o.nowFn().Sub(o.observed).Seconds())}
@@ -863,13 +914,22 @@ func (o *codexObserver) quota() map[string]any {
 // on /healthz. An absent block is easy to read as "quota is fine"; an explicit
 // reported:false says the backend has not told us anything yet, which is a
 // different and much less reassuring statement.
-func (o *codexObserver) quotaHealth() map[string]any {
-	q := o.quota()
+func (o *codexObserver) quotaHealth(current string) map[string]any {
+	q := o.quota(current)
 	if q == nil {
 		return map[string]any{"reported": false}
 	}
 	q["reported"] = true
 	return q
+}
+
+// accountShown reports whether /healthz shows state recorded under the account
+// scope recorded, given current, the scope of the account auth.json names now.
+// Another account's state is not this account's, so it reads as not reported.
+// When the current account is unknown (no credential file, or one that cannot
+// be read mid-rewrite), nothing contradicts the record, so it is shown.
+func accountShown(recorded, current string) bool {
+	return current == "" || recorded == current
 }
 
 func windowFields(w responses.Window) map[string]any {
@@ -933,66 +993,77 @@ const (
 // catalogState records WHY the catalog looks the way it does. The catalog
 // client itself only knows what it HOLDS; this knows what happened when
 // something last tried to fill it.
+//
+// Each record carries the account scope it was made under ("" when no account
+// was known), and the latest record wins whichever account it is for.
 type catalogState struct {
 	mu      sync.Mutex
+	scope   string
 	state   catalogStateValue
-	err     string
+	failure *catalog.Failure
 	at      time.Time
 	nowFn   func() time.Time
-	attempt bool
 }
 
 func newCatalogState() *catalogState {
 	return &catalogState{state: catalogCold, nowFn: time.Now}
 }
 
-func (s *catalogState) mark(state catalogStateValue, err string) {
+func (s *catalogState) mark(scope string, state catalogStateValue, failure *catalog.Failure) {
 	if s == nil {
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.state, s.err, s.at, s.attempt = state, err, s.nowFn(), true
+	s.scope, s.state, s.failure, s.at = scope, state, failure, s.nowFn()
 }
 
-func (s *catalogState) begin() { s.mark(catalogWarming, "") }
-
-func (s *catalogState) succeed(models int) {
-	if models == 0 {
-		s.mark(catalogEmpty, "")
-		return
+func (s *catalogState) begin(scope string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.state == catalogCold {
+		s.scope, s.state = scope, catalogWarming
 	}
-	s.mark(catalogLoaded, "")
 }
 
-func (s *catalogState) fail(err error) {
-	if err == nil {
-		return
+// fetched records an actual attempt, never a caller's stale-while-revalidate
+// cache hit. A stale result must not erase the background attempt's failure.
+func (s *catalogState) fetched(scope string, models int, failure *catalog.Failure) {
+	switch {
+	case failure != nil:
+		s.mark(scope, catalogFailed, failure)
+	case models == 0:
+		s.mark(scope, catalogEmpty, nil)
+	default:
+		s.mark(scope, catalogLoaded, nil)
 	}
-	s.mark(catalogFailed, err.Error())
 }
 
-func (s *catalogState) unavailable(reason string) { s.mark(catalogUnavailable, reason) }
-
-// read returns the recorded state, the last error message, and how long ago the
-// last attempt was (negative when there has been none).
-func (s *catalogState) read() (state catalogStateValue, err string, age time.Duration) {
+// read reports the last attempt's age, or a negative duration before any
+// attempt. A record made under an account other than current reads as no
+// attempt at all (see accountShown).
+func (s *catalogState) read(current string) (state catalogStateValue, failure *catalog.Failure, age time.Duration) {
 	if s == nil {
-		return catalogCold, "", -1
+		return catalogCold, nil, -1
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !s.attempt {
-		return s.state, s.err, -1
+	if !accountShown(s.scope, current) {
+		return catalogCold, nil, -1
 	}
-	return s.state, s.err, s.nowFn().Sub(s.at)
+	if s.at.IsZero() {
+		return s.state, nil, -1
+	}
+	return s.state, s.failure, s.nowFn().Sub(s.at)
 }
 
 // healthReporter contributes the codex auth, catalog, quota, drift, transport
 // and tracing fields to /healthz, plus whether the DeepSeek leg exists. It
-// reads only cached/local state — a token-expiry decode from a file stat and
-// the catalog's held snapshot — so a health poll never contacts the network
-// and never reveals a token value.
+// reads only local state, never contacts the network, and projects credential
+// state rather than credential values. A health poll changes no operational
+// state (credentials, invalidation, catalog, quota, routes); it may update the
+// auth file's mode diagnostic and log its one-time warning. Catalog failures
+// carry a class and numeric status, not upstream messages or request URLs.
 type healthReporter struct {
 	auth     *auth.Source    // nil when no credential file is configured
 	cat      *catalog.Client // always set
@@ -1020,8 +1091,13 @@ func (h *healthReporter) extra(context.Context) map[string]any {
 	// do next; "reason" says WHY a stale credential is stale and is omitted
 	// when there is nothing to say.
 	codex := map[string]any{"state": string(auth.StateMissing)}
+	// current is the account auth.json names now ("" when unknown). Catalog
+	// and quota state recorded under another account is not shown as this
+	// one's (see accountShown).
+	var current string
 	if h.auth != nil {
 		st := h.auth.Peek()
+		current = st.Scope
 		codex["state"] = string(st.State)
 		if st.Reason != "" {
 			codex["reason"] = st.Reason
@@ -1031,18 +1107,24 @@ func (h *healthReporter) extra(context.Context) map[string]any {
 			// token value itself is never included.
 			codex["expires_in_s"] = int64(st.ExpiresIn / time.Second)
 		}
+		if st.FileMode != 0 {
+			codex["file_mode"] = fmt.Sprintf("%04o", st.FileMode.Perm())
+		}
+		if warning := st.ModeWarning(); warning != "" {
+			codex["mode_warning"] = warning
+		}
 	}
 
 	out := map[string]any{
 		"codex_auth":    codex,
-		"codex_catalog": h.catalogHealth(),
+		"codex_catalog": h.catalogHealth(current),
 	}
 	if h.obs != nil {
 		out["codex_stream"] = h.obs.unknownEvents()
 		// Always present, carrying reported:false until the backend has said
 		// anything. An ABSENT quota block reads as "no quota problem", and the
 		// whole point of reporting burn-down is to see it before it is one.
-		out["codex_quota"] = h.obs.quotaHealth()
+		out["codex_quota"] = h.obs.quotaHealth(current)
 	}
 	// Which TLS stack is in force, per leg. Under the auto transport the Codex
 	// one can change mid-process, so both are read live rather than captured at
@@ -1086,8 +1168,9 @@ func (h *healthReporter) extra(context.Context) map[string]any {
 // recorded state is the whole answer: "empty" (the backend really listed
 // nothing), "failed" (with last_error), "unavailable" (no credential to try
 // with), "warming" (the startup fetch is in flight), or "cold" (nothing has
-// tried yet).
-func (h *healthReporter) catalogHealth() map[string]any {
+// tried yet). A snapshot or record from an account other than current, the
+// account auth.json names now, counts as neither (see accountShown).
+func (h *healthReporter) catalogHealth(current string) map[string]any {
 	info := map[string]any{"models": 0, "loaded": false}
 
 	var (
@@ -1096,7 +1179,7 @@ func (h *healthReporter) catalogHealth() map[string]any {
 		loaded bool
 	)
 	if h.cat != nil {
-		n, age, loaded = h.cat.Snapshot()
+		n, age, loaded = h.cat.Snapshot(current)
 		info["models"] = n
 		info["loaded"] = loaded
 		if loaded {
@@ -1104,7 +1187,7 @@ func (h *healthReporter) catalogHealth() map[string]any {
 		}
 	}
 
-	state, lastErr, sinceAttempt := h.catState.read()
+	state, lastErr, sinceAttempt := h.catState.read(current)
 	switch {
 	case loaded && n > 0:
 		state = catalogLoaded
@@ -1120,8 +1203,12 @@ func (h *healthReporter) catalogHealth() map[string]any {
 			info["client_version"] = v
 		}
 	}
-	if lastErr != "" {
-		info["last_error"] = lastErr
+	if lastErr != nil {
+		info["last_error"] = lastErr.Message()
+		info["last_error_code"] = lastErr.Code()
+		if status := lastErr.Status(); status != 0 {
+			info["last_error_status"] = status
+		}
 	}
 	if sinceAttempt >= 0 {
 		info["last_attempt_age_s"] = roundSeconds(sinceAttempt.Seconds())

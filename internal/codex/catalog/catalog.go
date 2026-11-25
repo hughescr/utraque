@@ -1,8 +1,8 @@
 // Package catalog fetches and caches the Codex model catalog
 // (GET {base}/models), the list utraque's router derives its short model
-// aliases from. Publishing that list into the router is the caller's call:
-// registry.go adapts a model list into router aliases (PopulateRegistry), and
-// cmd decides when each Models result is published.
+// aliases from. Each committed list is handed to Options.OnModels, which cmd
+// uses to republish the router's aliases (registry.go adapts a model list into
+// router aliases: PopulateRegistry).
 //
 // The catalog is cheap to hold and expensive to fetch, so this client layers
 // three staleness controls over one in-memory snapshot:
@@ -15,6 +15,13 @@
 //   - ETag: every fetch sends If-None-Match, so an unchanged catalog comes back
 //     304 and the held models are reused (only fetched_at advances).
 //
+// The backend lists models per account, so the snapshot is tagged with the
+// account scope (auth.Credential.Scope) of the credential that fetched it, and
+// serves only callers presenting that same scope. A caller for any other
+// account misses: it fetches with its own credential, offers no ETag (another
+// account's validator must not revalidate another account's list), and on
+// failure gets the error a cold client would, never the held rows.
+//
 // The snapshot is keyed by client_version as well as by time. The backend
 // gates which models it lists on the client_version query parameter, so a
 // catalog, and the ETag that validates it, describe the list for ONE client
@@ -26,9 +33,10 @@
 // upgrade while utraque runs reaches the next revalidation.
 //
 // An optional on-disk cache lets a cold start serve the last-known catalog
-// before the first successful fetch. Its file shape is interoperable with the
-// Codex CLI's own models_cache.json, but utraque keeps its OWN file and never
-// writes the CLI's.
+// before the first successful fetch. The record carries the account scope and
+// endpoint it was fetched for, and is used only for that same pair. Its file
+// shape is interoperable with the Codex CLI's own models_cache.json, but
+// utraque keeps its OWN file and never writes the CLI's.
 //
 // This package never logs a token or an account id in the clear; the credential
 // it receives is used only to sign the request.
@@ -43,14 +51,12 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"golang.org/x/sync/singleflight"
 
-	"github.com/hughescr/utraque/internal/apierr"
 	"github.com/hughescr/utraque/internal/codex/auth"
 	"github.com/hughescr/utraque/internal/codex/schema"
 	"github.com/hughescr/utraque/internal/codex/wire"
@@ -72,9 +78,8 @@ const (
 	// before we distrust it as a clock artefact and re-fetch.
 	maxClockSkew = 5 * time.Minute
 
-	modelsPath        = "/models"
-	queryClientVer    = "client_version"
-	fetchSingleflight = "models"
+	modelsPath     = "/models"
+	queryClientVer = "client_version"
 )
 
 // Catalog is the read side the router and /healthz depend on: the current model
@@ -127,6 +132,15 @@ type Options struct {
 	Now func() time.Time
 	// Logger receives redacted operational logs. Defaults to slog.Default.
 	Logger *slog.Logger
+	// OnFetch observes actual fetch completions (including background refresh),
+	// once per singleflight, never on a cache hit, with the account scope of
+	// the credential that made the fetch. A nil failure means success. It is
+	// not called for a background revalidation whose result was discarded.
+	OnFetch func(scope string, models int, failure *Failure)
+	// OnModels receives every list the client commits — a fetch, a 304, or the
+	// disk record loaded on a cold start — in commit order. The rows are shared
+	// with the snapshot and must not be modified.
+	OnModels func([]cschema.CatalogModel)
 }
 
 // ClientVersionFunc reports the Codex client version the next fetch should
@@ -142,31 +156,57 @@ type Client struct {
 	http      *http.Client
 	now       func() time.Time
 	log       *slog.Logger
+	onFetch   func(string, int, *Failure)
+	onModels  func([]cschema.CatalogModel)
 
-	// group collapses concurrent fetches (foreground + background) into one.
+	// group collapses concurrent fetches (foreground + background) for one
+	// account scope into one; the key is the scope, so a caller for one
+	// account never joins, or is handed the result of, another account's fetch.
 	group singleflight.Group
 	// refreshing guards against launching more than one background
 	// revalidation at a time.
 	refreshing atomic.Bool
+	// disk reads the disk record at most once per process, on the first miss,
+	// for that caller's account only. A record for any other account is never
+	// read later, so a second account's first call goes to the network.
+	disk sync.Once
+	// stageHook, when set (tests only), runs as a record starts to be staged,
+	// where a slow filesystem would stall.
+	stageHook func()
 
-	mu sync.RWMutex
-	st state
+	// Lock graph: commitMu → mu, always in that order.
+	//
+	// commitMu serializes commits — a fetch outcome or the disk record — with
+	// OnModels, OnFetch and the cache file's rename, so the published aliases,
+	// the health record and the file follow the snapshot in commit order. mu
+	// guards the request-visible state and is held only for in-memory reads
+	// and writes; a warm hit takes only mu, for reading. No network call and
+	// no file I/O other than that rename runs under either lock: the fetch, the
+	// disk read, and the temp file's write and fsync all happen unlocked. The
+	// callbacks take only their own leaf locks and never call back in here.
+	commitMu sync.Mutex
+	mu       sync.RWMutex
+	st       state
 	// clientVersion is the version in use: the seed from Options, replaced by
 	// each non-empty ClientVersionFunc result. Guarded by mu.
 	clientVersion string
-	diskTried     bool
 }
 
-// state is the in-memory snapshot. clientVersion is the version it was fetched
-// with (or the disk cache recorded): its etag validates the model list for
-// that version only.
+// state is the in-memory snapshot. scope is the account scope of the
+// credential it was fetched with (or the disk record's); clientVersion is the
+// version it was fetched with: its etag validates the model list for that
+// account and version only.
 type state struct {
+	scope         string
 	models        []cschema.CatalogModel
 	etag          string
 	clientVersion string
 	fetchedAt     time.Time
 	loaded        bool
 }
+
+// holds reports whether the snapshot is a list fetched for scope.
+func (s state) holds(scope string) bool { return s.loaded && s.scope == scope }
 
 const defaultHTTPTimeout = 30 * time.Second
 
@@ -183,6 +223,8 @@ func New(opts Options) *Client {
 		http:          opts.HTTPClient,
 		now:           opts.Now,
 		log:           opts.Logger,
+		onFetch:       opts.OnFetch,
+		onModels:      opts.OnModels,
 	}
 	if c.baseURL == "" {
 		c.baseURL = wire.DefaultBaseURL
@@ -204,6 +246,11 @@ func New(opts Options) *Client {
 		cp := *c.http
 		c.http = &cp
 	}
+	rt := c.http.Transport
+	if rt == nil {
+		rt = http.DefaultTransport
+	}
+	c.http.Transport = discardRedirectTarget{rt}
 	c.http.CheckRedirect = func(*http.Request, []*http.Request) error {
 		return http.ErrUseLastResponse
 	}
@@ -224,15 +271,37 @@ func New(opts Options) *Client {
 	return c
 }
 
+// net/http parses Location before calling CheckRedirect and discards the
+// response on a parse error. Drop a redirect's unused target at the transport
+// boundary, so even that case is classified by its actual HTTP status.
+type discardRedirectTarget struct{ http.RoundTripper }
+
+func (t discardRedirectTarget) RoundTrip(r *http.Request) (*http.Response, error) {
+	resp, err := t.RoundTripper.RoundTrip(r)
+	if resp != nil && resp.StatusCode >= 300 && resp.StatusCode < 400 {
+		resp.Header.Del("Location")
+	}
+	return resp, err
+}
+
 // Models implements Catalog.
 func (c *Client) Models(ctx context.Context, cred auth.Credential) ([]cschema.CatalogModel, error) {
-	c.ensureDiskLoaded()
-
+	scope := cred.Scope()
 	c.mu.RLock()
 	st := c.st
 	c.mu.RUnlock()
 
-	if st.loaded {
+	if !st.holds(scope) {
+		// A miss: nothing held, or another account's list. The first miss of
+		// the process consults the disk record, for this caller's account only;
+		// later misses, for any account, go straight to the network.
+		c.disk.Do(func() { c.loadDisk(scope) })
+		c.mu.RLock()
+		st = c.st
+		c.mu.RUnlock()
+	}
+
+	if st.holds(scope) {
 		if c.now().Sub(st.fetchedAt) < c.ttl {
 			return cloneModels(st.models), nil // fresh
 		}
@@ -243,8 +312,9 @@ func (c *Client) Models(ctx context.Context, cred auth.Credential) ([]cschema.Ca
 		return cloneModels(st.models), nil
 	}
 
-	// Cold: nothing to serve, so fetch synchronously.
-	ns, err := c.fetchShared(ctx, cred)
+	// Cold, or held for another account: nothing this caller may be served,
+	// so fetch synchronously with its own credential.
+	ns, err := c.fetchShared(ctx, cred, false)
 	if err != nil {
 		return nil, err
 	}
@@ -253,7 +323,6 @@ func (c *Client) Models(ctx context.Context, cred auth.Credential) ([]cschema.Ca
 
 // Age implements Catalog.
 func (c *Client) Age() time.Duration {
-	c.ensureDiskLoaded()
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	if !c.st.loaded {
@@ -262,16 +331,17 @@ func (c *Client) Age() time.Duration {
 	return c.now().Sub(c.st.fetchedAt)
 }
 
-// Snapshot reports the currently held catalog without any network fetch or
-// revalidation: how many models are held and how old the held snapshot is.
-// loaded is false when nothing has been obtained yet (neither from the disk
-// cache nor a fetch). It is what /healthz reads so a health poll never touches
-// the network — at most it triggers the one-time disk-cache load Age also does.
-func (c *Client) Snapshot() (models int, age time.Duration, loaded bool) {
-	c.ensureDiskLoaded()
+// Snapshot reports the currently held catalog without any network fetch, disk
+// read or revalidation: how many models are held and how old the held snapshot
+// is. scope is the account the caller considers current; a snapshot fetched
+// for any other account reads as not loaded, and "" (current account unknown)
+// accepts whatever is held. loaded is false when nothing has been obtained yet.
+// It is what /healthz reads, so a health poll never touches the network or the
+// disk and changes nothing.
+func (c *Client) Snapshot(scope string) (models int, age time.Duration, loaded bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	if !c.st.loaded {
+	if !c.st.loaded || scope != "" && c.st.scope != scope {
 		return 0, 0, false
 	}
 	return len(c.st.models), c.now().Sub(c.st.fetchedAt), true
@@ -312,8 +382,9 @@ func versionsDiffer(held, current string) bool {
 }
 
 // revalidateAsync launches at most one background fetch. Its result is stored
-// on success and simply logged (never fatal) on failure — the caller already
-// has a stale-but-usable snapshot.
+// on success, unless the held snapshot has meanwhile become another account's;
+// failures are observed and logged (never fatal) — the caller already has a
+// stale-but-usable snapshot.
 func (c *Client) revalidateAsync(cred auth.Credential) {
 	if !c.refreshing.CompareAndSwap(false, true) {
 		return // one already in flight
@@ -322,18 +393,34 @@ func (c *Client) revalidateAsync(cred auth.Credential) {
 		defer c.refreshing.Store(false)
 		ctx, cancel := context.WithTimeout(context.Background(), backgroundRefreshTimeout)
 		defer cancel()
-		if _, err := c.fetchShared(ctx, cred); err != nil {
+		if _, err := c.fetchShared(ctx, cred, true); err != nil {
 			c.log.Warn("codex catalog background revalidation failed",
 				slog.String("err", err.Error()))
 		}
 	}()
 }
 
-// fetchShared runs fetch under singleflight so a foreground cold fetch and a
-// background revalidation collapse to one HTTP round-trip.
-func (c *Client) fetchShared(ctx context.Context, cred auth.Credential) (state, error) {
-	v, err, _ := c.group.Do(fetchSingleflight, func() (any, error) {
-		return c.fetch(ctx, cred)
+// fetchShared runs fetch under singleflight, keyed by the credential's account
+// scope, so a foreground cold fetch and a background revalidation for the same
+// account collapse to one HTTP round-trip. background is the initiating
+// caller's kind; it decides the commit rule (see commit).
+func (c *Client) fetchShared(ctx context.Context, cred auth.Credential, background bool) (state, error) {
+	scope := cred.Scope()
+	v, err, _ := c.group.Do(scope, func() (any, error) {
+		ns, failure := c.fetch(ctx, cred, scope)
+		// Write and fsync the record before taking commitMu, so a slow or hung
+		// filesystem delays only this fetch, never another account's commit.
+		var staged string
+		if failure == nil {
+			staged = c.stageDisk(ns)
+		}
+		if !c.commit(scope, ns, failure, staged, background) {
+			_ = os.Remove(staged) // after commitMu is released
+		}
+		if failure != nil {
+			return state{}, failure
+		}
+		return ns, nil
 	})
 	if err != nil {
 		return state{}, err
@@ -341,19 +428,64 @@ func (c *Client) fetchShared(ctx context.Context, cred auth.Credential) (state, 
 	return v.(state), nil
 }
 
-// fetch performs one conditional GET and commits the result. On 304 it reuses
-// the held models; on 200 it replaces them.
-func (c *Client) fetch(ctx context.Context, cred auth.Credential) (state, error) {
+// commit applies one fetch outcome for scope under commitMu, and reports
+// whether staged (if any) is gone, i.e. renamed into place.
+//
+// A foreground fetch always commits: it answers a live request made with that
+// account's credential. So a slow fetch for account A that completes after a
+// newer one for B leaves A's list held; B's next call then misses on scope and
+// fetches B's list again. That costs one extra fetch and corrects itself, and
+// at no point serves A's rows to B. A background revalidation for scope is
+// discarded, unreported, when the held snapshot is no longer scope's: it was
+// only refreshing a list that has since been replaced. The one qualification:
+// a foreground caller that joins a flight STARTED by a background revalidation
+// shares that flight's result, so it inherits the flight's discard rule.
+func (c *Client) commit(scope string, ns state, failure *Failure, staged string, background bool) (installed bool) {
+	c.commitMu.Lock()
+	defer c.commitMu.Unlock()
+	if background && c.st.scope != scope {
+		c.log.Debug("codex catalog revalidation discarded: another account's list is now held")
+		return staged == ""
+	}
+	installed = true
+	if failure == nil {
+		c.install(ns)
+		installed = c.installDisk(staged)
+	}
+	if c.onFetch != nil {
+		c.onFetch(scope, len(ns.models), failure)
+	}
+	return installed
+}
+
+// install publishes ns and makes it the held snapshot. The caller holds
+// commitMu.
+func (c *Client) install(ns state) {
+	if c.onModels != nil {
+		c.onModels(ns.models)
+	}
+	c.mu.Lock()
+	c.st = ns
+	c.mu.Unlock()
+}
+
+// fetch performs one conditional GET for scope's account. On 304 it reuses the
+// held models; on 200 it replaces them.
+func (c *Client) fetch(ctx context.Context, cred auth.Credential, scope string) (state, *Failure) {
 	// Re-resolve first: an upgraded Codex CLI must reach THIS request, not the
 	// one after it.
 	clientVersion := c.resolveClientVersion(ctx)
 
 	c.mu.RLock()
-	prevEtag := c.st.etag
-	prevModels := c.st.models
-	prevVersion := c.st.clientVersion
-	hadPrev := c.st.loaded
+	prev := c.st
 	c.mu.RUnlock()
+	// Another account's snapshot is not this account's previous list: its
+	// validator is never offered and its rows are never reused.
+	hadPrev := prev.holds(scope)
+	prevEtag, prevModels, prevVersion := prev.etag, prev.models, prev.clientVersion
+	if !hadPrev {
+		prevEtag = ""
+	}
 
 	// The held etag validates the list the backend served to prevVersion. The
 	// backend gates models on client_version, so under a new version that
@@ -374,7 +506,7 @@ func (c *Client) fetch(ctx context.Context, cred auth.Credential) (state, error)
 	// handled correctly rather than silently producing a malformed request.
 	reqURL, err := url.Parse(c.baseURL + modelsPath)
 	if err != nil {
-		return state{}, apierr.Wrap(err, apierr.TypeAPI, "codex catalog: parse request URL")
+		return state{}, &Failure{reason: invalidRequest}
 	}
 	q := reqURL.Query()
 	q.Set(queryClientVer, clientVersion)
@@ -382,7 +514,7 @@ func (c *Client) fetch(ctx context.Context, cred auth.Credential) (state, error)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL.String(), nil)
 	if err != nil {
-		return state{}, apierr.Wrap(err, apierr.TypeAPI, "codex catalog: build request")
+		return state{}, &Failure{reason: invalidRequest}
 	}
 	req.Header.Set("Authorization", "Bearer "+cred.AccessToken)
 	req.Header.Set(wire.HeaderAccountID, cred.AccountID)
@@ -395,7 +527,7 @@ func (c *Client) fetch(ctx context.Context, cred auth.Credential) (state, error)
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return state{}, apierr.Wrap(err, apierr.TypeAPI, "codex catalog: request failed")
+		return state{}, classifyIO(err, 0)
 	}
 	defer func() {
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxBody))
@@ -409,21 +541,20 @@ func (c *Client) fetch(ctx context.Context, cred auth.Credential) (state, error)
 			// send If-None-Match with a held etag, and never across a client
 			// version change. Treat it as unusable rather than reuse a list
 			// the request did not validate.
-			return state{}, apierr.API("codex catalog returned 304 to a request that offered no cached catalog to reuse")
+			return state{}, &Failure{unexpectedNotModified, resp.StatusCode}
 		}
-		ns := state{models: prevModels, etag: prevEtag, clientVersion: prevVersion, fetchedAt: c.now(), loaded: true}
-		c.commit(ns)
+		ns := state{scope: scope, models: prevModels, etag: prevEtag, clientVersion: prevVersion, fetchedAt: c.now(), loaded: true}
 		c.log.Debug("codex catalog not modified", slog.Int("models", len(prevModels)))
 		return ns, nil
 
 	case http.StatusOK:
 		body, err := io.ReadAll(io.LimitReader(resp.Body, maxBody))
 		if err != nil {
-			return state{}, apierr.Wrap(err, apierr.TypeAPI, "codex catalog: read body")
+			return state{}, classifyIO(err, resp.StatusCode)
 		}
 		var parsed cschema.ModelsResponse
 		if err := json.Unmarshal(body, &parsed); err != nil {
-			return state{}, apierr.Wrap(err, apierr.TypeAPI, "codex catalog: decode body")
+			return state{}, &Failure{decode, resp.StatusCode}
 		}
 		// Use the response's own ETag, or none. Do NOT fall back to the previous
 		// ETag: this 200 body may differ from what that validator described, and
@@ -431,8 +562,7 @@ func (c *Client) fetch(ctx context.Context, cred auth.Credential) (state, error)
 		// wrongly mark the new body fresh. No ETag simply means the next fetch is
 		// unconditional.
 		etag := resp.Header.Get("ETag")
-		ns := state{models: parsed.Models, etag: etag, clientVersion: clientVersion, fetchedAt: c.now(), loaded: true}
-		c.commit(ns)
+		ns := state{scope: scope, models: parsed.Models, etag: etag, clientVersion: clientVersion, fetchedAt: c.now(), loaded: true}
 		c.log.Info("fetched codex catalog",
 			slog.Int("models", len(parsed.Models)),
 			slog.String("client_version", clientVersion),
@@ -440,58 +570,23 @@ func (c *Client) fetch(ctx context.Context, cred auth.Credential) (state, error)
 		return ns, nil
 
 	case http.StatusUnauthorized:
-		// Signal to the caller that the credential needs refreshing; carry no
-		// token material, only the status.
-		return state{}, apierr.Authentication("codex catalog rejected the credential (HTTP 401); the access token may need refreshing")
-
+		return state{}, &Failure{credentialRejected, resp.StatusCode}
 	case http.StatusBadRequest:
-		// Observed live: a missing/empty client_version query parameter gets
-		// this exact status, with the upstream body naming the field
-		// (`"loc": ("query", "client_version")`). That is the one known cause
-		// of a 400 here, so name it explicitly rather than making a future
-		// recurrence rediscover it by re-diagnosing against the live endpoint.
-		body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxBody))
-		detail := strings.TrimSpace(string(body))
-		if readErr != nil || detail == "" {
-			detail = "(no response body)"
-		}
-		return state{}, apierr.WithStatus(http.StatusBadRequest, apierr.TypeInvalidRequest,
-			"codex catalog request failed (HTTP 400): %s — this endpoint requires a non-empty client_version query parameter; check Options.ClientVersion / UTRAQUE_CODEX_CLIENT_VERSION",
-			detail)
-
+		return state{}, &Failure{badRequest, resp.StatusCode}
 	default:
 		if resp.StatusCode >= 300 && resp.StatusCode < 400 {
-			// Reached here because CheckRedirect refused to follow it. Say so,
-			// rather than letting it read as an ordinary upstream failure.
-			return state{}, apierr.WithStatus(http.StatusBadGateway, apierr.TypeAPI,
-				"codex catalog returned an unexpected redirect (HTTP %d to %q); redirects are never followed",
-				resp.StatusCode, resp.Header.Get("Location"))
+			return state{}, &Failure{redirectRefused, resp.StatusCode}
 		}
-		errType := apierr.TypeForStatus(resp.StatusCode)
-		return state{}, apierr.WithStatus(resp.StatusCode, errType,
-			"codex catalog request failed (HTTP %d)", resp.StatusCode)
+		return state{}, &Failure{upstreamStatus, resp.StatusCode}
 	}
 }
 
-// commit stores the new snapshot and best-effort writes the disk cache.
-func (c *Client) commit(ns state) {
-	c.mu.Lock()
-	c.st = ns
-	c.mu.Unlock()
-	c.writeDisk(ns)
-}
-
-// ensureDiskLoaded loads the on-disk cache once, if present, so a cold start has
-// something to serve. A missing/unreadable/corrupt file is ignored — it just
-// means the first Models call fetches synchronously.
-func (c *Client) ensureDiskLoaded() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.diskTried || c.st.loaded {
-		c.diskTried = true
-		return
-	}
-	c.diskTried = true
+// loadDisk installs the on-disk record as the held snapshot when it was
+// written for scope's account at this endpoint and nothing is held yet, so a
+// cold start has something to serve. The file is read with no lock held. A
+// missing, unreadable, corrupt, unscoped or other-account record is ignored:
+// the caller then fetches, and that fetch's record replaces it.
+func (c *Client) loadDisk(scope string) {
 	if c.cacheFile == "" {
 		return
 	}
@@ -503,6 +598,9 @@ func (c *Client) ensureDiskLoaded() {
 	if err := json.Unmarshal(b, &cache); err != nil {
 		return
 	}
+	if cache.AccountScope == "" || cache.AccountScope != scope || cache.Endpoint != c.baseURL {
+		return // not this account's list at this endpoint
+	}
 	if len(cache.Models) == 0 && cache.FetchedAt.IsZero() {
 		return // nothing useful
 	}
@@ -510,13 +608,13 @@ func (c *Client) ensureDiskLoaded() {
 	// list — the backend gates models on client_version — so ignore it and
 	// re-fetch rather than serve a list a client upgrade may have invalidated.
 	// This compares against the version in use (the seed, before any fetch),
-	// deliberately without calling ClientVersionFunc: this runs under mu and
-	// from /healthz, and neither may start a subprocess. A version change that
+	// deliberately without calling ClientVersionFunc. A version change that
 	// lands after this load is still caught, by fetch dropping the etag.
-	if versionsDiffer(cache.ClientVersion, c.clientVersion) {
+	version := c.ClientVersion()
+	if versionsDiffer(cache.ClientVersion, version) {
 		c.log.Debug("ignoring codex catalog disk cache from a different client version",
 			slog.String("cache_client_version", cache.ClientVersion),
-			slog.String("client_version", c.clientVersion))
+			slog.String("client_version", version))
 		return
 	}
 	// A future-dated fetched_at would read as perpetually fresh (negative age),
@@ -529,28 +627,41 @@ func (c *Client) ensureDiskLoaded() {
 	}
 	heldVersion := cache.ClientVersion
 	if heldVersion == "" {
-		heldVersion = c.clientVersion
+		heldVersion = version
 	}
-	c.st = state{
+	c.commitMu.Lock()
+	defer c.commitMu.Unlock()
+	if c.st.loaded {
+		return // a fetch committed meanwhile; it is newer than the file
+	}
+	c.install(state{
+		scope:         scope,
 		models:        cache.Models,
 		etag:          cache.ETag,
 		clientVersion: heldVersion,
 		fetchedAt:     cache.FetchedAt,
 		loaded:        true,
-	}
+	})
 	c.log.Debug("loaded codex catalog from disk cache",
 		slog.Int("models", len(cache.Models)),
 		slog.Time("fetched_at", cache.FetchedAt))
 }
 
-// writeDisk atomically writes the snapshot to CacheFile, if configured. Failure
-// is logged and swallowed: the disk cache is an optimisation, not a
-// requirement, and a write error must never fail a live request.
-func (c *Client) writeDisk(ns state) {
+// stageDisk writes the snapshot to a synced temp file beside CacheFile, if one
+// is configured, and returns its name ("" when there is nothing to install).
+// It takes no lock. Failure is logged and swallowed: the disk cache is an
+// optimisation, not a requirement, and a write error must never fail a live
+// request.
+func (c *Client) stageDisk(ns state) string {
 	if c.cacheFile == "" {
-		return
+		return ""
+	}
+	if c.stageHook != nil {
+		c.stageHook()
 	}
 	cache := cschema.Cache{
+		AccountScope:  ns.scope,
+		Endpoint:      c.baseURL,
 		ClientVersion: ns.clientVersion,
 		ETag:          ns.etag,
 		FetchedAt:     ns.fetchedAt,
@@ -559,42 +670,53 @@ func (c *Client) writeDisk(ns state) {
 	data, err := json.MarshalIndent(cache, "", "  ")
 	if err != nil {
 		c.log.Warn("codex catalog: encode disk cache", slog.String("err", err.Error()))
-		return
+		return ""
 	}
 	data = append(data, '\n')
 	dir := filepath.Dir(c.cacheFile)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		c.log.Warn("codex catalog: create cache dir", slog.String("err", err.Error()))
-		return
+		return ""
 	}
 	tmp, err := os.CreateTemp(dir, ".models_cache-*.json.tmp")
 	if err != nil {
 		c.log.Warn("codex catalog: create temp cache", slog.String("err", err.Error()))
-		return
+		return ""
 	}
 	tmpName := tmp.Name()
 	if _, err := tmp.Write(data); err != nil {
 		_ = tmp.Close()
 		_ = os.Remove(tmpName)
 		c.log.Warn("codex catalog: write temp cache", slog.String("err", err.Error()))
-		return
+		return ""
 	}
 	if err := tmp.Sync(); err != nil {
 		_ = tmp.Close()
 		_ = os.Remove(tmpName)
 		c.log.Warn("codex catalog: sync temp cache", slog.String("err", err.Error()))
-		return
+		return ""
 	}
 	if err := tmp.Close(); err != nil {
 		_ = os.Remove(tmpName)
 		c.log.Warn("codex catalog: close temp cache", slog.String("err", err.Error()))
-		return
+		return ""
 	}
-	if err := os.Rename(tmpName, c.cacheFile); err != nil {
-		_ = os.Remove(tmpName)
+	return tmpName
+}
+
+// installDisk renames a staged record into place. The caller holds commitMu,
+// so the file always ends as the record of the last committed snapshot. It
+// reports whether the staged file is gone, so the caller knows whether to
+// remove it once commitMu is released.
+func (c *Client) installDisk(staged string) bool {
+	if staged == "" {
+		return true
+	}
+	if err := os.Rename(staged, c.cacheFile); err != nil {
 		c.log.Warn("codex catalog: rename cache into place", slog.String("err", err.Error()))
-		return
+		return false
 	}
+	return true
 }
 
 // cloneModels returns a deep copy of the model slice so a caller can hold,

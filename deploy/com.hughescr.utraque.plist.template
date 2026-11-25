@@ -41,6 +41,8 @@
 	  127.0.0.1 with <key>SockFamily</key><string>IPv4</string> to bind IPv4
 	  only. Do not remove SockNodeName: without it launchd binds every
 	  interface, exposing both of your subscriptions to the local network.
+	  utraque classifies each descriptor it is handed and refuses to start on a
+	  non-loopback one unless UTRAQUE_LOCAL_TOKEN is set.
 	-->
 	<key>Sockets</key>
 	<dict>
@@ -73,7 +75,11 @@
 
 		<!--
 		  The address utraque binds itself when it is NOT socket activated —
-		  running it by hand for debugging. launchd-started runs ignore it.
+		  running it by hand for debugging. A launchd-started run does not bind
+		  it (the Sockets entry above does); it is still validated at startup,
+		  so a malformed value stops the start, and it appears in the startup
+		  log. It plays no part in which Host names are accepted: on a
+		  loopback listener only localhost, 127.0.0.0/8 and ::1 are.
 		-->
 		<key>UTRAQUE_LISTEN</key>
 		<string>@LISTEN@</string>

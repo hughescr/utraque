@@ -3,6 +3,7 @@ package deepseek
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -424,10 +425,25 @@ func present(raw json.RawMessage) bool {
 	return len(raw) > 0 && !bytes.Equal(raw, []byte("null"))
 }
 
+// errUpstreamErrorObject is returned by rewriteMessageResponse for a body whose
+// top-level type is "error": it is not a message to rewrite, and its text must
+// go through the error pipeline instead of being relayed as-is.
+var errUpstreamErrorObject = errors.New("upstream returned an error object")
+
+// isErrorType decodes a JSON "type" value (so an escaped spelling counts) and
+// reports whether it is "error".
+func isErrorType(raw json.RawMessage) bool {
+	var typ string
+	return json.Unmarshal(raw, &typ) == nil && typ == aschema.EventError
+}
+
 func rewriteMessageResponse(raw []byte, canonical string) ([]byte, error) {
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &obj); err != nil || obj == nil {
 		return nil, errorsForResponse(err)
+	}
+	if isErrorType(obj["type"]) {
+		return nil, errUpstreamErrorObject
 	}
 	modelName, err := responseModel(obj["model"], canonical)
 	if err != nil {
@@ -438,7 +454,7 @@ func rewriteMessageResponse(raw []byte, canonical string) ([]byte, error) {
 	return json.Marshal(obj)
 }
 
-func rewriteStreamFrame(frame sse.Frame, canonical string) ([]byte, string, error) {
+func (l *Leg) rewriteStreamFrame(frame sse.Frame, canonical string) ([]byte, string, error) {
 	var envelope struct {
 		Type string `json:"type"`
 	}
@@ -469,7 +485,10 @@ func rewriteStreamFrame(frame sse.Frame, canonical string) ([]byte, string, erro
 		if err := json.Unmarshal(frame.Data, &event); err != nil || event.Error.Type == "" || event.Error.Message == "" {
 			return nil, "", fmt.Errorf("error event has no valid error object")
 		}
-		return frame.Data, eventType, nil
+		e := &apierr.Error{Type: apierr.TypeAPI}
+		l.setPublicDetail(e, event.Error.Type, event.Error.Message)
+		data, err := json.Marshal(e.Envelope())
+		return data, eventType, err
 	case aschema.EventMessageStart:
 		// Continue below to normalize and validate the response identity.
 	default:

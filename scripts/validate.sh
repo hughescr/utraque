@@ -35,6 +35,8 @@ preflight_go() {
 
 preflight_shell() {
 	require_commands bash find mktemp rm shellcheck
+	install_regression="$repo/tests/install-loopback.sh"
+	[ -x "$install_regression" ] || die "required installer regression is missing or not executable: $install_regression"
 }
 
 preflight_hooks() {
@@ -112,6 +114,8 @@ validate_shell() {
 	done
 	printf '%s\n' '==> shellcheck'
 	shellcheck "${shell_files[@]}"
+	printf '%s\n' '==> install loopback regression'
+	"$install_regression"
 	rm -rf "$validation_tmp"
 	trap - EXIT HUP INT TERM
 }

@@ -67,9 +67,24 @@ EOF
 	chmod +x "$file"
 }
 
+# The shell group runs tests/install-loopback.sh and refuses to start without
+# it. The fixture's deploy/install.sh is a stub, so the real regression would
+# have nothing to test; a stub that passes stands in for it.
+write_install_regression_stub() {
+	file=$1
+	mkdir -p "$(dirname -- "$file")"
+	cat >"$file" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'installer regression fixture stub\n'
+EOF
+	chmod +x "$file"
+}
+
 copy_validation_artifacts() {
 	destination=$1
 	mkdir -p "$destination/scripts" "$destination/.githooks"
+	write_install_regression_stub "$destination/tests/install-loopback.sh"
 	if [ -x "$root/scripts/validate.sh" ]; then
 		cp -p "$root/scripts/validate.sh" "$destination/scripts/validate-source.sh"
 		cat >"$destination/scripts/validate.sh" <<'EOF'
@@ -398,6 +413,24 @@ EOF
 	[ "$rc" -ne 0 ] || fail "shell group succeeded without shellcheck"
 	[ ! -e "$marker" ] || fail "shell group began syntax checks before reporting missing shellcheck"
 	grep -q 'shellcheck' "$log" || fail "missing-shellcheck error did not name shellcheck"
+
+	# A missing or non-executable installer regression must stop the shell group
+	# loudly, not be skipped.
+	rm -f "$working/tests/install-loopback.sh"
+	set +e
+	(cd "$working" && "$validator" shell) >"$log" 2>&1
+	rc=$?
+	set -e
+	[ "$rc" -ne 0 ] || fail "shell group succeeded without tests/install-loopback.sh"
+	grep -q 'install-loopback.sh' "$log" || fail "missing-regression error did not name tests/install-loopback.sh"
+	write_install_regression_stub "$working/tests/install-loopback.sh"
+	chmod -x "$working/tests/install-loopback.sh"
+	set +e
+	(cd "$working" && "$validator" shell) >"$log" 2>&1
+	rc=$?
+	set -e
+	[ "$rc" -ne 0 ] || fail "shell group succeeded with a non-executable tests/install-loopback.sh"
+	write_install_regression_stub "$working/tests/install-loopback.sh"
 
 	pass "validator rejects bad arguments and missing dependencies early"
 }

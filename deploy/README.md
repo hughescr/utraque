@@ -78,7 +78,10 @@ deploy/install.sh \
 the port launchd binds. `--node localhost` binds both loopback families.
 `--idle` takes a Go duration, and `0` means never self-exit.
 
-A shared secret is strongly recommended. Without one, **any** local process can
+A shared secret is strongly recommended, and required off loopback (see below).
+Generate it randomly, as above: the startup log shows the first four bytes of its
+unsalted SHA-256, which is fine for a random token and guess-checkable for a weak
+one. Without a secret, **any** local process can
 spend the configured Codex subscription or DeepSeek prepaid balance and read
 whatever local usage history and available provider quota or balance data the
 provider report can collect. Anthropic requests and live Anthropic usage
@@ -125,6 +128,12 @@ When given a command name, the installer resolves it through the current
 shell's `PATH` and stores the absolute path in `UTRAQUE_CCUSAGE_RUNNER` or
 `UTRAQUE_CODEX_EXECUTABLE`. The application defaults remain `bunx` and `codex`
 when these options are omitted.
+
+`codex --version` runs with an allow-listed environment (the list is in the
+README's *Configuration*), not the plist's whole environment, so utraque's
+secrets never reach it. A Codex that needs another variable to start fails the
+probe, although it works in your shell: record the real binary with
+`--codex-executable`, or set `UTRAQUE_CODEX_CLIENT_VERSION` as described below.
 
 A Codex CLI upgrade changes the automatically discovered catalog client version
 without restarting utraque: before each catalog fetch it stats the recorded
@@ -191,10 +200,11 @@ deploy/install.sh \
 ```
 
 This writes `PATH` into the plist only when `--path` is supplied. Reporting is
-restricted to loopback. `--local-token-file` remains recommended; when it is
-configured, report clients send the same `X-Utraque-Token` as every other
-non-health request. Without a configured local token, loopback report requests
-need no local-auth header.
+restricted to loopback callers, judged by the direct peer address (so a
+same-host reverse proxy makes every caller look like loopback). `--local-token-file`
+remains recommended; when it is configured, report clients send the same
+`X-Utraque-Token` as every other non-health request. Without a configured local
+token, loopback report requests need no local-auth header.
 
 `--node localhost` makes launchd bind both `127.0.0.1` and `[::1]`, so it does
 not matter which one the client resolves to; utraque serves every descriptor
@@ -203,15 +213,33 @@ launchd hands over. Use `--node 127.0.0.1` for IPv4 only. Anything off loopback
 caller with the shared secret can spend the configured Codex subscription or
 DeepSeek balance; Anthropic still requires that caller's own bearer credential.
 The provider-report endpoint continues to reject non-loopback callers.
-`install.sh` refuses a non-loopback address unless you also supply a shared
-secret, and warns even then. An IPv6 literal is accepted in bare form and
-bracketed for you where it has to be.
+
+A token over plain HTTP on a LAN protects against unauthenticated spending, not
+against someone who can read the traffic: they can read the token and the
+caller's Anthropic bearer credential off the wire.
+
+The rule is enforced twice. At startup the binary classifies every listener it is
+given by its bound address, and a wildcard, non-loopback or unclassifiable one
+without `UTRAQUE_LOCAL_TOKEN` stops startup with a message naming the variable;
+with a token it serves and logs one warning. Under launchd a refused start waits
+up to a minute before exiting, so a queued connection cannot respawn it in a
+tight loop. `install.sh` applies the same rule earlier and more kindly, and
+strictly: only `localhost` (any case), `::1` (or its expanded form), or a dotted
+quad in `127.0.0.0/8` with no leading zeros count as loopback; any other `--node`
+value needs a shared secret and warns even then. An IPv6 literal is accepted in
+bare form and bracketed for you where it has to be.
+
+On a loopback listener the browser guard also checks the `Host` header and
+accepts only `localhost`, an address in `127.0.0.0/8` and `::1`. A client that
+reaches utraque by any other name, even one that resolves to loopback, is
+refused: point it at `http://127.0.0.1:PORT` or `http://localhost:PORT`. The
+installer's printed base-URL hint says so when `--node` is a DNS name.
 
 ## Verify
 
 ```sh
 launchctl print gui/$(id -u)/com.hughescr.utraque   # launchd's view of the job
-curl -s http://localhost:8317/healthz | jq          # this request is what starts it
+curl -fsS http://localhost:8317/healthz | jq        # this request is what starts it
 tail -f ~/Library/Logs/utraque/utraque.log
 ```
 
@@ -219,6 +247,13 @@ The first `curl` is the interesting one: before it, `launchctl print` shows a jo
 with no PID, and the port still answers because launchd is holding it. After it,
 the job has a PID and the log shows `inherited the listening socket from
 launchd`.
+
+With a local token (as in the install commands above), that request returns only
+`status`, `version` and `uptime_s`; send the token for the full document:
+
+```sh
+curl -fsS -H "X-Utraque-Token: $(< ~/.utraque-token)" http://localhost:8317/healthz | jq
+```
 
 To watch the whole cycle, install with `--idle 30s`, make one request, wait, and
 watch the process disappear from `launchctl print` while `curl` keeps working.
@@ -286,4 +321,6 @@ default would stall the first request after an idle exit behind the throttle.
 | Port answers, nothing ever starts | `Sockets` key name and `UTRAQUE_LAUNCHD_SOCKET` disagree |
 | `launchd: this process holds no socket by that name` in the log | Same disagreement, seen from utraque's side; it fell back to its own bind |
 | Job respawns constantly | utraque is exiting at startup — read the log; `launchctl print` shows the last exit status |
+| Log says `refusing socket activation; delaying exit for one minute` with `listener refused: configure UTRAQUE_LOCAL_TOKEN or bind only to loopback` | The `Sockets` entry binds a non-loopback address and no token is set (`install.sh` normally refuses this; a hand-edited plist can bypass it). Set `UTRAQUE_LOCAL_TOKEN`, or bind loopback |
+| `403 permission_error` with `requests with Origin…` or `unrecognised Host…` | The browser guard. A browser sent the request, or the client used a `Host` other than `localhost`, a `127.0.0.0/8` address or `::1`; use `http://127.0.0.1:PORT` or `http://localhost:PORT` as the base URL |
 | Requests fail after a code change | launchd runs the path recorded in the plist; rebuild in place or re-run `install.sh` |

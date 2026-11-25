@@ -31,10 +31,8 @@
 //     writes nothing further, and joins the reader goroutine, so nothing leaks
 //     and no terminus is invented.
 //
-// The single retry the design sanctions (upstream 401 -> auth.Invalidate ->
-// refresh -> retry exactly once) is delegated to
-// responses.Client.StreamWithRefresh, which is the only layer that can tell a
-// 401 from any other failure.
+// responses.Client.StreamPinned permits one retry after a refreshable 401,
+// only when the refreshed token is different and belongs to the same account.
 package leg
 
 import (
@@ -94,14 +92,6 @@ type Options struct {
 	// CatalogTimeout bounds the lookup. Zero uses DefaultCatalogTimeout.
 	CatalogTimeout time.Duration
 
-	// OnCatalog, when set, receives every model list the leg successfully reads
-	// from the catalog. It is how the router's alias registry is kept in step
-	// with what Codex actually serves, without this package taking a dependency
-	// on the registry. It runs inline on the request path, so it must be cheap
-	// and must not block; the caller is expected to no-op on an unchanged list.
-	// The slice is the leg's own copy and is not retained.
-	OnCatalog func([]cschema.CatalogModel)
-
 	// OnUnknownEvents, when set, receives the per-type counts of Codex stream
 	// events the Translator did not recognise, once per completed stream. It is
 	// the early warning for upstream protocol drift, surfaced on /healthz. It
@@ -147,7 +137,6 @@ type Leg struct {
 	creds          auth.CredentialSource
 	cat            Catalog
 	catalogTimeout time.Duration
-	onCatalog      func([]cschema.CatalogModel)
 	onUnknown      func(map[string]int)
 	est            tokens.RequestEstimator
 	emitReasoning  stream.ReasoningMode
@@ -176,7 +165,6 @@ func New(opts Options) (*Leg, error) {
 		creds:          opts.Credentials,
 		cat:            opts.Catalog,
 		catalogTimeout: opts.CatalogTimeout,
-		onCatalog:      opts.OnCatalog,
 		onUnknown:      opts.OnUnknownEvents,
 		est:            opts.Estimator,
 		emitReasoning:  opts.EmitReasoning,
@@ -248,14 +236,15 @@ func (l *Leg) Messages(w http.ResponseWriter, r *http.Request, rq *router.Reques
 	trace := obs.TraceFrom(ctx)
 	trace.SetBody(rq.Raw)
 
-	// StreamWithRefresh owns the one sanctioned retry: on an upstream 401 it
-	// invalidates the credential, refreshes, and retries exactly once.
-	upstream, err := l.client.StreamWithRefresh(ctx, l.creds, creq)
+	// The same credential signs the first POST. Only a new token for the
+	// same account may authorize a second attempt after a 401.
+	resp, err := l.client.StreamPinned(ctx, cred, l.creds, creq)
 	if err != nil {
 		// Nothing has been written yet, so this is failure mode 1: a real HTTP
 		// status, the Anthropic envelope, and the upstream's own quota headers.
 		return l.renderUpstreamFailure(ctx, w, log, err)
 	}
+	upstream := resp.Body
 	defer func() { _ = upstream.Close() }()
 
 	// Tee the raw upstream stream to <id>.upstream.sse when tracing. A trace of
@@ -264,9 +253,9 @@ func (l *Leg) Messages(w http.ResponseWriter, r *http.Request, rq *router.Reques
 	upstream = trace.TeeUpstream(upstream)
 
 	if rq.Stream {
-		return l.serveStream(ctx, w, rq, upstream, seed, meta.Effort, log)
+		return l.serveStream(ctx, w, rq, upstream, seed, meta.Effort, log, resp.PublicDetail)
 	}
-	return l.serveAggregate(ctx, w, rq, upstream, seed, meta.Effort, log)
+	return l.serveAggregate(ctx, w, rq, upstream, seed, meta.Effort, log, resp.PublicDetail)
 }
 
 // translateError renders a translation failure as a 400. A malformed tool
@@ -338,7 +327,7 @@ func (l *Leg) CountTokens(w http.ResponseWriter, r *http.Request, rq *router.Req
 // sink frame. That is what keeps failure mode 1 available for a 200 whose body
 // turns out to be empty — a status line already on the wire could not be taken
 // back, and an error envelope appended to it would corrupt the stream.
-func (l *Leg) serveStream(ctx context.Context, w http.ResponseWriter, rq *router.Request, upstream io.ReadCloser, seed *seed, eff request.EffortResult, log *slog.Logger) error {
+func (l *Leg) serveStream(ctx context.Context, w http.ResponseWriter, rq *router.Request, upstream io.ReadCloser, seed *seed, eff request.EffortResult, log *slog.Logger, public func(string) string) error {
 	lw := newLazyWriter(w, func(h http.Header) {
 		h.Set("Content-Type", "text/event-stream")
 		h.Set("Cache-Control", "no-cache")
@@ -354,7 +343,7 @@ func (l *Leg) serveStream(ctx context.Context, w http.ResponseWriter, rq *router
 	// trace records exactly the bytes the client received — including the
 	// heartbeat pings and the frame boundaries, which is where an SSE bug
 	// usually is.
-	tr := stream.New(l.translatorOptions(ctx, rq, seed, l.heartbeat, log))
+	tr := stream.New(l.translatorOptions(ctx, rq, seed, l.heartbeat, log, public))
 	res, err := tr.Run(ctx, upstream, stream.NewSSEWriter(obs.TraceFrom(ctx).TeeDownstream(lw)))
 	l.logResult(ctx, log, rq, res, seed, eff)
 
@@ -375,10 +364,10 @@ func (l *Leg) serveStream(ctx context.Context, w http.ResponseWriter, rq *router
 // Nothing is written until the fold succeeds, so every failure — including a
 // mid-stream one — reaches the client as a real HTTP status rather than as a
 // truncated answer dressed up as a complete one.
-func (l *Leg) serveAggregate(ctx context.Context, w http.ResponseWriter, rq *router.Request, upstream io.ReadCloser, seed *seed, eff request.EffortResult, log *slog.Logger) error {
+func (l *Leg) serveAggregate(ctx context.Context, w http.ResponseWriter, rq *router.Request, upstream io.ReadCloser, seed *seed, eff request.EffortResult, log *slog.Logger, public func(string) string) error {
 	agg := stream.NewAggregator()
 	// A keepalive has no meaning when nothing is on the wire yet.
-	tr := stream.New(l.translatorOptions(ctx, rq, seed, -1, log))
+	tr := stream.New(l.translatorOptions(ctx, rq, seed, -1, log, public))
 	res, err := tr.Run(ctx, upstream, agg)
 	l.logResult(ctx, log, rq, res, seed, eff)
 	if err != nil {
@@ -405,8 +394,9 @@ func (l *Leg) serveAggregate(ctx context.Context, w http.ResponseWriter, rq *rou
 // translatorOptions builds the Translator configuration shared by both sinks, so
 // the streaming and non-streaming paths cannot be configured differently by
 // accident.
-func (l *Leg) translatorOptions(ctx context.Context, rq *router.Request, seed *seed, heartbeat time.Duration, log *slog.Logger) stream.Options {
+func (l *Leg) translatorOptions(ctx context.Context, rq *router.Request, seed *seed, heartbeat time.Duration, log *slog.Logger, public func(string) string) stream.Options {
 	return stream.Options{
+		PublicDetail: public,
 		// Echo the upstream slug utraque actually called, not the model string
 		// the caller wrote. Claude Code (verified against 2.1.241) does not match
 		// this against its request, and it records what it receives into its own
@@ -547,12 +537,6 @@ func (l *Leg) catalogModel(ctx context.Context, cred auth.Credential, slug strin
 			"codex catalog unavailable; sending the requested reasoning effort unclamped",
 			slog.String("slug", slug), slog.String("err", err.Error()))
 		return cschema.CatalogModel{}
-	}
-	// The same read that clamps effort is also the freshest view of what Codex
-	// serves, so it is what keeps the router's aliases current. Doing it here
-	// rather than on a timer means no extra request and no extra goroutine.
-	if l.onCatalog != nil && len(models) > 0 {
-		l.onCatalog(models)
 	}
 	for i := range models {
 		if strings.EqualFold(models[i].Slug, slug) {

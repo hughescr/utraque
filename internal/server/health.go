@@ -2,12 +2,14 @@ package server
 
 import (
 	"bytes"
+	"crypto/subtle"
 	"encoding/json"
 	"math"
 	"net/http"
 	"strconv"
 
 	"github.com/hughescr/utraque/internal/apierr"
+	"github.com/hughescr/utraque/internal/proxyhdr"
 )
 
 // StatusOK is the healthy value of the /healthz "status" field.
@@ -57,7 +59,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		_ = apierr.Write(w, apierr.API("encoding the health response: %v", err))
 		return
 	}
-	if s.healthExtra != nil {
+	if s.healthExtra != nil && s.allowHealthExtra(r) {
 		for k, v := range s.healthExtra(r.Context()) {
 			if _, reserved := body[k]; reserved {
 				continue
@@ -82,6 +84,12 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_, _ = w.Write(buf)
+}
+
+// allowHealthExtra gates collection of diagnostics, not the liveness probe.
+func (s *Server) allowHealthExtra(r *http.Request) bool {
+	return s.cfg.LocalToken == "" || subtle.ConstantTimeCompare(
+		[]byte(r.Header.Get(proxyhdr.LocalToken)), []byte(s.cfg.LocalToken)) == 1
 }
 
 // roundSeconds keeps uptime to millisecond precision so the JSON stays short.

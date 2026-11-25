@@ -11,8 +11,10 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp/syntax"
 	"strings"
 	"sync"
+	"unicode/utf8"
 )
 
 // TraceWarning is the startup notice tracing prints. It is a WARN, not an
@@ -39,7 +41,7 @@ const TraceWarning = "REQUEST TRACING IS ENABLED: trace dumps contain PROMPT TEX
 //
 //	<stem>.request.json    the inbound request: method, path, allowlisted
 //	                       headers, and the body as it was received
-//	<stem>.upstream.sse    the raw upstream stream, byte for byte
+//	<stem>.upstream.sse    the upstream stream, credential-scrubbed
 //	<stem>.downstream.sse  the translated stream this proxy wrote back
 //	<stem>.downstream.json a non-streaming answer, which is a body and not a
 //	                       stream, so it is not pretended to be one
@@ -290,9 +292,10 @@ func (t *Trace) SetSummary(sum *Summary) {
 	t.meta.Summary = f
 }
 
-// TeeUpstream wraps the upstream body so every byte read from it is also
-// written to <id>.upstream.sse. Closing the returned ReadCloser closes the
-// original; the trace file is closed by Close.
+// TeeUpstream records credential-scrubbed reads in <id>.upstream.sse without
+// changing the bytes returned to the caller. An ambiguous overlong suffix is
+// omitted from the dump. Closing the reader closes the original; Close closes
+// the trace file.
 func (t *Trace) TeeUpstream(rc io.ReadCloser) io.ReadCloser {
 	if t == nil || rc == nil {
 		return rc
@@ -304,8 +307,8 @@ func (t *Trace) TeeUpstream(rc io.ReadCloser) io.ReadCloser {
 	return &teeReadCloser{rc: rc, w: sw}
 }
 
-// TeeDownstream wraps the client-facing writer so every translated byte is also
-// written to <id>.downstream.sse.
+// TeeDownstream records the translated stream in <id>.downstream.sse with the
+// same scrub/omission policy as TeeUpstream, without modifying client bytes.
 //
 // The wrapper re-exposes Flush because sse.FrameWriter type-switches on it to
 // decide whether frames stream or pool in a buffer; a tee that swallowed Flush
@@ -416,59 +419,182 @@ func (t *Trace) open(suffix string) *os.File {
 }
 
 // scrubWriter applies Scrub to everything written to a trace file. It is
-// line-oriented rather than chunk-oriented so a credential split across two
-// SSE writes is still matched: bytes are held until a newline arrives.
+// record-oriented rather than Write-oriented. A newline usually ends a record,
+// except inside (or awaiting) a credential that can continue on the next line.
 type scrubWriter struct {
-	mu  sync.Mutex
-	w   io.Writer
-	buf []byte
+	mu      sync.Mutex
+	w       io.Writer
+	buf     []byte
+	limit   int
+	context int // one synthetic word byte at buf[0] after a cut, or zero
+	recheck int // amortise scans of an unfinished multiline field
+	// omitted is terminal: set after an unresolvable overlong suffix or any
+	// failed write to w, so the writer never resumes mid-credential.
+	omitted bool
 }
 
-// maxScrubHold bounds the held tail, so a stream with no newline at all cannot
-// buffer the whole conversation in memory.
 const maxScrubHold = 1 << 20
 
-// scrubOverlap is how much of a force-flushed buffer is carried forward. A
-// newline-less stream that crosses maxScrubHold is flushed mid-line, and a
-// credential straddling that cut would be unrecognisable on both sides of it —
-// the one way a token could walk past the scrubber. Retaining the tail means the
-// next flush still sees the whole match. It is far longer than any shape
-// scrubRE matches, and it is bounded, so the memory ceiling holds.
-const scrubOverlap = 8 << 10
+// Every introducer is at most this many bytes, even with Unicode case folding.
+// Only the introducer is bounded; a JWT segment, whitespace or value is not.
+const startOverlap = utf8.UTFMax * len(`"authorization"`)
 
-func newScrubWriter(w io.Writer) *scrubWriter { return &scrubWriter{w: w} }
+func newScrubWriter(w io.Writer) *scrubWriter { return &scrubWriter{w: w, limit: maxScrubHold} }
+
+// A common SSE data record ends in a string and a closing brace. If the quote
+// is neither escaped nor preceded by colon/whitespace, it can't open a field
+// value. The brace rules out a pending key and a Bearer separator, so no match
+// can cross the following LF. Otherwise let the complete grammar decide.
+func mayCrossLF(b []byte) bool {
+	end := bytes.TrimRight(b, "\r\n")
+	if n := len(end); n > 0 && end[n-1] == '}' {
+		// Nested objects, arrays and trailing numeric fields can follow the
+		// last quote. The final brace still rules out a pending key/Bearer.
+		i := bytes.LastIndexByte(end, '"')
+		if i < 0 || i > 0 && !strings.ContainsRune("\\: \t\r\n\f", rune(end[i-1])) {
+			return false
+		}
+	}
+	return openAtLF.Match(b)
+}
 
 func (s *scrubWriter) Write(p []byte) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.buf = append(s.buf, p...)
-	// Flush every complete line; hold the tail until its newline arrives.
-	if i := bytes.LastIndexByte(s.buf, '\n'); i >= 0 {
-		if _, err := s.w.Write(ScrubBytes(s.buf[:i+1])); err != nil {
-			return 0, err
+	n := len(p)
+	for len(p) != 0 && !s.omitted {
+		// Scan only NEW bytes. Do not copy an arbitrarily large Write, or
+		// repeatedly scan an unfinished line arriving in small writes.
+		room := s.limit - len(s.buf)
+		next := p[:min(len(p), room)]
+		if i := bytes.LastIndexByte(next, '\n'); i >= 0 && len(s.buf)+i+1 >= s.recheck {
+			lines := next[:i+1]
+			if len(s.buf) != 0 {
+				s.hold(lines)
+				lines = s.buf
+			}
+			if mayCrossLF(lines) {
+				if len(s.buf) == 0 {
+					s.hold(lines)
+				}
+				s.recheck = min(s.limit, 2*len(s.buf))
+				p = p[i+1:]
+				continue
+			}
+			s.recheck = 0
+			if _, err := s.w.Write(ScrubBytes(lines)[s.context:]); err != nil {
+				return s.fail(n-len(p), err)
+			}
+			s.buf = s.buf[:0]
+			s.context = 0
+			p = p[i+1:]
+			continue
 		}
-		s.buf = append(s.buf[:0], s.buf[i+1:]...)
-	} else if len(s.buf) > maxScrubHold {
-		// Flush all but the last scrubOverlap bytes and carry those forward, so a
-		// credential lying across the cut is still matched on the next flush.
-		keep := len(s.buf) - scrubOverlap
-		if _, err := s.w.Write(ScrubBytes(s.buf[:keep])); err != nil {
-			return 0, err
+		s.hold(next)
+		p = p[len(next):]
+		if len(p) == 0 {
+			break
 		}
-		s.buf = append(s.buf[:0], s.buf[keep:]...)
+		if p[0] == '\n' && !openAtLF.Match(s.buf) { // exactly limit bytes of line content
+			if _, err := s.w.Write(ScrubBytes(s.buf)[s.context:]); err != nil {
+				return s.fail(n-len(p), err)
+			}
+			s.buf = s.buf[:0]
+			s.context, s.recheck = 0, 0
+			continue
+		}
+		// Invariant: the prefix ends outside every complete or extendable
+		// match, even an introducer not yet fully received. Only that prefix
+		// may be committed. If one unresolved match fills the entire buffer,
+		// omit the remaining trace rather than resume inside its value.
+		cut := s.limit - startOverlap
+		prefix := s.buf[:cut]
+		if scrubStartRE.Match(s.buf) {
+			// A partial UTF-8 rune may finish as a case-folded token
+			// character in the next Write. Test the prefix before that rune.
+			end := len(s.buf)
+			for i := end - 1; i >= max(0, end-utf8.UTFMax); i-- {
+				if utf8.RuneStart(s.buf[i]) {
+					if !utf8.FullRune(s.buf[i:]) {
+						end = i
+					}
+					break
+				}
+			}
+			if loc := openAtCut.FindIndex(s.buf[:end]); loc != nil {
+				cut = min(cut, loc[0])
+			}
+			for _, loc := range scrubRE.FindAllIndex(s.buf, -1) {
+				if loc[0] < cut && cut < loc[1] {
+					cut = loc[0]
+					break
+				}
+			}
+			prefix = ScrubBytes(s.buf[:cut])
+		}
+		if cut <= s.context {
+			if _, err := io.WriteString(s.w, Redacted); err != nil {
+				return s.fail(n-len(p), err)
+			}
+			s.omitted = true
+			s.buf = nil
+		} else {
+			if _, err := s.w.Write(prefix[s.context:]); err != nil {
+				return s.fail(n-len(p), err)
+			}
+			// A fresh slice would invent a word boundary (or lose one for
+			// a Unicode-folded initial letter). Preserve exactly the ASCII
+			// word/nonword bit used by RE2. No introducer begins with 'x'.
+			s.context = 0
+			if syntax.IsWordChar(rune(s.buf[cut-1])) {
+				s.context = 1
+			}
+			s.buf = append(s.buf[:s.context], s.buf[cut:]...)
+			if s.context != 0 {
+				s.buf[0] = 'x'
+			}
+			s.recheck = 0
+		}
 	}
-	return len(p), nil
+	return n, nil
 }
 
-// flushTail writes whatever never ended in a newline.
+// fail enters the terminal state after the underlying writer failed. What was
+// held is dropped and nothing is ever emitted again: the failed write may have
+// lost the bytes that introduced a credential, so a later successful write
+// could otherwise emit that credential's continuation in the clear. The caller
+// holds mu.
+func (s *scrubWriter) fail(n int, err error) (int, error) {
+	s.omitted = true
+	s.buf = nil
+	return n, err
+}
+
+// Cap both length AND capacity at limit, including for a single oversized Write.
+func (s *scrubWriter) hold(p []byte) {
+	n := len(s.buf) + len(p)
+	if n > cap(s.buf) {
+		b := make([]byte, len(s.buf), min(s.limit, max(n, 2*cap(s.buf))))
+		copy(b, s.buf)
+		s.buf = b
+	}
+	s.buf = append(s.buf, p...)
+}
+
+// flushTail writes whatever never ended in a newline. After a cut, buf[0] is
+// the synthetic context byte, which is scrubbed with the tail but not written.
 func (s *scrubWriter) flushTail() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if len(s.buf) == 0 {
+	if s.omitted || len(s.buf) == 0 {
 		return
 	}
-	_, _ = s.w.Write(ScrubBytes(s.buf))
+	if _, err := s.w.Write(ScrubBytes(s.buf)[s.context:]); err != nil {
+		_, _ = s.fail(0, err)
+		return
+	}
 	s.buf = s.buf[:0]
+	s.context = 0
 }
 
 // teeReadCloser mirrors reads into a trace writer.

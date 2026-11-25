@@ -66,7 +66,7 @@ func TestDeepSeekKeyFileWinsAndFailuresAreFatal(t *testing.T) {
 		"HOME":                       "/home/tester",
 		config.EnvDeepSeekAPIKey:     "environment-key-value",
 		config.EnvDeepSeekAPIKeyFile: path,
-		config.EnvDeepSeekBaseURL:    "http://deepseek.test/anthropic/",
+		config.EnvDeepSeekBaseURL:    "https://deepseek.test/anthropic/",
 	}))
 	if err != nil {
 		t.Fatalf("LoadFrom: %v", err)
@@ -74,7 +74,7 @@ func TestDeepSeekKeyFileWinsAndFailuresAreFatal(t *testing.T) {
 	if c.DeepSeek.APIKey != "file-key-value" || c.DeepSeek.APIKeyFile != path {
 		t.Errorf("DeepSeek credential = %+v, want explicit file contents", c.DeepSeek)
 	}
-	if c.DeepSeek.BaseURL != "http://deepseek.test/anthropic" {
+	if c.DeepSeek.BaseURL != "https://deepseek.test/anthropic" {
 		t.Errorf("DeepSeek.BaseURL = %q", c.DeepSeek.BaseURL)
 	}
 
